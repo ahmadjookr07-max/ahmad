@@ -4534,7 +4534,7 @@ def _batch_self_test(output_path: Path, fixture_dir: Path) -> int:
 
 def _gui_smoke_test(output_path: Path) -> int:
     """Open the real main window under a realistic layout load, capture it, and exit."""
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("Ahmed Al-Faifi")
@@ -4816,7 +4816,7 @@ def main() -> int:
             return 2
         return _gui_smoke_test(Path(sys.argv[index + 1]))
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("Ahmed Al-Faifi")
