@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
-sys.path.insert(0, str(HERE / "app_v2" / "src"))
-sys.path.insert(0, str(HERE / "app_v2" / "owner_studio"))
+sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE.parent / "owner_studio"))
 
 import owner_studio as osd  # noqa: E402
 from engine_v2 import license_v2 as lv  # noqa: E402
@@ -49,9 +49,19 @@ def main() -> None:
         shutil.rmtree(data, ignore_errors=True)
     data.mkdir(parents=True, exist_ok=True)
 
-    # انسخ الشفرة الحقيقية
+    # انسخ الشفرة الحقيقية إن وجدت، وإلا ولّد شفرة اختبار كاملة
     real = HERE / "owner_tool" / "owner_secrets.json"
-    shutil.copy(real, osd.SECRETS_FILE)
+    if real.is_file():
+        shutil.copy(real, osd.SECRETS_FILE)
+    else:
+        priv, pub = lv.generate_owner_keypair()
+        pqc_priv, pqc_pub = lv.generate_pqc_keypair()
+        sec = {"ed25519_private": priv, "ed25519_public": pub,
+               "mldsa65_private": pqc_priv, "mldsa65_public": pqc_pub,
+               "totp_secret": lv.generate_totp_secret(),
+               "created_at": int(time.time())}
+        osd.SECRETS_FILE.write_text(
+            json.dumps(sec, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 1) الإقلاع
     app = osd.OwnerStudio()
@@ -98,6 +108,9 @@ def main() -> None:
     check("توقيع ML-DSA-65 المقاوم للكم صحيح", ok_pqc)
 
     # المفتاح مرفوض لبصمة مختلفة (منطق التحقق الكامل)
+    # غرس مفاتيح الاختبار في منظومة الترخيص (كما تُغرس مفاتيح المالك عند البناء)
+    lv.OWNER_PUBLIC_KEY_B64 = app.secrets["ed25519_public"]
+    lv.OWNER_PQC_PUBLIC_KEY_B64 = app.secrets["mldsa65_public"]
     info = lv.activate_with_key(key, app.secrets["ed25519_public"])
     check("رفض المفتاح على جهاز مختلف (حماية البصمة)",
           not info.valid and "جهاز آخر" in info.status, info.status)
@@ -191,9 +204,10 @@ def main() -> None:
     # ترحيل السجل القديم devices_log.json
     shutil.rmtree(data, ignore_errors=True)
     data.mkdir(parents=True, exist_ok=True)
-    old_log = HERE / "owner_tool" / "devices_log.json"
+    old_log = osd.BASE.parent.parent / "owner_tool" / "devices_log.json"
     had_old = old_log.is_file()
     if not had_old:
+        old_log.parent.mkdir(parents=True, exist_ok=True)
         old_log.write_text(json.dumps([{
             "fingerprint": "AAAA-BBBB-CCCC-DDDD", "plan": "monthly",
             "days": 30, "license_id": "test123", "note": "قديم",

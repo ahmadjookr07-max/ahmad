@@ -4,8 +4,8 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/windows_app")
+sys.path.insert(0, "/home/ubuntu/market-image-studio-v2/src")
+sys.path.insert(0, "/home/ubuntu/market-image-studio-v2/windows_app")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -32,7 +32,9 @@ except Exception:
 
 # 1) مفاتيح مالك حقيقية مغروسة (محاكاة ما يحدث قبل البناء)
 priv, pub = lv.generate_owner_keypair()
+pqc_priv, pqc_pub = lv.generate_pqc_keypair()
 lv.OWNER_PUBLIC_KEY_B64 = pub
+lv.OWNER_PQC_PUBLIC_KEY_B64 = pqc_pub
 secret = lv.generate_totp_secret()
 license_ui.OWNER_TOTP_SECRET = secret
 
@@ -50,7 +52,8 @@ check("eula_flag", license_ui.eula_accepted())
 adlg = license_ui.ActivationDialog()
 check("activation_shows_fp",
       adlg._fp_lbl.text() == lv.machine_fingerprint())
-key = lv.make_activation_key(priv, lv.machine_fingerprint(), "yearly", 365)
+key = lv.make_activation_key(priv, lv.machine_fingerprint(), "yearly", 365,
+                             pqc_private_key_b64=pqc_priv)
 adlg.key_edit.setPlainText(key)
 # _activate يعرض QMessageBox — نستدعي المنطق مباشرة
 info = lv.activate_with_key(key, pub)
@@ -93,7 +96,7 @@ info2 = lv.check_license(pub)
 check("revoked_blocks", not info2.valid, info2.status)
 
 # 10) BatchRefineDialog تُبنى وworkers من إعدادات المالك
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/windows_app")
+sys.path.insert(0, "/home/ubuntu/market-image-studio-v2/windows_app")
 import v2_ui  # noqa: E402
 bdlg = v2_ui.BatchRefineDialog()
 check("batch_dialog_build", bdlg.windowTitle().startswith("ضبط الصور"))

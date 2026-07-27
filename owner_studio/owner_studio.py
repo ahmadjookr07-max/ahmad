@@ -62,7 +62,7 @@ except Exception:  # pragma: no cover
     lv = None
 
 APP_TITLE = "استوديو المالك — Market Image Studio"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # ------------------------------------------------------------------ ألوان
 C_BG = "#101418"          # خلفية داكنة أنيقة
@@ -133,9 +133,10 @@ def save_customers(rows: list[dict]) -> None:
         json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-PLAN_AR = {"monthly": "شهري", "yearly": "سنوي",
+PLAN_AR = {"monthly": "شهري", "yearly": "سنوي", "weekly": "أسبوعي",
            "lifetime": "دائم", "trial": "تجريبي"}
-PLAN_DAYS = {"monthly": 30, "yearly": 365, "lifetime": 0, "trial": 7}
+PLAN_DAYS = {"monthly": 30, "yearly": 365, "weekly": 7,
+             "lifetime": 0, "trial": 3}
 
 
 def fmt_expiry(issued_at: int, days: int) -> str:
@@ -447,7 +448,8 @@ class OwnerStudio(tk.Tk):
                 activeforeground=C_GOLD, font=F_BODY, indicatoron=True)
             rb.grid(row=0, column=col, sticky="e", padx=6)
 
-        mk_plan("trial", "تجريبي (3 أيام)", 3)
+        mk_plan("trial", "تجريبي (3 أيام)", 4)
+        mk_plan("weekly", "أسبوعي (7)", 3)
         mk_plan("monthly", "شهري (30)", 2)
         mk_plan("yearly", "سنوي (365)", 1)
         mk_plan("lifetime", "دائم", 0)

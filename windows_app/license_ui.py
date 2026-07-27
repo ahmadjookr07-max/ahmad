@@ -35,7 +35,11 @@ def _eula_text() -> str:
               Path(getattr(sys, "_MEIPASS", "")) / "EULA_ar.txt"):
         try:
             if p and Path(p).is_file():
-                return Path(p).read_text(encoding="utf-8")
+                raw = Path(p).read_bytes()
+                # ملف EULA لـ NSIS محفوظ UTF-16LE بـ BOM؛ ندعم الترميزين
+                if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                    return raw.decode("utf-16")
+                return raw.decode("utf-8")
         except Exception:
             continue
     return ("اتفاقية ترخيص المستخدم النهائي: البرنامج مرخّص وليس مبيعًا، ولا يحق "
@@ -424,20 +428,56 @@ def ensure_activated(parent=None) -> bool:
     return dlg.exec() == QDialog.Accepted
 
 
+_PLAN_BADGE_AR = {"monthly": "شهري", "yearly": "سنوي",
+                  "lifetime": "دائم", "trial": "تجريبي",
+                  "weekly": "أسبوعي"}
+
+
+def _fmt_expiry_date(info) -> str:
+    exp = int(getattr(info, "expires_at", 0) or 0)
+    if not exp:
+        return ""
+    import time as _t
+    return _t.strftime("%Y-%m-%d", _t.localtime(exp))
+
+
 def license_badge_text() -> str:
     """نص الشارة الحقيقي — يقرأ الحالة الفعلية (ترخيص أو تجربة)
-    ويعرض المدة المتبقية الصحيحة دائمًا — لا يظهر "دائم" إلا للترخيص
-    الدائم الفعلي الموقّع من المالك."""
+    ويعرض نوع الخطة + المدة المتبقية + تاريخ الانتهاء دائمًا —
+    لا يظهر "دائم" إلا للترخيص الدائم الفعلي الموقّع من المالك."""
     info = lv.effective_license()
     if not info.valid:
         if getattr(info, "plan", "") == "trial":
             return "انتهت التجربة — يلزم تفعيل"
         return "الاشتراك: غير مفعل"
+    exp_txt = _fmt_expiry_date(info)
     if getattr(info, "plan", "") == "trial":
-        return f"تجربة مجانية: متبق {info.days_left} أيام"
+        return (f"تجربة مجانية: متبق {info.days_left} أيام"
+                + (f" — تنتهي {exp_txt}" if exp_txt else ""))
     if info.days_left < 0:
-        return "الاشتراك: دائم"
-    return f"الاشتراك: متبق {info.days_left} يومًا"
+        return "الاشتراك: دائم ✔"
+    plan_ar = _PLAN_BADGE_AR.get(getattr(info, "plan", ""), "")
+    plan_part = f" ({plan_ar})" if plan_ar else ""
+    return (f"الاشتراك{plan_part}: متبق {info.days_left} يومًا"
+            + (f" — ينتهي {exp_txt}" if exp_txt else ""))
+
+
+def license_badge_style() -> str:
+    """لون الشارة حسب الحالة: أزرق طبيعي، برتقالي قرب الانتهاء (≤7 أيام)،
+    أحمر للمنتهي/غير المفعل، أخضر للدائم."""
+    base = ("font-weight:700; padding:4px 10px; border-radius:8px; "
+            "border:1px solid %s; background:%s; color:%s;")
+    try:
+        info = lv.effective_license()
+    except Exception:
+        return base % ("#c9d8ef", "#eef3fb", "#2c5aa0")
+    if not info.valid:
+        return base % ("#e8b4b4", "#fdeeee", "#b02a2a")
+    if info.days_left < 0:
+        return base % ("#bfe3c8", "#eefaf1", "#1e7d3c")
+    if info.days_left <= 7:
+        return base % ("#f0d5a8", "#fdf6e9", "#a5690f")
+    return base % ("#c9d8ef", "#eef3fb", "#2c5aa0")
 
 
 def install_license_badge(main_window) -> None:
@@ -448,9 +488,16 @@ def install_license_badge(main_window) -> None:
         return
     badge = QLabel(license_badge_text())
     badge.setObjectName("v2LicenseBadge")
-    badge.setStyleSheet(
-        "color:#2c5aa0; font-weight:700; padding:4px 10px;"
-        "background:#eef3fb; border:1px solid #c9d8ef; border-radius:8px;")
+    badge.setStyleSheet(license_badge_style())
+    try:
+        info = lv.effective_license()
+        exp_txt = _fmt_expiry_date(info)
+        tip = (f"رقم الترخيص: {getattr(info, 'license_id', '') or '—'}\n"
+               f"الحالة: {getattr(info, 'status', '')}"
+               + (f"\nتاريخ الانتهاء: {exp_txt}" if exp_txt else ""))
+        badge.setToolTip(tip)
+    except Exception:
+        pass
     owner_btn = QPushButton("المالك")
     owner_btn.setObjectName("v2OwnerBtn")
     owner_btn.setMinimumHeight(40)
@@ -465,7 +512,10 @@ def install_license_badge(main_window) -> None:
         from PySide6.QtCore import QTimer
         timer = QTimer(main_window)
         timer.setInterval(60 * 60 * 1000)
-        timer.timeout.connect(lambda: badge.setText(license_badge_text()))
+        def _refresh_badge():
+            badge.setText(license_badge_text())
+            badge.setStyleSheet(license_badge_style())
+        timer.timeout.connect(_refresh_badge)
         timer.start()
         main_window._v2_badge_timer = timer
     except Exception:
