@@ -1,0 +1,56 @@
+name: Build Owner Studio EXE
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "owner_studio/**"
+      - ".github/workflows/build-owner-studio.yml"
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography dilithium-py qrcode pyinstaller
+      - name: Prepare embedded license engine
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path owner_studio/engine_v2 | Out-Null
+          Copy-Item src/engine_v2/license_v2.py owner_studio/engine_v2/
+          Copy-Item src/engine_v2/_ed25519_pure.py owner_studio/engine_v2/ -ErrorAction SilentlyContinue
+          Set-Content owner_studio/engine_v2/__init__.py ""
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          cd owner_studio
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "AhmedAlFaifiOwnerStudio" `
+            --icon "../windows_app/assets/app_icon.ico" `
+            --add-data "engine_v2;engine_v2" `
+            --add-data "../windows_app/assets/app_icon_v2.png;assets" `
+            --hidden-import "engine_v2.license_v2" `
+            owner_studio.py
+          if (-not (Test-Path "dist/AhmedAlFaifiOwnerStudio.exe")) { throw "EXE missing" }
+      - name: Smoke test (launch 15s)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "owner_studio/dist/AhmedAlFaifiOwnerStudio.exe" -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { throw "Owner Studio crashed on launch (exit $($p.ExitCode))" }
+          Stop-Process -Id $p.Id -Force
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OwnerStudio-1.0.0
+          path: owner_studio/dist/AhmedAlFaifiOwnerStudio.exe
+          retention-days: 30
