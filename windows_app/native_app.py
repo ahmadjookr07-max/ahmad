@@ -275,6 +275,8 @@ class BatchWorker(QThread):
         remove_background: bool,
         enhance_product: bool,
         image_options: FinalImageOptions | None = None,
+        blur_dates: bool = True,
+        text_polish: bool = True,
     ) -> None:
         super().__init__()
         self.catalog_path = catalog_path
@@ -283,6 +285,8 @@ class BatchWorker(QThread):
         self.remove_background = remove_background
         self.enhance_product = enhance_product
         self.image_options = image_options
+        self.blur_dates = blur_dates
+        self.text_polish = text_polish
 
     def run(self) -> None:
         try:
@@ -297,9 +301,38 @@ class BatchWorker(QThread):
                 maximum_barcode_tier=3,
                 progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
             )
+            self._quality_post_pass(result)
             self.completed.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+    def _quality_post_pass(self, result) -> None:
+        """تمريرة جودة لاحقة على النواتج: حدة نصية ذكية تبقي كتابات
+        المنتج والحقائق الغذائية واضحة + طمس التواريخ المطبوعة تلقائيًا.
+        آمنة: لا تعيد الحفظ إلا إذا تحسّنت المقروئية أو طُمس تاريخ."""
+        if not (self.text_polish or self.blur_dates):
+            return
+        try:
+            from engine_v2.quality_v2 import polish_output_file
+        except Exception:
+            return
+        items = getattr(result, "items", None) or []
+        seen: set[str] = set()
+        total = len(items)
+        for i, item in enumerate(items):
+            path = getattr(item, "output_path", "") or ""
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            try:
+                if Path(path).is_file():
+                    polish_output_file(path, quality=101,
+                                       blur_dates=self.blur_dates)
+            except Exception:
+                continue
+            if total and i % 5 == 0:
+                self.progress_changed.emit(
+                    total, total, f"تحسين الوضوح النهائي {i + 1}/{total}")
 
 
 class ManualLinkWorker(QThread):
@@ -1408,11 +1441,35 @@ class MainWindow(QMainWindow):
         framing_row.addWidget(QLabel("الجودة:"))
         self.webp_quality_combo = QComboBox()
         self.webp_quality_combo.setObjectName("webpQuality")
-        self.webp_quality_combo.addItem("ممتازة 94", 94)
+        self.webp_quality_combo.addItem("فائقة — بلا فقدان 100", 100)
         self.webp_quality_combo.addItem("قصوى 97", 97)
+        self.webp_quality_combo.addItem("ممتازة 94", 94)
         self.webp_quality_combo.addItem("اقتصادية 90", 90)
+        self.webp_quality_combo.setCurrentIndex(0)
+        self.webp_quality_combo.setToolTip(
+            "فائقة: جودة كاملة بلا أي فقدان — كتابات المنتج والحقائق الغذائية تبقى واضحة تمامًا"
+        )
         framing_row.addWidget(self.webp_quality_combo, 1)
         options_layout.addLayout(framing_row)
+        quality_row = QHBoxLayout()
+        self.blur_dates_check = QCheckBox("طمس تواريخ الإنتاج/الانتهاء تلقائيًا")
+        self.blur_dates_check.setObjectName("blurDates")
+        self.blur_dates_check.setChecked(True)
+        self.blur_dates_check.setToolTip(
+            "يكشف التواريخ المطبوعة على العبوة (EXP/PROD وأرقام التواريخ) ويطمسها\n"
+            "بتمويه طفيف بلون المنتج نفسه — دون المساس بالحقائق الغذائية أو الباركود.\n"
+            "إن لم يُكشف تاريخ تلقائيًا، استخدم أداة (طمس تاريخ) اليدوية في المحرر."
+        )
+        quality_row.addWidget(self.blur_dates_check)
+        self.text_polish_check = QCheckBox("وضوح فائق للكتابات (ذكي)")
+        self.text_polish_check.setObjectName("textPolish")
+        self.text_polish_check.setChecked(True)
+        self.text_polish_check.setToolTip(
+            "محرك حدة ذكي يتعرف على مناطق النصوص والجداول على المنتج\n"
+            "ويعزز وضوحها بعد المعالجة — لا يحفظ إلا إذا تحسّنت المقروئية فعليًا"
+        )
+        quality_row.addWidget(self.text_polish_check)
+        options_layout.addLayout(quality_row)
 
         dimensions = QLabel("WebP ‏800×700 • خلفية بيضاء عند العزل • الاسم: رقم الصنف_حبه")
         dimensions.setWordWrap(True)
@@ -1602,7 +1659,7 @@ class MainWindow(QMainWindow):
         self.results_table = QTableWidget(0, 3)
         self.results_table.setObjectName("resultsTable")
         self.results_table.setHorizontalHeaderLabels(["الصورة / الحالة", "الصنف / الباركود", "اسم الصنف"])
-        self.results_table.setIconSize(QSize(54, 54))
+        self.results_table.setIconSize(QSize(80, 80))
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.results_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -1610,8 +1667,8 @@ class MainWindow(QMainWindow):
         self.results_table.setWordWrap(True)
         self.results_table.setTextElideMode(Qt.ElideNone)
         self.results_table.verticalHeader().setVisible(False)
-        self.results_table.verticalHeader().setMinimumSectionSize(68)
-        self.results_table.verticalHeader().setDefaultSectionSize(76)
+        self.results_table.verticalHeader().setMinimumSectionSize(88)
+        self.results_table.verticalHeader().setDefaultSectionSize(96)
         self.results_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.results_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.results_table.verticalScrollBar().setSingleStep(28)
@@ -1623,7 +1680,7 @@ class MainWindow(QMainWindow):
         table_header.setSectionResizeMode(0, QHeaderView.Fixed)
         table_header.setSectionResizeMode(1, QHeaderView.Fixed)
         table_header.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.results_table.setColumnWidth(0, 136)
+        self.results_table.setColumnWidth(0, 168)
         self.results_table.setColumnWidth(1, 148)
         self.results_table.itemSelectionChanged.connect(self._show_selected_preview)
         self.results_table.doubleClicked.connect(self._open_selected_file)
@@ -1747,6 +1804,12 @@ class MainWindow(QMainWindow):
             "يربط الصفوف غير المؤكدة المحددة بصنف المرجع مع إبقاء كل صورة مستقلة"
         )
         self.reference_group_link_button.clicked.connect(self._start_reference_group_link)
+        self.link_by_image_button = QPushButton("ربط بصورة أخرى")
+        self.link_by_image_button.setObjectName("linkToolButton")
+        self.link_by_image_button.setToolTip(
+            "حدد صورة/عدة صور غير مرتبطة ثم اختر أي صورة مرتبطة — حتى البعيدة — لربطها بنفس صنفها"
+        )
+        self.link_by_image_button.clicked.connect(self._start_link_by_image)
         self.manual_reference_badge = QLabel("لا يوجد مرجع")
         self.manual_reference_badge.setObjectName("manualReferenceBadge")
         self.manual_reference_badge.setAlignment(Qt.AlignCenter)
@@ -1758,6 +1821,7 @@ class MainWindow(QMainWindow):
             self.use_reference_button,
             self.suggest_group_button,
             self.reference_group_link_button,
+            self.link_by_image_button,
             self.jump_to_previews_button,
         ):
             button.setMinimumHeight(30)
@@ -1768,6 +1832,7 @@ class MainWindow(QMainWindow):
         quick_controls.addWidget(self.use_reference_button)
         quick_controls.addWidget(self.suggest_group_button)
         quick_controls.addWidget(self.reference_group_link_button)
+        quick_controls.addWidget(self.link_by_image_button)
         quick_controls.addWidget(self.jump_to_previews_button)
         quick_controls.addWidget(self.manual_reference_badge, 1)
         manual_layout.addLayout(quick_controls)
@@ -2812,8 +2877,26 @@ class MainWindow(QMainWindow):
             QGroupBox { background: #fbfcfe; border: 1px solid #dce4ef; border-radius: 8px; margin-top: 12px; padding-top: 10px; font-weight: 700; }
             QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 8px; color: #27496d; }
             QLineEdit, QComboBox, QListWidget, QTableWidget { background: white; border: 1px solid #ccd7e4; border-radius: 6px; padding: 6px; selection-background-color: #d8eaff; selection-color: #102a43; }
-            QComboBox { min-height: 26px; padding-left: 8px; padding-right: 8px; }
+            QToolTip { background: #10233d; color: #eaf3ff; border: 1px solid #3f6da0; border-radius: 6px; padding: 7px 10px; font-size: 11px; font-weight: 700; }
+            QComboBox { min-height: 26px; padding-left: 8px; padding-right: 8px; background: #ffffff; border: 1px solid #c4d2e0; border-radius: 7px; }
+            QComboBox:hover { border-color: #5b9bd0; }
+            QComboBox:focus { border: 2px solid #2c8ac6; }
             QComboBox::drop-down { border: none; width: 22px; }
+            QComboBox QAbstractItemView { background: #ffffff; color: #17324d; border: 1px solid #b9cbdd; border-radius: 7px; selection-background-color: #d9ebff; selection-color: #0f2747; padding: 4px; }
+            QLineEdit { background: #ffffff; border: 1px solid #c4d2e0; border-radius: 7px; padding: 6px 9px; selection-background-color: #bcd9f2; }
+            QLineEdit:hover { border-color: #5b9bd0; }
+            QLineEdit:focus { border: 2px solid #2c8ac6; background: #fbfdff; }
+            QMenu { background: #ffffff; color: #17324d; border: 1px solid #b9cbdd; border-radius: 8px; padding: 5px; }
+            QMenu::item { padding: 7px 24px; border-radius: 5px; }
+            QMenu::item:selected { background: #d9ebff; color: #0f2747; }
+            QScrollBar:vertical { width: 12px; background: #edf2f8; border-radius: 6px; margin: 2px; }
+            QScrollBar::handle:vertical { background: #a7bccf; min-height: 36px; border-radius: 5px; }
+            QScrollBar::handle:vertical:hover { background: #2c8ac6; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal { height: 12px; background: #edf2f8; border-radius: 6px; margin: 2px; }
+            QScrollBar::handle:horizontal { background: #a7bccf; min-width: 36px; border-radius: 5px; }
+            QScrollBar::handle:horizontal:hover { background: #2c8ac6; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
             QLineEdit#catalogPath { background: #ffffff; color: #17324d; font-weight: 700; padding: 8px 10px; }
             QLabel#catalogStatus { color: #19704a; background: #edf9f3; border: 1px solid #bfe5d0; border-radius: 5px; padding: 5px 8px; font-size: 9px; }
             QListWidget#productImageList { padding: 4px; }
@@ -2821,15 +2904,22 @@ class MainWindow(QMainWindow):
             QTableWidget#resultsTable { padding: 0px; }
             QHeaderView::section { background: #eef3f8; color: #27496d; border: none; border-bottom: 1px solid #ccd7e4; padding: 8px; font-weight: 700; }
             QPushButton { border-radius: 7px; padding: 8px 13px; font-weight: 700; }
-            QPushButton#primaryButton { background: #1769aa; color: white; border: 1px solid #1769aa; }
+            QPushButton:focus { outline: none; }
+            QPushButton#primaryButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e7ec2, stop:1 #1769aa); color: white; border: 1px solid #135f9a; }
             QPushButton#primaryButton:hover { background: #125a93; }
+            QPushButton#primaryButton:pressed { background: #0e4c7d; }
             QPushButton#secondaryButton { background: #eef5fc; color: #165b91; border: 1px solid #b8cee2; }
             QPushButton#secondaryButton:hover { background: #dfeefa; }
             QPushButton#textButton { background: transparent; color: #566b80; border: none; padding: 5px; }
             QPushButton#textButton:hover { color: #b42335; }
             QPushButton:disabled { background: #e5eaf0; color: #96a3b1; border-color: #d5dce5; }
-            QProgressBar { background: #e8eef5; border: none; border-radius: 7px; height: 15px; text-align: center; color: #27496d; }
-            QProgressBar::chunk { background: #2c8ac6; border-radius: 7px; }
+            QProgressBar { background: #e8eef5; border: none; border-radius: 7px; height: 15px; text-align: center; color: #27496d; font-weight: 800; }
+            QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2c8ac6, stop:1 #35b3a5); border-radius: 7px; }
+            QTableWidget { selection-background-color: #d9ebff; selection-color: #0f2747; alternate-background-color: #f7fafd; }
+            QCheckBox { spacing: 7px; }
+            QCheckBox::indicator { width: 17px; height: 17px; border: 1px solid #9fb4c8; border-radius: 4px; background: #ffffff; }
+            QCheckBox::indicator:hover { border-color: #2c8ac6; }
+            QCheckBox::indicator:checked { background: #1769aa; border-color: #135f9a; }
             QFrame#statCard { background: #f8fafc; border: 1px solid #dce4ef; border-radius: 9px; }
             QFrame#previewFrame { background: #f8fafc; border: 1px solid #dce4ef; border-radius: 8px; }
             QLabel#previewTitle { color: #49647e; font-weight: 700; }
@@ -3102,6 +3192,8 @@ class MainWindow(QMainWindow):
             self.remove_background_check.isChecked(),
             self.enhance_product_check.isChecked(),
             self._final_image_options(),
+            blur_dates=self.blur_dates_check.isChecked(),
+            text_polish=self.text_polish_check.isChecked(),
         )
         self.batch_worker.progress_changed.connect(self._on_progress)
         self.batch_worker.completed.connect(self._on_batch_completed)
@@ -3348,9 +3440,15 @@ class MainWindow(QMainWindow):
         self._restore_results_position(position)
 
     def _result_thumbnail_icon(self, item: BatchItemResult) -> QIcon:
-        """Load a small source thumbnail without decoding the full camera image each time."""
-        path = self._result_path(item.source_path)
-        if path is None or not path.is_file():
+        """مصغرة النتيجة المعالجة (خلفية بيضاء) إن وُجدت، وإلا المصدر — لتمييز المربوط بنظرة."""
+        path = None
+        for candidate in (item.output_path, item.review_path, item.source_path):
+            if candidate:
+                p = self._result_path(candidate)
+                if p is not None and p.is_file():
+                    path = p
+                    break
+        if path is None:
             return QIcon()
         try:
             stat = path.stat()
@@ -3364,18 +3462,54 @@ class MainWindow(QMainWindow):
         reader.setAutoTransform(True)
         source_size = reader.size()
         if source_size.isValid():
-            reader.setScaledSize(source_size.scaled(QSize(58, 58), Qt.KeepAspectRatio))
+            reader.setScaledSize(source_size.scaled(QSize(84, 84), Qt.KeepAspectRatio))
         image = reader.read()
         if image.isNull():
             return QIcon()
         pixmap = QPixmap.fromImage(image)
-        if pixmap.width() > 58 or pixmap.height() > 58:
-            pixmap = pixmap.scaled(58, 58, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if pixmap.width() > 84 or pixmap.height() > 84:
+            pixmap = pixmap.scaled(84, 84, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         icon = QIcon(pixmap)
-        if len(self._result_thumbnail_cache) >= 320:
+        if len(self._result_thumbnail_cache) >= 1200:
             self._result_thumbnail_cache.pop(next(iter(self._result_thumbnail_cache)), None)
         self._result_thumbnail_cache[cache_key] = icon
         return icon
+
+    def _start_lazy_thumbnails(self) -> None:
+        """تعبئة مصغرات الجدول على دفعات صغيرة دون تجميد الواجهة — سلس حتى مع مئات الصور."""
+        timer = getattr(self, "_thumb_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._thumb_next_row = 0
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(15)
+        self._thumb_timer.timeout.connect(self._load_thumbnail_batch)
+        self._thumb_timer.start()
+
+    def _load_thumbnail_batch(self) -> None:
+        table = self.results_table
+        total = table.rowCount()
+        row = getattr(self, "_thumb_next_row", 0)
+        if row >= total or not self._result_items_by_name:
+            if getattr(self, "_thumb_timer", None) is not None:
+                self._thumb_timer.stop()
+            return
+        end = min(row + 16, total)
+        table.setUpdatesEnabled(False)
+        try:
+            while row < end:
+                cell = table.item(row, 0)
+                if cell is not None and cell.icon().isNull():
+                    name = cell.data(Qt.UserRole)
+                    result_item = self._result_items_by_name.get(name)
+                    if result_item is not None:
+                        icon = self._result_thumbnail_icon(result_item)
+                        if not icon.isNull():
+                            cell.setIcon(icon)
+                row += 1
+        finally:
+            table.setUpdatesEnabled(True)
+        self._thumb_next_row = row
 
     def _populate_results(self, restore_position: tuple[str, int, int] | None = None) -> None:
         self.results_table.setRowCount(0)
@@ -3409,7 +3543,7 @@ class MainWindow(QMainWindow):
                 ).strip()
 
                 status_cell = QTableWidgetItem(status_text)
-                status_cell.setIcon(self._result_thumbnail_icon(result_item))
+                # تحميل كسول للمصغرات: لا نقرأ الصورة هنا — تُعبّأ على دفعات لاحقاً لسلاسة الواجهة
                 status_cell.setData(Qt.UserRole, result_item.source_name)
                 status_cell.setTextAlignment(Qt.AlignCenter)
                 status_cell.setToolTip(tooltip)
@@ -3448,8 +3582,9 @@ class MainWindow(QMainWindow):
             self.results_table.viewport().update()
         self.results_table.resizeRowsToContents()
         for row in range(self.results_table.rowCount()):
-            self.results_table.setRowHeight(row, max(70, min(104, self.results_table.rowHeight(row))))
+            self.results_table.setRowHeight(row, max(90, min(124, self.results_table.rowHeight(row))))
         QTimer.singleShot(0, self.results_table.resizeRowsToContents)
+        self._start_lazy_thumbnails()
         self._update_summary(self.current_result)
         result_count = self.results_table.rowCount()
         self._apply_result_filters()
@@ -3886,6 +4021,85 @@ class MainWindow(QMainWindow):
             targets,
             reference.item_code,
             f"جارٍ ربط {len(targets)} صورة بالصنف {reference.item_code} من المرجع المعتمد...",
+        )
+
+    def _start_link_by_image(self) -> None:
+        """ربط حر: اختر أي صورة مرتبطة (ولو بعيدة) لربط الصور المحددة بصنفها."""
+        targets = self._selected_link_targets()
+        if not targets:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "حدد أولًا الصورة (أو عدة صور بـ Ctrl) التي تريد ربطها، ثم اضغط (ربط بصورة أخرى).",
+            )
+            return
+        linked_items = [
+            item for item in (self.current_result.items if self.current_result else [])
+            if item.item_code and item.source_name not in {t.source_name for t in targets}
+        ]
+        if not linked_items:
+            QMessageBox.information(
+                self, APP_NAME, "لا توجد صور مرتبطة بعد لاختيار الصنف منها.")
+            return
+
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QListWidget,
+                                       QListWidgetItem, QVBoxLayout, QLineEdit,
+                                       QLabel)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("اختر الصورة المرتبطة مصدر الصنف")
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.resize(560, 620)
+        lay = QVBoxLayout(dlg)
+        hint = QLabel(
+            f"ستُربط {len(targets)} صورة بصنف الصورة التي تختارها هنا —"
+            " ابحث بالاسم أو الرقم أو انقر مباشرة على الصورة المطلوبة")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        search = QLineEdit()
+        search.setPlaceholderText("ابحث: اسم الصنف أو رقمه أو الباركود…")
+        search.setMinimumHeight(38)
+        lay.addWidget(search)
+        lst = QListWidget()
+        lst.setIconSize(QSize(72, 72))
+        lst.setSpacing(4)
+        lay.addWidget(lst, 1)
+
+        def _fill(text: str = "") -> None:
+            lst.clear()
+            needle = (text or "").strip()
+            for item in linked_items:
+                hay = f"{item.product_name} {item.item_code} {item.barcode}"
+                if needle and needle not in hay:
+                    continue
+                label = (f"{item.product_name or 'صنف'}\n"
+                         f"{item.item_code} • {item.barcode or 'بلا باركود'}")
+                li = QListWidgetItem(self._result_thumbnail_icon(item), label)
+                li.setData(Qt.UserRole, item.item_code)
+                lst.addItem(li)
+
+        search.textChanged.connect(_fill)
+        _fill()
+        buttons = QDialogButtonBox()
+        ok_btn = buttons.addButton("ربط الآن", QDialogButtonBox.AcceptRole)
+        buttons.addButton("إلغاء", QDialogButtonBox.RejectRole)
+        ok_btn.setMinimumHeight(40)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
+        lay.addWidget(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        chosen = lst.currentItem()
+        if chosen is None:
+            QMessageBox.information(self, APP_NAME, "لم تختر أي صورة — لم يتغير شيء.")
+            return
+        reference = str(chosen.data(Qt.UserRole) or "").strip()
+        if not reference:
+            return
+        self._begin_manual_links(
+            targets,
+            reference,
+            f"جارٍ ربط {len(targets)} صورة بالصنف {reference} من الصورة المختارة…",
         )
 
     def _begin_manual_links(

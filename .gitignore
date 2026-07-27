@@ -8,3 +8,5 @@ resources/models/*.onnx
 owner_secrets.json
 *.lic
 .DS_Store
+owner_secrets/
+notes/

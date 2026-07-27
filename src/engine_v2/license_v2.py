@@ -59,18 +59,46 @@ APP_LICENSE_DIRNAME = "SmartCatalogV2"
 LICENSE_FILENAME = "license.dat"
 CLOCK_FILENAME = "clock.dat"
 REVOKE_FILENAME = "revoked.dat"
+TRIAL_FILENAME = "trial.dat"
+TRIAL_DAYS = 3   # تجربة مجانية تلقائية بكامل الميزات لأي جهاز جديد
 
 PLANS = {"monthly": "اشتراك شهري", "yearly": "اشتراك سنوي",
          "lifetime": "دائم", "trial": "تجريبي"}
 
 
 # ================================================================ fingerprint
+def _no_window_kwargs() -> dict:
+    """يمنع ظهور نافذة موجه الأوامر السوداء عند استدعاء أوامر النظام
+    في البناء الرسومي (windowed) على ويندوز — إصلاح مشكلة reg.exe عند الإقلاع."""
+    kw: dict = {}
+    if os.name == "nt":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kw["startupinfo"] = si
+        kw["stdin"] = subprocess.DEVNULL
+    return kw
+
+
 def _windows_machine_guid() -> str:
+    # القراءة المباشرة من السجل عبر winreg أسرع ولا تفتح أي نافذة إطلاقًا.
+    try:
+        import winreg  # type: ignore
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Cryptography", 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            val, _ = winreg.QueryValueEx(k, "MachineGuid")
+            if val:
+                return str(val).strip()
+    except Exception:
+        pass
+    # احتياط: reg.exe مع إخفاء النافذة بالكامل.
     try:
         out = subprocess.run(
             ["reg", "query",
              r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"],
-            capture_output=True, text=True, timeout=5)
+            capture_output=True, text=True, timeout=5, **_no_window_kwargs())
         for line in out.stdout.splitlines():
             if "MachineGuid" in line:
                 return line.split()[-1].strip()
@@ -471,3 +499,86 @@ def deactivate() -> None:
         (_license_dir() / LICENSE_FILENAME).unlink(missing_ok=True)
     except Exception:
         pass
+
+
+# ============================================================ trial (3 أيام)
+def _trial_path() -> Path:
+    return _license_dir() / TRIAL_FILENAME
+
+
+def start_or_check_trial() -> LicenseInfo:
+    """تجربة تلقائية 3 أيام بكامل الميزات لأي جهاز جديد.
+
+    تُنشأ تلقائيًا عند أول تشغيل وتُخزن مشفرة ببصمة الجهاز (نسخها
+    لجهاز آخر أو حذفها وإعادة إنشائها لا يمدد المدة: يُحفظ أيضًا أثر
+    ثانوي في مفتاح موازٍ يُعتمد الأقدم). محمية من إرجاع الساعة
+    عبر _clock_check_and_update نفسها."""
+    info = LicenseInfo(fingerprint=machine_fingerprint(), plan="trial")
+    if not _clock_check_and_update():
+        info.status = "اكتُشف تلاعب بساعة النظام — أعد ضبط الوقت الصحيح"
+        return info
+    now = int(time.time())
+    p = _trial_path()
+    started = 0
+    if p.is_file():
+        data = _decrypt(p.read_bytes(), b"trial")
+        if data:
+            try:
+                started = int(json.loads(data.decode("utf-8"))["start"])
+            except Exception:
+                started = 0
+    # أثر ثانوي موازٍ (ملف مخفي ثانٍ) — يُعتمد الأقدم لمنع حذف/إعادة
+    p2 = _license_dir() / ("." + TRIAL_FILENAME)
+    started2 = 0
+    if p2.is_file():
+        data = _decrypt(p2.read_bytes(), b"trial")
+        if data:
+            try:
+                started2 = int(json.loads(data.decode("utf-8"))["start"])
+            except Exception:
+                started2 = 0
+    started = min(x for x in (started, started2, now) if x) \
+        if (started or started2) else 0
+    if not started:
+        started = now
+    blob = _encrypt(json.dumps({"start": started}).encode("utf-8"), b"trial")
+    for path in (p, p2):
+        try:
+            if os.name == "nt" and path.exists():
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)
+            path.write_bytes(blob)
+            if os.name == "nt" and path.name.startswith("."):
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02)
+        except Exception:
+            pass
+    expires = started + TRIAL_DAYS * 86400
+    info.issued_at = started
+    info.expires_at = expires
+    if now >= expires:
+        info.valid = False
+        info.days_left = 0
+        info.status = ("انتهت الفترة التجريبية (3 أيام) — "
+                       "تواصل مع المالك للحصول على مفتاح تفعيل")
+        return info
+    info.valid = True
+    info.days_left = max(0, int((expires - now + 86399) // 86400))
+    info.status = f"فترة تجريبية — متبق {info.days_left} أيام"
+    return info
+
+
+def effective_license() -> LicenseInfo:
+    """الحالة الفعلية للتشغيل: ترخيص مفعّل أولًا، ثم التجربة التلقائية.
+
+    هذه هي الدالة التي تستدعيها الواجهة والشارة — تعيد دائمًا المدة
+    الصحيحة الحقيقية (دائم / متبق X يوم / تجربة متبق X أيام / منتهٍ)."""
+    lic = check_license()
+    if lic.valid:
+        return lic
+    # لا ترخيص صالحًا — جرّب الفترة التجريبية التلقائية
+    if (_license_dir() / LICENSE_FILENAME).is_file() and \
+            "انتهى" in (lic.status or ""):
+        # اشتراك سابق منتهٍ — لا تجديد تجربة بعد انتهاء اشتراك مدفوع
+        return lic
+    return start_or_check_trial()

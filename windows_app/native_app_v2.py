@@ -17,7 +17,54 @@ for p in (str(_SRC), str(_HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-APP_VERSION_V2 = "2.0.0"
+APP_VERSION_V2 = "2.1.0"
+
+_SPLASH = None  # مرجع شاشة البدء الفورية
+
+
+def _show_splash() -> None:
+    """شاشة بدء فورية تظهر خلال أجزاء من الثانية — يرى المستخدم
+    اسم البرنامج مباشرة بدل شاشة سوداء/انتظار طويل بلا أي مؤشر."""
+    global _SPLASH
+    try:
+        from PySide6.QtWidgets import QApplication, QSplashScreen
+        from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
+        from PySide6.QtCore import Qt
+        app = QApplication.instance() or QApplication(sys.argv)
+        pix = QPixmap(520, 300)
+        pix.fill(QColor("#12203a"))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QColor("#ffffff"))
+        f = QFont();  f.setPointSize(20);  f.setBold(True)
+        p.setFont(f)
+        p.drawText(pix.rect().adjusted(0, -30, 0, -30), Qt.AlignCenter,
+                   "استوديو صور المتجر")
+        f2 = QFont();  f2.setPointSize(11)
+        p.setPen(QColor("#9fb6dc"))
+        p.setFont(f2)
+        p.drawText(pix.rect().adjusted(0, 40, 0, 40), Qt.AlignCenter,
+                   f"Ahmed Al-Faifi Market Image Studio — {APP_VERSION_V2}\n"
+                   "جارٍ التحميل… لحظات من فضلك")
+        p.end()
+        _SPLASH = QSplashScreen(pix, Qt.WindowStaysOnTopHint)
+        _SPLASH.show()
+        app.processEvents()
+    except Exception:
+        _SPLASH = None
+
+
+def _close_splash(window=None) -> None:
+    global _SPLASH
+    try:
+        if _SPLASH is not None:
+            if window is not None:
+                _SPLASH.finish(window)
+            else:
+                _SPLASH.close()
+    except Exception:
+        pass
+    _SPLASH = None
 
 
 def _activate_engine() -> None:
@@ -57,6 +104,30 @@ def _patch_ui(native_app) -> None:
             sessions_btn.setCursor(native_app.Qt.PointingHandCursor)
             sessions_btn.clicked.connect(self.v2_open_sessions)
 
+            save_now_btn = QPushButton("حفظ الجلسة الآن")
+            save_now_btn.setObjectName("v2SaveNowBtn")
+            save_now_btn.setMinimumHeight(40)
+            save_now_btn.setCursor(native_app.Qt.PointingHandCursor)
+
+            def _save_now():
+                try:
+                    saver = getattr(self, "v2_save_session", None)
+                    if callable(saver) and getattr(self, "current_result", None) is not None:
+                        saver()
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.information(
+                            self, "تم الحفظ",
+                            "حُفظت الجلسة بنجاح — يمكنك استئنافها من زر (الجلسات)")
+                    else:
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.information(
+                            self, "لا يوجد عمل مفتوح",
+                            "لا توجد نتائج مفتوحة لحفظها حاليًا")
+                except Exception as exc:
+                    print(f"[V2] save now failed: {exc}", file=sys.stderr)
+
+            save_now_btn.clicked.connect(_save_now)
+
             naming_btn = QPushButton("سياسة التسمية")
             naming_btn.setObjectName("v2NamingBtn")
             naming_btn.setMinimumHeight(40)
@@ -75,9 +146,18 @@ def _patch_ui(native_app) -> None:
             refine_btn.setCursor(native_app.Qt.PointingHandCursor)
             refine_btn.clicked.connect(lambda: _open_batch_refine(self))
 
+            help_btn = QPushButton("؟ تعليمات")
+            help_btn.setObjectName("v2HelpBtn")
+            help_btn.setMinimumHeight(40)
+            help_btn.setCursor(native_app.Qt.PointingHandCursor)
+            help_btn.setToolTip("دليل استخدام مختصر لكل أدوات البرنامج")
+            help_btn.clicked.connect(lambda: _show_app_help(self))
+
             # insert before the version badge (last widget)
             insert_at = max(header_layout.count() - 1, 0)
+            header_layout.insertWidget(insert_at, help_btn)
             header_layout.insertWidget(insert_at, rename_btn)
+            header_layout.insertWidget(insert_at, save_now_btn)
             header_layout.insertWidget(insert_at, sessions_btn)
             header_layout.insertWidget(insert_at, naming_btn)
             header_layout.insertWidget(insert_at, editor_btn)
@@ -96,6 +176,50 @@ def _patch_ui(native_app) -> None:
             print(f"[V2] UI wiring failed: {exc}", file=sys.stderr)
 
     native_app.MainWindow.__init__ = v2_init
+
+    # ------------------------------------------------ حفظ عند الإغلاق
+    original_close = getattr(native_app.MainWindow, "closeEvent", None)
+
+    def v2_close_event(self, event):
+        """عند الإغلاق مع عمل مفتوح: حفظ / إغلاق بلا حفظ / إلغاء."""
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            has_work = getattr(self, "current_result", None) is not None
+            saver = getattr(self, "v2_save_session", None)
+            if has_work and callable(saver):
+                box = QMessageBox(self)
+                box.setWindowTitle("حفظ العمل قبل الإغلاق")
+                box.setText("لديك عمل مفتوح — ماذا تريد؟")
+                box.setInformativeText(
+                    "حفظ الجلسة يتيح لك استئناف العمل من نفس النقطة"
+                    " عند فتح البرنامج مرة أخرى (زر الجلسات).")
+                save_btn = box.addButton("حفظ الجلسة والإغلاق",
+                                         QMessageBox.AcceptRole)
+                discard_btn = box.addButton("إغلاق بدون حفظ",
+                                            QMessageBox.DestructiveRole)
+                cancel_btn = box.addButton("إلغاء والبقاء",
+                                           QMessageBox.RejectRole)
+                box.setDefaultButton(save_btn)
+                box.setLayoutDirection(native_app.Qt.RightToLeft)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is cancel_btn:
+                    event.ignore()
+                    return
+                if clicked is save_btn:
+                    try:
+                        saver()
+                    except Exception as exc:
+                        print(f"[V2] save on close failed: {exc}",
+                              file=sys.stderr)
+        except Exception as exc:  # pragma: no cover — never block closing
+            print(f"[V2] close handler failed: {exc}", file=sys.stderr)
+        if callable(original_close):
+            original_close(self, event)
+        else:
+            event.accept()
+
+    native_app.MainWindow.closeEvent = v2_close_event
 
 
 def _attach_nutrition_button(window, native_app, v2_ui) -> None:
@@ -170,6 +294,84 @@ def _open_batch_refine(window) -> None:
         QMessageBox.warning(window, "ضبط الصور القديمة", f"تعذر فتح الأداة: {exc}")
 
 
+def _show_app_help(window) -> None:
+    """دليل استخدام مختصر داخل البرنامج — بالعربي الواضح."""
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
+                                       QScrollArea, QVBoxLayout, QWidget,
+                                       QPushButton, QMessageBox)
+
+        dlg = QDialog(window)
+        dlg.setWindowTitle("تعليمات الاستخدام")
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.resize(640, 700)
+        lay = QVBoxLayout(dlg)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+
+        text = QLabel(
+            "<h2>خطوات العمل الأساسية</h2>"
+            "<ol>"
+            "<li><b>إضافة مجلد:</b> اختر مجلد صور المنتجات وملف Excel للأصناف، ثم ابدأ المعالجة — البرنامج يعزل الخلفية ويقرأ الباركود ويربط ويسمي تلقائيًا.</li>"
+            "<li><b>المراجعة والربط:</b> المصغرات بخلفية بيضاء = مربوطة وجاهزة. للصور غير المرتبطة: اكتب الرقم ثم (ربط الآن)، أو استخدم (ربط بصورة أخرى) لاختيار أي صورة مرتبطة — ولو بعيدة — وربط المحدد بصنفها.</li>"
+            "<li><b>محرر الصور:</b> تحرير احترافي كامل — قص ذكي، فرشاة تبييض/استرجاع، توزين دقيق 0.1° مع شبكة، إزالة انعكاسات التصوير، تنقيح استوديو، وظل أسفل المنتج اختياري. جديد: زر (طمس التواريخ تلقائيًا) يكشف تواريخ الإنتاج/الانتهاء ويطمسها بتمويه طفيف بلون المنتج، وأداة (طمس تاريخ يدوي) للسحب فوق أي تاريخ لم يُكشف.</li>"
+            "<li><b>وضوح فائق للكتابات:</b> محرك جودة ذكي يتعرف على نصوص المنتج والحقائق الغذائية ويحافظ على مقروئيتها التامة في كل مراحل المعالجة — مفعّل افتراضيًا مع جودة (فائقة — بلا فقدان).</li>"
+            "<li><b>ضبط الصور القديمة:</b> يعالج مجلدات كاملة دفعة واحدة دون تكرار — المعالَج سابقًا يُتخطى تلقائيًا، مع خيار الضغط والصيغة (WebP/JPG/PNG) والتنقيح النهائي.</li>"
+            "<li><b>أداة إعادة التسمية:</b> ثلاثة تبويبات — إصلاح الأسماء والتكرارات، تنظيف حسب رقم اللقطة/الوحدة (احتفاظ أو حذف مع معاينة)، وتصدير بتنسيقات المنصات (نون، أمازون، سلة، زد، شوبيفاي، قالب يدوي حر).</li>"
+            "<li><b>سياسة التسمية:</b> تحكم بأسماء الوحدات (حبة/ربطة/شدة/كرتون) بالعربي وحتى 10 صور لكل صنف بترقيم موحد مطابق للإكسل.</li>"
+            "<li><b>حقائق التغذية:</b> استخراج ذكي من صورة المنتج — أي قيمة غير مؤكدة تُظلل للمراجعة ولن يخترع البرنامج أي رقم. إن فشل الاستخراج أدخل القيم يدويًا والتنسيق الاحترافي تلقائي. ضع الجدول داخل الصورة بالسحب أو أخرجه صورة منفردة.</li>"
+            "<li><b>الجلسات:</b> عملك يُحفظ تلقائيًا، وعند الإغلاق تختار: حفظ وإغلاق / إغلاق بلا حفظ / البقاء. استأنف من زر (الجلسات).</li>"
+            "</ol>"
+            "<h2>التطبيق يتعلم منك</h2>"
+            "<p>كل تعديل تقوم به (حجم الفرشاة، قوة التحسين، مواضع جدول التغذية، تصحيحات القص) يُحفظ كتفضيل محلي ويُقترح تلقائيًا للصور المشابهة — كلما استخدمت البرنامج أصبح أذكى وأسرع لعملك.</p>"
+            "<p><b>خصوصية كاملة:</b> التعلم محلي 100% داخل جهازك — لا يُرسل أي شيء للخارج.</p>"
+            "<h2>الاشتراك والتجربة</h2>"
+            "<p>عند أول تشغيل تحصل على تجربة مجانية كاملة الميزات لمدة 3 أيام — الشارة أعلى الشاشة تعرض المدة المتبقية بدقة. للتفعيل الدائم أو الاشتراك تواصل مع المالك للحصول على مفتاح التفعيل.</p>"
+        )
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.RichText)
+        body_lay.addWidget(text)
+
+        reset_btn = QPushButton("عرض / إعادة ضبط ما تعلمه التطبيق")
+        reset_btn.setMinimumHeight(38)
+
+        def _learning_info():
+            try:
+                import engine_v2.learning_v2 as lv
+                summary = lv.summary_ar()
+                box = QMessageBox(window)
+                box.setLayoutDirection(Qt.RightToLeft)
+                box.setWindowTitle("ما تعلمه التطبيق")
+                box.setText(summary or "لم يتعلم التطبيق شيئًا بعد — ابدأ بالتعديل وسيتعلم منك.")
+                reset = box.addButton("إعادة الضبط", QMessageBox.DestructiveRole)
+                box.addButton("إغلاق", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() is reset:
+                    lv.reset()
+                    QMessageBox.information(window, "تم", "أُعيد ضبط التعلم بالكامل.")
+            except Exception as exc:
+                QMessageBox.information(window, "التعلم", f"تعذر الوصول لبيانات التعلم: {exc}")
+
+        reset_btn.clicked.connect(_learning_info)
+        body_lay.addWidget(reset_btn)
+        body_lay.addStretch(1)
+
+        scroll.setWidget(body)
+        lay.addWidget(scroll, 1)
+        buttons = QDialogButtonBox()
+        close_btn = buttons.addButton("إغلاق", QDialogButtonBox.RejectRole)
+        close_btn.setMinimumHeight(38)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        dlg.exec()
+    except Exception as exc:
+        print(f"[V2] help dialog failed: {exc}", file=sys.stderr)
+
+
 def _current_source_path(window) -> str:
     for attr in ("current_source_path", "_current_source_path"):
         value = getattr(window, attr, None)
@@ -207,17 +409,22 @@ def _gate_startup(native_app) -> None:
         if not license_ui.ensure_activated(None):
             raise SystemExit(0)
         original_init(self, *args, **kwargs)
+        _close_splash(self)   # أغلق شاشة البدء فور جاهزية النافذة
 
     native_app.MainWindow.__init__ = gated_init
 
 
 def main() -> int:
+    _show_splash()              # فورًا: شاشة بدء مرئية خلال أجزاء من الثانية
     _activate_engine()
     import native_app
     native_app.APP_VERSION = APP_VERSION_V2
     _gate_startup(native_app)   # أولاً: بوابة الترخيص (تلتف حول __init__ الأصلي)
     _patch_ui(native_app)       # ثانيًا: إضافات الواجهة (تلتف حول gated_init)
-    return native_app.main()
+    try:
+        return native_app.main()
+    finally:
+        _close_splash()
 
 
 if __name__ == "__main__":

@@ -39,13 +39,29 @@ class ParsedName:
     unit: str
 
     def render(self) -> str:
+        unit = str(self.unit or "").strip().strip("_").strip()
         if self.seq <= 1:
-            return f"{self.item}_{self.unit}"
-        return f"{self.item}_{self.seq}_{self.unit}"
+            return f"{self.item}_{unit}".strip("_")
+        return f"{self.item}_{self.seq}_{unit}".strip("_")
 
 
 _UNSAFE_CHARS = '/\\:*?"<>|\x00'
 _MAX_ITEM_LEN = 120  # يضمن اسمًا نهائيًا < 260 محرفًا على Windows
+_MULTI_UNDERSCORE_RE = re.compile(r"_{2,}")
+
+
+def normalize_stem(stem: str) -> str:
+    """تطبيع نهائي لأي اسم ملف قبل الحفظ: يمنع الشرطات السفلية المزدوجة
+    (سبب تكرار `10004696_2__حبه`) والشرطات والمسافات الطرفية نهائيًا."""
+    stem = str(stem).strip()
+    stem = _MULTI_UNDERSCORE_RE.sub("_", stem)
+    return stem.strip("_ ").strip() or "item"
+
+
+def clean_unit(unit: str) -> str:
+    """تعقيم قيمة الوحدة القادمة من الإكسل أو الإدخال اليدوي:
+    إزالة الشرطات السفلية والمسافات الطرفية التي كانت تولّد `__حبه`."""
+    return str(unit or "").strip().strip("_").strip()
 
 
 def sanitize_item(item: str) -> str:
@@ -63,10 +79,11 @@ def sanitize_item(item: str) -> str:
 def build_name(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT) -> str:
     """Build the canonical stem for image `seq` of item `item`."""
     item = sanitize_item(item)
-    unit = sanitize_item(str(unit)) if unit else UNIT_SUFFIX_DEFAULT
+    unit = clean_unit(sanitize_item(str(unit))) if unit else ""
+    unit = unit or UNIT_SUFFIX_DEFAULT
     if seq <= 1:
-        return f"{item}_{unit}"
-    return f"{item}_{seq}_{unit}"
+        return normalize_stem(f"{item}_{unit}")
+    return normalize_stem(f"{item}_{seq}_{unit}")
 
 
 def parse_name(stem: str) -> ParsedName | None:
@@ -75,7 +92,7 @@ def parse_name(stem: str) -> ParsedName | None:
     Accepts both the canonical V2 pattern (item_2_unit) and the legacy
     1.2.1 pattern (item_unit_2).
     """
-    stem = stem.strip()
+    stem = normalize_stem(stem)
     m = NAME_RE.match(stem)
     if m and not m.group("unit").isdigit():
         seq = int(m.group("seq")) if m.group("seq") else 1
@@ -206,11 +223,13 @@ class NamingSettings:
     template: str = "{item}_{seq}_{unit}"   # seq يُحذف تلقائيًا للصورة الأولى
 
     def render(self, item: str, seq: int, unit: str) -> str:
+        item = sanitize_item(item)
+        unit = clean_unit(unit) or self.default_unit or UNIT_SUFFIX_DEFAULT
         if seq <= 1:
             tpl = self.template.replace("_{seq}", "").replace("{seq}_", "") \
                                .replace("{seq}", "")
-            return tpl.format(item=item, unit=unit)
-        return self.template.format(item=item, seq=seq, unit=unit)
+            return normalize_stem(tpl.format(item=item, unit=unit))
+        return normalize_stem(self.template.format(item=item, seq=seq, unit=unit))
 
     def to_dict(self) -> dict:
         return {"unit_policy": self.unit_policy,

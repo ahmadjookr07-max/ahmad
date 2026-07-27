@@ -42,6 +42,9 @@ class ProcessOptionsV2:
     manual_crop_corners: list | None = None      # 8 قيم منظور
     # ظل
     shadow_preset: str = ""                      # اسم preset من shadow_v2
+    # محرك الجودة الواعي بالنص + طمس التواريخ
+    text_aware: bool = True                      # حدة ذكية وتصغير تدريجي يحفظ الكتابات
+    blur_dates: bool = True                      # طمس تواريخ الإنتاج/الانتهاء تلقائيًا
 
 
 @dataclass
@@ -98,8 +101,17 @@ class ProcessorV2:
         avail_h = opts.height - 2 * opts.margin
         sc = min(avail_w / cw, avail_h / ch)
         nw, nh = max(1, int(cw * sc)), max(1, int(ch * sc))
-        interp = cv2.INTER_AREA if sc < 1 else cv2.INTER_LANCZOS4
-        resized = cv2.resize(crop, (nw, nh), interpolation=interp)
+        if sc < 1 and getattr(opts, "text_aware", True):
+            # تصغير ذكي حافظ للنص — كتابات المنتج تبقى مقروءة بعد التأطير
+            try:
+                from .quality_v2 import smart_downscale
+                resized = smart_downscale(crop, nw, nh, text_aware=True)
+            except Exception:
+                resized = cv2.resize(crop, (nw, nh),
+                                     interpolation=cv2.INTER_AREA)
+        else:
+            interp = cv2.INTER_AREA if sc < 1 else cv2.INTER_LANCZOS4
+            resized = cv2.resize(crop, (nw, nh), interpolation=interp)
         canvas = np.full((opts.height, opts.width, 3), 255, np.uint8)
         x = (opts.width - nw) // 2
         y = (opts.height - nh) // 2
@@ -120,6 +132,16 @@ class ProcessorV2:
             # اقتصاص منظور يدوي أولًا
             if opts.manual_crop_corners and len(opts.manual_crop_corners) == 8:
                 img = perspective_rectify(img, list(opts.manual_crop_corners))
+
+            # طمس تواريخ الإنتاج/الانتهاء تلقائيًا (تمويه طفيف بلون المنتج)
+            if getattr(opts, "blur_dates", True):
+                try:
+                    from .date_blur_v2 import auto_blur_dates
+                    img, _n = auto_blur_dates(img)
+                    if _n:
+                        res.warnings.append(f"طُمس {_n} تاريخ مطبوع")
+                except Exception:
+                    pass
 
             # حقائق التغذية: مصدر الجدول
             label_img = None
@@ -153,7 +175,14 @@ class ProcessorV2:
             # تركيب على أبيض + تحسين
             white = self.segmenter.compose_on_white(img, alpha)
             if opts.enhance:
-                white = auto_enhance(white)
+                if getattr(opts, "text_aware", True):
+                    try:
+                        from .quality_v2 import enhance_preserving_text
+                        white = enhance_preserving_text(white)
+                    except Exception:
+                        white = auto_enhance(white)
+                else:
+                    white = auto_enhance(white)
                 # التحسين قد يغيّر البياض قليلًا — أعد فرض الخلفية
                 a = alpha[:, :, None]
                 white = np.clip(white.astype(np.float32) * a +

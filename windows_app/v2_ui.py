@@ -28,6 +28,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -239,6 +241,16 @@ class OcrWorker(QThread):
     def run(self):
         try:
             _ensure_engine_path()
+            # المحرك الذكي الجديد: قراءات متعددة + تصويت + تحقق منطقي —
+            # لا يخترع أي قيمة، وكل قيمة غير مؤكدة تُعلّم للمراجعة
+            try:
+                from engine_v2.nutrition_smart_v2 import smart_extract
+                res = smart_extract(self._image)
+                self.finished_ok.emit(res)
+                return
+            except Exception:
+                pass
+            # fallback للمحرك القديم إن تعذر الذكي
             from engine_v2.nutrition_ocr_v2 import extract_nutrition_data
             data = extract_nutrition_data(self._image)
             self.finished_ok.emit(data)
@@ -445,18 +457,35 @@ class NutritionDialog(QDialog):
         self.ocr_status.setText("فشل الاستخراج — يمكنك الإدخال اليدوي")
         QMessageBox.warning(self, "فشل OCR", msg)
 
-    def _ocr_done(self, data):
+    def _ocr_done(self, payload):
         self.ocr_btn.setEnabled(True)
-        self.ocr_status.setText("تم الاستخراج — راجع القيم الآن")
-        self._open_review(data)
+        review_keys, warnings = [], []
+        data = payload
+        if hasattr(payload, "data"):          # SmartExtractionResult
+            data = payload.data
+            review_keys = list(getattr(payload, "review_keys", []) or [])
+            warnings = list(getattr(payload, "warnings", []) or [])
+        if not (getattr(data, "rows", None) or getattr(data, "calories", "")):
+            self.ocr_status.setText(
+                "تعذرت القراءة الآلية — أدخل القيم يدويًا والنظام ينسق تلقائيًا")
+            self._manual_template()
+            return
+        if review_keys:
+            self.ocr_status.setText(
+                f"تم الاستخراج — {len(review_keys)} قيمة تحتاج تأكيدك (مظللة)")
+        else:
+            self.ocr_status.setText("تم الاستخراج — راجع القيم الآن")
+        self._open_review(data, review_keys, warnings)
 
     def _manual_template(self):
         _ensure_engine_path()
         from engine_v2.nutrition_ocr_v2 import blank_template
         self._open_review(blank_template())
 
-    def _open_review(self, data):
-        dlg = NutritionReviewDialog(data, self._crop_image(), self)
+    def _open_review(self, data, review_keys=None, warnings=None):
+        dlg = NutritionReviewDialog(data, self._crop_image(), self,
+                                    review_keys=review_keys,
+                                    warnings=warnings)
         if dlg.exec() == QDialog.Accepted:
             self._ocr_data = dlg.reviewed_data()
             self.ocr_status.setText("القيم معتمدة بعد المراجعة ✓")
@@ -484,12 +513,15 @@ class NutritionDialog(QDialog):
 class NutritionReviewDialog(QDialog):
     """Mandatory review screen: original crop beside editable values."""
 
-    def __init__(self, data, crop_image, parent=None):
+    def __init__(self, data, crop_image, parent=None,
+                 review_keys=None, warnings=None):
         super().__init__(parent)
         self.setWindowTitle("مراجعة قيم حقائق التغذية — التطابق 100% مسؤوليتك هنا")
         self.setLayoutDirection(Qt.RightToLeft)
         self.setMinimumSize(1100, 720)
         self._data = data
+        self._review_keys = set(review_keys or [])
+        self._warnings = list(warnings or [])
         root = QHBoxLayout(self)
         root.setSpacing(14)
 
@@ -506,6 +538,19 @@ class NutritionReviewDialog(QDialog):
 
         edit_box = QGroupBox("القيم المستخرجة — حرر أي حقل قبل الاعتماد")
         ev = QVBoxLayout(edit_box)
+        if self._warnings:
+            warn_lbl = QLabel("⚠ " + "\n⚠ ".join(self._warnings[:4]))
+            warn_lbl.setWordWrap(True)
+            warn_lbl.setStyleSheet(
+                "background:#fff3cd;color:#7a5c00;border:1px solid #ffe08a;"
+                "border-radius:6px;padding:8px;font-weight:bold;")
+            ev.addWidget(warn_lbl)
+        if self._review_keys:
+            hint = QLabel("الحقول المظللة بالأصفر قرأها النظام بثقة منخفضة — "
+                          "قارنها بالصورة الأصلية وصحّحها قبل الاعتماد")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color:#8a6d00;")
+            ev.addWidget(hint)
         form = QFormLayout()
         form.setVerticalSpacing(8)
         self.servings_edit = QLineEdit(str(getattr(data, "servings", "") or ""))
@@ -523,11 +568,25 @@ class NutritionReviewDialog(QDialog):
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["الحقل", "الكمية", "الوحدة", "٪ القيمة اليومية"])
         self.table.setRowCount(max(len(rows), 14))
+        from PySide6.QtGui import QColor
+        review_bg = QColor("#fff8c4")
         for i, row in enumerate(rows):
-            self.table.setItem(i, 0, QTableWidgetItem(str(getattr(row, "label_ar", "") or "")))
-            self.table.setItem(i, 1, QTableWidgetItem(str(getattr(row, "amount", "") or "")))
-            self.table.setItem(i, 2, QTableWidgetItem(str(getattr(row, "unit", "") or "")))
-            self.table.setItem(i, 3, QTableWidgetItem(str(getattr(row, "percent", "") or "")))
+            needs = str(getattr(row, "key", "") or "") in self._review_keys
+            for col, attr in ((0, "label_ar"), (1, "amount"),
+                              (2, "unit"), (3, "percent")):
+                item = QTableWidgetItem(str(getattr(row, attr, "") or ""))
+                if needs:
+                    item.setBackground(review_bg)
+                    item.setToolTip("قراءة بثقة منخفضة — قارن بالصورة الأصلية")
+                self.table.setItem(i, col, item)
+        # ظلل حقول الرأس إن كانت تحتاج مراجعة
+        style_review = "background:#fff8c4;"
+        if "calories" in self._review_keys:
+            self.calories_edit.setStyleSheet(style_review)
+        if "servings" in self._review_keys:
+            self.servings_edit.setStyleSheet(style_review)
+        if "serving_size" in self._review_keys:
+            self.serving_size_edit.setStyleSheet(style_review)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.verticalHeader().setDefaultSectionSize(34)
         ev.addWidget(self.table, 1)
@@ -570,9 +629,9 @@ class BulkRenameDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("أداة إعادة تسمية الملفات المنجزة سابقًا — مستقلة")
+        self.setWindowTitle("أداة إعادة التسمية والتنظيف — تعمل على أي مجلد")
         self.setLayoutDirection(Qt.RightToLeft)
-        self.setMinimumSize(1150, 700)
+        self.setMinimumSize(1150, 720)
         self._plan = []
         self._folder = ""
         root = QVBoxLayout(self)
@@ -580,9 +639,10 @@ class BulkRenameDialog(QDialog):
 
         intro = QLabel(
             "تعمل هذه الأداة على مجلد نتائج سابق (مثل SmartCatalogVision-Results):"
-            " تصلح أسماء الملفات المشوهة تلقائيًا، وتوحد النمط إلى"
-            " رقم_الصنف_حبه / رقم_الصنف_2_حبه، ويمكنها استبدال أرقام أصناف"
-            " قديمة بأرقام جديدة مع الحفاظ على ترابط كل مجموعة صور.")
+            " تصلح الأسماء المشوهة، تنظف الصور حسب رقم اللقطة أو الوحدة،"
+            " وتصدّر الأسماء بتنسيق أي منصة (سلة، زد، شوبيفاي، أمازون…)"
+            " — كل عملية بمعاينة كاملة قبل التنفيذ والمحذوفات تنتقل لمجلد"
+            " آمن يمكن استرجاعها منه.")
         intro.setWordWrap(True)
         root.addWidget(intro)
 
@@ -610,6 +670,14 @@ class BulkRenameDialog(QDialog):
         excel_row.addWidget(excel_browse)
         root.addLayout(excel_row)
 
+        # ------------------------------------------------- تبويبات الأداة
+        self.tabs = QTabWidget()
+        self.tabs.setLayoutDirection(Qt.RightToLeft)
+        root.addWidget(self.tabs, 1)
+
+        # ==== تبويب 1: إصلاح وتوحيد الأسماء ====
+        tab_fix = QWidget()
+        fix_lay = QVBoxLayout(tab_fix)
         map_row = QHBoxLayout()
         self.map_edit = QLineEdit()
         self.map_edit.setPlaceholderText(
@@ -620,7 +688,7 @@ class BulkRenameDialog(QDialog):
         preview_btn.setMinimumSize(150, 42)
         preview_btn.clicked.connect(self._preview)
         map_row.addWidget(preview_btn)
-        root.addLayout(map_row)
+        fix_lay.addLayout(map_row)
 
         self.table = QTableWidget()
         self.table.setColumnCount(4)
@@ -628,10 +696,10 @@ class BulkRenameDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setDefaultSectionSize(32)
-        root.addWidget(self.table, 1)
+        fix_lay.addWidget(self.table, 1)
 
         self.status = QLabel("")
-        root.addWidget(self.status)
+        fix_lay.addWidget(self.status)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
@@ -639,12 +707,314 @@ class BulkRenameDialog(QDialog):
         self.apply_btn.setMinimumSize(220, 48)
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self._apply)
-        close_btn = QPushButton("إغلاق")
-        close_btn.setMinimumSize(120, 48)
-        close_btn.clicked.connect(self.reject)
         btns.addWidget(self.apply_btn)
-        btns.addWidget(close_btn)
-        root.addLayout(btns)
+        fix_lay.addLayout(btns)
+        self.tabs.addTab(tab_fix, "إصلاح وتوحيد الأسماء")
+
+        # ==== تبويب 2: تنظيف حسب اللقطة/الوحدة ====
+        self.tabs.addTab(self._build_cleanup_tab(), "تنظيف حسب اللقطة/الوحدة")
+
+        # ==== تبويب 3: تصدير بتنسيق المنصات ====
+        self.tabs.addTab(self._build_platform_tab(), "تصدير بتنسيق المنصات")
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        close_btn = QPushButton("إغلاق")
+        close_btn.setMinimumSize(120, 44)
+        close_btn.clicked.connect(self.reject)
+        bottom.addWidget(close_btn)
+        root.addLayout(bottom)
+
+    # ------------------------------------------------ تبويب التنظيف
+    def _build_cleanup_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        hint = QLabel(
+            "مثال: للإبقاء على الصورة الثانية فقط لكل الأصناف وحذف الباقي:"
+            " اختر اللقطة = 2 والوضع = الاحتفاظ بالمطابق فقط. المتبقي يُعاد"
+            " ترقيمه تلقائيًا ليصبح غلافًا صحيحًا، والمحذوف ينتقل لمجلد آمن.")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("رقم اللقطة:"))
+        self.cl_seq = QComboBox()
+        self.cl_seq.addItem("الكل", None)
+        for i in range(1, 11):
+            label = "1 — الغلاف (بدون رقم)" if i == 1 else str(i)
+            self.cl_seq.addItem(label, i)
+        self.cl_seq.setMinimumHeight(38)
+        row.addWidget(self.cl_seq)
+        row.addWidget(QLabel("الوحدة:"))
+        self.cl_unit = QComboBox()
+        self.cl_unit.setEditable(True)
+        self.cl_unit.addItems(["الكل", "حبه", "شدة", "ربطة", "كرتون", "صنف"])
+        self.cl_unit.setMinimumHeight(38)
+        row.addWidget(self.cl_unit)
+        row.addWidget(QLabel("الوضع:"))
+        self.cl_mode = QComboBox()
+        self.cl_mode.addItem("الاحتفاظ بالمطابق فقط وحذف بقية صور كل صنف", "keep_only")
+        self.cl_mode.addItem("حذف المطابق فقط والإبقاء على الباقي", "delete_only")
+        self.cl_mode.setMinimumHeight(38)
+        row.addWidget(self.cl_mode, 1)
+        lay.addLayout(row)
+
+        row2 = QHBoxLayout()
+        self.cl_rename = QCheckBox("إعادة ترقيم المتبقي تلقائيًا (غلاف ثم 2، 3…)")
+        self.cl_rename.setChecked(True)
+        row2.addWidget(self.cl_rename)
+        row2.addWidget(QLabel("تغيير وحدة المتبقي (اختياري):"))
+        self.cl_new_unit = QComboBox()
+        self.cl_new_unit.setEditable(True)
+        self.cl_new_unit.addItems(["بلا تغيير", "حبه", "شدة", "ربطة", "كرتون", "صنف"])
+        self.cl_new_unit.setMinimumHeight(38)
+        row2.addWidget(self.cl_new_unit)
+        self.cl_dups = QCheckBox("دمج التكرارات المتطابقة بالمحتوى أيضًا")
+        self.cl_dups.setChecked(True)
+        row2.addWidget(self.cl_dups)
+        cl_preview = QPushButton("معاينة خطة التنظيف")
+        cl_preview.setMinimumSize(170, 42)
+        cl_preview.clicked.connect(self._cl_preview)
+        row2.addWidget(cl_preview)
+        lay.addLayout(row2)
+
+        self.cl_table = QTableWidget()
+        self.cl_table.setColumnCount(4)
+        self.cl_table.setHorizontalHeaderLabels(
+            ["الملف", "الإجراء", "الاسم الجديد", "ملاحظة"])
+        self.cl_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.cl_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.cl_table.verticalHeader().setDefaultSectionSize(30)
+        lay.addWidget(self.cl_table, 1)
+
+        self.cl_status = QLabel("")
+        lay.addWidget(self.cl_status)
+
+        b = QHBoxLayout()
+        b.addStretch(1)
+        self.cl_apply = QPushButton("تنفيذ التنظيف (المحذوف إلى مجلد آمن)")
+        self.cl_apply.setMinimumSize(280, 48)
+        self.cl_apply.setEnabled(False)
+        self.cl_apply.clicked.connect(self._cl_apply)
+        b.addWidget(self.cl_apply)
+        lay.addLayout(b)
+        return tab
+
+    def _cl_preview(self):
+        folder = self.folder_edit.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "تنبيه", "اختر مجلدًا صالحًا أولًا (أعلى النافذة)")
+            return
+        _ensure_engine_path()
+        from engine_v2.cleanup_v2 import plan_cleanup, plan_fix_duplicates
+        seq = self.cl_seq.currentData()
+        unit_txt = self.cl_unit.currentText().strip()
+        unit = "" if unit_txt in ("الكل", "") else unit_txt
+        new_unit_txt = self.cl_new_unit.currentText().strip()
+        new_unit = "" if new_unit_txt in ("بلا تغيير", "") else new_unit_txt
+        mode = self.cl_mode.currentData() or "keep_only"
+        if seq is None and not unit and mode == "keep_only" and not self.cl_dups.isChecked():
+            QMessageBox.information(
+                self, "تنبيه",
+                "بلا فلتر لقطة أو وحدة لن يُحذف شيء — حدد رقم لقطة أو وحدة.")
+        try:
+            if seq is None and not unit and self.cl_dups.isChecked():
+                self._cl_plan = plan_fix_duplicates(folder)
+            else:
+                self._cl_plan = plan_cleanup(
+                    folder, seq_filter=seq, unit_filter=unit, mode=mode,
+                    rename_survivors=self.cl_rename.isChecked(),
+                    new_unit=new_unit)
+        except Exception as exc:
+            QMessageBox.warning(self, "خطأ", f"تعذر بناء الخطة: {exc}")
+            return
+        entries = self._cl_plan.entries
+        act_ar = {"keep": "يبقى", "delete": "يُحذف",
+                  "rename": "يُعاد تسميته", "merge_duplicate": "تكرار — يُدمج"}
+        self.cl_table.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            self.cl_table.setItem(i, 0, QTableWidgetItem(e.source))
+            it = QTableWidgetItem(act_ar.get(e.action, e.action))
+            if e.action in ("delete", "merge_duplicate"):
+                it.setForeground(QColor("#b00020"))
+            elif e.action == "rename":
+                it.setForeground(QColor("#0b6e4f"))
+            self.cl_table.setItem(i, 1, it)
+            self.cl_table.setItem(i, 2, QTableWidgetItem(e.target or "—"))
+            self.cl_table.setItem(i, 3, QTableWidgetItem(e.note or ""))
+        self.cl_status.setText(
+            f"سيبقى {self._cl_plan.n_keep} | سيُحذف {self._cl_plan.n_delete}"
+            f" | سيُعاد تسمية {self._cl_plan.n_rename}"
+            " — المحذوف ينتقل إلى مجلد آمن داخل المصدر")
+        self.cl_apply.setEnabled(
+            self._cl_plan.n_delete > 0 or self._cl_plan.n_rename > 0)
+
+    def _cl_apply(self):
+        plan = getattr(self, "_cl_plan", None)
+        if plan is None:
+            return
+        if plan.n_delete > 0:
+            ok = QMessageBox.question(
+                self, "تأكيد",
+                f"سيُنقل {plan.n_delete} ملفًا إلى المجلد الآمن وسيُعاد تسمية"
+                f" {plan.n_rename}. متابعة؟",
+                QMessageBox.Yes | QMessageBox.No)
+            if ok != QMessageBox.Yes:
+                return
+        _ensure_engine_path()
+        from engine_v2.cleanup_v2 import apply_plan
+        deleted, renamed, errors = apply_plan(plan, to_trash=True)
+        if errors:
+            QMessageBox.warning(self, "اكتمل مع أخطاء",
+                                f"نُقل {deleted} وأُعيد تسمية {renamed}.\n"
+                                f"أخطاء: {errors[:5]}")
+        else:
+            QMessageBox.information(
+                self, "تم",
+                f"نُقل {deleted} ملفًا للمجلد الآمن وأُعيد تسمية {renamed} بنجاح.")
+        self._cl_preview()
+
+    # ------------------------------------------------ تبويب المنصات
+    def _build_platform_tab(self) -> QWidget:
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        hint = QLabel(
+            "يُنشئ نسخة من الصور بأسماء متوافقة مع المنصة المختارة في مجلد"
+            " فرعي جديد — ملفاتك الأصلية لا تُمس. المنصات التي لا تدعم"
+            " العربية تُنقل الوحدة حرفيًا (حبه → habbah) تلقائيًا.")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("المنصة:"))
+        self.pf_combo = QComboBox()
+        _ensure_engine_path()
+        from engine_v2.platform_profiles_v2 import PLATFORM_PROFILES
+        for key, prof in PLATFORM_PROFILES.items():
+            self.pf_combo.addItem(prof.describe(), key)
+        self.pf_combo.setMinimumHeight(38)
+        self.pf_combo.currentIndexChanged.connect(self._pf_note)
+        row.addWidget(self.pf_combo, 1)
+        self.pf_template = QLineEdit()
+        self.pf_template.setPlaceholderText(
+            "القالب اليدوي: مثال {الرقم}-{الوحدة}-{التسلسل}")
+        self.pf_template.setMinimumHeight(38)
+        self.pf_template.setVisible(False)
+        row.addWidget(self.pf_template, 1)
+        pf_preview = QPushButton("معاينة الأسماء")
+        pf_preview.setMinimumSize(150, 42)
+        pf_preview.clicked.connect(self._pf_preview)
+        row.addWidget(pf_preview)
+        lay.addLayout(row)
+
+        self.pf_note = QLabel("")
+        self.pf_note.setWordWrap(True)
+        lay.addWidget(self.pf_note)
+
+        self.pf_table = QTableWidget()
+        self.pf_table.setColumnCount(2)
+        self.pf_table.setHorizontalHeaderLabels(["الاسم الحالي", "اسم المنصة"])
+        self.pf_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.pf_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.pf_table.verticalHeader().setDefaultSectionSize(30)
+        lay.addWidget(self.pf_table, 1)
+
+        self.pf_status = QLabel("")
+        lay.addWidget(self.pf_status)
+
+        b = QHBoxLayout()
+        b.addStretch(1)
+        self.pf_apply = QPushButton("إنشاء نسخة المنصة")
+        self.pf_apply.setMinimumSize(220, 48)
+        self.pf_apply.setEnabled(False)
+        self.pf_apply.clicked.connect(self._pf_apply)
+        b.addWidget(self.pf_apply)
+        lay.addLayout(b)
+        self._pf_note()
+        return tab
+
+    def _pf_note(self):
+        _ensure_engine_path()
+        from engine_v2.platform_profiles_v2 import PLATFORM_PROFILES
+        key = self.pf_combo.currentData()
+        prof = PLATFORM_PROFILES.get(key)
+        if prof:
+            self.pf_note.setText("ℹ " + prof.note_ar)
+        self.pf_template.setVisible(key == "custom")
+
+    def _pf_preview(self):
+        folder = self.folder_edit.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "تنبيه", "اختر مجلدًا صالحًا أولًا (أعلى النافذة)")
+            return
+        _ensure_engine_path()
+        from engine_v2.cleanup_v2 import scan_folder
+        from engine_v2.naming_v2 import unmojibake
+        from engine_v2.platform_profiles_v2 import (PLATFORM_PROFILES,
+                                                    plan_platform_export,
+                                                    render_custom)
+        key = self.pf_combo.currentData()
+        prof = PLATFORM_PROFILES.get(key)
+        files = scan_folder(folder)
+        self._pf_files = files
+        stems = [unmojibake(p.stem) for p in files]
+        if key == "custom":
+            tpl = self.pf_template.text().strip() or "{الرقم}_{التسلسل}_{الوحدة}"
+            seen: dict[str, int] = {}
+            pairs = []
+            for stem in stems:
+                new = render_custom(stem, tpl)
+                if new and new in seen:
+                    seen[new] += 1
+                    new = f"{new}_{seen[new]}"
+                elif new:
+                    seen[new] = 1
+                pairs.append((stem, new))
+            self._pf_pairs = pairs
+        else:
+            self._pf_pairs = plan_platform_export(stems, prof)
+        self.pf_table.setRowCount(len(self._pf_pairs))
+        n_ok = 0
+        for i, ((old, new), p) in enumerate(zip(self._pf_pairs, files)):
+            self.pf_table.setItem(i, 0, QTableWidgetItem(p.name))
+            if new:
+                self.pf_table.setItem(
+                    i, 1, QTableWidgetItem(new + p.suffix.lower()))
+                n_ok += 1
+            else:
+                it = QTableWidgetItem("— اسم غير مفهوم — يُتجاهل")
+                it.setForeground(QColor("#b00020"))
+                self.pf_table.setItem(i, 1, it)
+        self.pf_status.setText(f"جاهز للتصدير: {n_ok} من {len(files)}")
+        self.pf_apply.setEnabled(n_ok > 0)
+
+    def _pf_apply(self):
+        import shutil
+        folder = self.folder_edit.text().strip()
+        pairs = getattr(self, "_pf_pairs", None)
+        files = getattr(self, "_pf_files", None)
+        if not pairs or not files:
+            return
+        key = self.pf_combo.currentData()
+        out_dir = Path(folder) / f"_تصدير_{key}"
+        out_dir.mkdir(exist_ok=True)
+        n = 0
+        errors = []
+        for (old, new), p in zip(pairs, files):
+            if not new:
+                continue
+            try:
+                shutil.copy2(str(p), str(out_dir / (new + p.suffix.lower())))
+                n += 1
+            except OSError as exc:
+                errors.append(f"{p.name}: {exc}")
+        if errors:
+            QMessageBox.warning(self, "اكتمل مع أخطاء",
+                                f"نُسخ {n} ملفًا.\nأخطاء: {errors[:5]}")
+        else:
+            QMessageBox.information(
+                self, "تم",
+                f"نُسخ {n} ملفًا بأسماء {key} إلى:\n{out_dir}")
 
     def _browse(self):
         folder = QFileDialog.getExistingDirectory(self, "اختر مجلد النتائج السابقة")
@@ -833,9 +1203,38 @@ def install_v2(main_window, data_root: Path) -> None:
     # 2) touch-ups only for V2 buttons; the legacy stylesheet already sizes
     #    its own controls, a global min-height would break compact rows
     main_window.setStyleSheet(main_window.styleSheet() + """
-        QPushButton#v2RenameBtn, QPushButton#v2SessionsBtn {
-            padding: 4px 14px; font-weight: 600;
+        QPushButton#v2RenameBtn, QPushButton#v2SessionsBtn,
+        QPushButton#v2SaveNowBtn, QPushButton#v2NamingBtn,
+        QPushButton#v2HelpBtn {
+            padding: 4px 14px; font-weight: 700;
+            background: #16375e; color: #e8f2ff;
+            border: 1px solid #3f6da0; border-radius: 8px;
         }
+        QPushButton#v2RenameBtn:hover, QPushButton#v2SessionsBtn:hover,
+        QPushButton#v2SaveNowBtn:hover, QPushButton#v2NamingBtn:hover,
+        QPushButton#v2HelpBtn:hover {
+            background: #1d4a7e; border-color: #5b9bd0;
+        }
+        QPushButton#v2EditorBtn {
+            padding: 4px 14px; font-weight: 800;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #3b2575, stop:1 #5636a8);
+            color: #ffffff; border: 1px solid #6d4fc4; border-radius: 8px;
+        }
+        QPushButton#v2EditorBtn:hover { background: #4a2d92; }
+        QPushButton#v2RefineBtn {
+            padding: 4px 14px; font-weight: 800;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0b5e4c, stop:1 #0f8a67);
+            color: #ffffff; border: 1px solid #23a37e; border-radius: 8px;
+        }
+        QPushButton#v2RefineBtn:hover { background: #0d7157; }
+        QPushButton#v2NutritionBtn {
+            background: #fff4e0; color: #8a4b00;
+            border: 1px solid #e0ae3f; border-radius: 7px;
+            font-weight: 800; padding: 6px 12px;
+        }
+        QPushButton#v2NutritionBtn:hover { background: #ffe9c2; }
     """)
 
     # 3) session store
@@ -1356,17 +1755,49 @@ class BatchRefineDialog(QDialog):
         self.chk_names.setChecked(True)
         self.chk_recursive = QCheckBox("شمول المجلدات الفرعية داخل المصدر")
         self.chk_recursive.setChecked(False)
+        self.chk_compress = QCheckBox("ضغط الملفات (حجم أصغر بجودة عالية جدًا)")
+        self.chk_compress.setChecked(False)
+        self.chk_compress.setToolTip(
+            "يصغّر حجم الملفات للرفع السريع للمواقع مع جودة عالية جدًا تحافظ"
+            " على وضوح تفاصيل وحقائق المنتج. بدونه: جودة كاملة بلا فقدان.")
+        self.chk_polish = QCheckBox("تنقيح استوديو نهائي للتسليم (لمعة متجر)")
+        self.chk_polish.setChecked(False)
+        self.chk_polish.setToolTip(
+            "يعيد فحص كل صورة: حواف نظيفة بلا أطر داكنة، توازن أبيض، إضاءة"
+            " استوديو ناعمة وألوان نضرة — مظهر تصوير استوديو للمتجر.")
+        self.chk_text_aware = QCheckBox("وضوح فائق للكتابات (ذكي)")
+        self.chk_text_aware.setChecked(True)
+        self.chk_text_aware.setToolTip(
+            "محرك حدة ذكي يتعرف على كتابات المنتج والحقائق الغذائية"
+            " ويحافظ على وضوحها التام أثناء التأطير والتحسين.")
+        self.chk_blur_dates = QCheckBox("طمس تواريخ الإنتاج/الانتهاء تلقائيًا")
+        self.chk_blur_dates.setChecked(True)
+        self.chk_blur_dates.setToolTip(
+            "يكشف التواريخ المطبوعة على العبوة ويطمسها بتمويه طفيف بلون"
+            " المنتج نفسه — دون المساس بالحقائق الغذائية أو الباركود.")
         self.shadow_combo = QComboBox()
         self.shadow_combo.addItems(["بدون ظل", "ظل أرضي ناعم", "ظل أرضي قوي",
                                     "ظل مسقط يمين", "ظل مسقط يسار",
                                     "ظل استوديو 3D"])
+        self.fmt_combo = QComboBox()
+        self.fmt_combo.addItems(["WebP — الأفضل للمتاجر (موصى به)",
+                                 "JPG — التوافق الأوسع مع كل المواقع",
+                                 "PNG — جودة كاملة بلا فقدان"])
+        self.fmt_combo.setToolTip(
+            "صيغة واحدة فقط للإخراج النهائي — اختر الأنسب لموقعك.")
         opts.addWidget(self.chk_recut, 0, 0)
         opts.addWidget(self.chk_enhance, 0, 1)
         opts.addWidget(self.chk_frame, 1, 0)
         opts.addWidget(self.chk_names, 1, 1)
         opts.addWidget(self.chk_recursive, 2, 0)
-        opts.addWidget(QLabel("الظل:"), 3, 0)
-        opts.addWidget(self.shadow_combo, 3, 1)
+        opts.addWidget(self.chk_compress, 2, 1)
+        opts.addWidget(self.chk_polish, 3, 0)
+        opts.addWidget(self.chk_text_aware, 3, 1)
+        opts.addWidget(self.chk_blur_dates, 4, 0)
+        opts.addWidget(QLabel("الظل:"), 5, 0)
+        opts.addWidget(self.shadow_combo, 5, 1)
+        opts.addWidget(QLabel("صيغة الإخراج:"), 6, 0)
+        opts.addWidget(self.fmt_combo, 6, 1)
         root.addWidget(opts_box)
 
         self.progress_bar = QProgressBar()
@@ -1430,6 +1861,7 @@ class BatchRefineDialog(QDialog):
                           .get("batch_workers", 2))
         except Exception:
             pass
+        fmt_map = {0: "webp", 1: "jpg", 2: "png"}
         opts = RefineOptions(
             recut=self.chk_recut.isChecked(),
             enhance=self.chk_enhance.isChecked(),
@@ -1439,6 +1871,11 @@ class BatchRefineDialog(QDialog):
             excel_path=self.xls_edit.text().strip(),
             recursive=self.chk_recursive.isChecked(),
             workers=workers,
+            compress=self.chk_compress.isChecked(),
+            out_format=fmt_map.get(self.fmt_combo.currentIndex(), "webp"),
+            polish=self.chk_polish.isChecked(),
+            text_aware=self.chk_text_aware.isChecked(),
+            blur_dates=self.chk_blur_dates.isChecked(),
         )
         from engine_v2.paths_v2 import models_dir as _models_dir
         models_dir = _models_dir()

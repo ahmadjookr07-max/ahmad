@@ -116,6 +116,7 @@ class EditorCanvas(QGraphicsView):
     TOOL_RESTORE = "restore"  # استرجاع من الأصل
     TOOL_REGION = "region"    # فرشاة تحديد منطقة العزل
     TOOL_REGION_RECT = "region_rect"  # مستطيل تحديد منطقة
+    TOOL_DATE_BLUR = "date_blur"      # طمس تاريخ يدوي (سحب مستطيل — تمويه بلون المنتج)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -144,6 +145,31 @@ class EditorCanvas(QGraphicsView):
         self._rect_start: QPointF | None = None
         self._rect_item = None
         self._first_fit_done = False
+        self.show_grid = False   # شبكة إرشادية أثناء التوزين
+
+    def drawForeground(self, painter, rect) -> None:  # noqa: N802
+        super().drawForeground(painter, rect)
+        if not self.show_grid or self._item.pixmap().isNull():
+            return
+        # شبكة شفافة ثابتة فوق الصورة لموازنة المنتج بصريًا
+        br = self._scene.sceneRect()
+        pen = QPen(QColor(30, 110, 220, 110), 0)
+        painter.setPen(pen)
+        step = max(br.width(), br.height()) / 12.0
+        x = br.left()
+        while x <= br.right():
+            painter.drawLine(QPointF(x, br.top()), QPointF(x, br.bottom()))
+            x += step
+        y = br.top()
+        while y <= br.bottom():
+            painter.drawLine(QPointF(br.left(), y), QPointF(br.right(), y))
+            y += step
+        # خطا المنتصف أوضح
+        pen2 = QPen(QColor(220, 60, 60, 150), 0)
+        painter.setPen(pen2)
+        cx, cy = br.center().x(), br.center().y()
+        painter.drawLine(QPointF(cx, br.top()), QPointF(cx, br.bottom()))
+        painter.drawLine(QPointF(br.left(), cy), QPointF(br.right(), cy))
 
     # ---------------------------------------------------------- image API
     def set_image(self, img_bgr_or_bgra: np.ndarray, fit: bool = False) -> None:
@@ -175,12 +201,36 @@ class EditorCanvas(QGraphicsView):
         if tool == self.TOOL_PAN:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
             self.viewport().setCursor(Qt.OpenHandCursor)
+        elif tool in (self.TOOL_ERASE, self.TOOL_RESTORE, self.TOOL_REGION):
+            self.setDragMode(QGraphicsView.NoDrag)
+            self._update_cursor_preview()
         else:
             self.setDragMode(QGraphicsView.NoDrag)
             self.viewport().setCursor(Qt.CrossCursor)
 
     def set_brush_size(self, size: int) -> None:
         self._brush_size = max(4, int(size))
+        self._update_cursor_preview()
+
+    def _update_cursor_preview(self) -> None:
+        """مؤشر دائري حي بحجم الفرشاة الحقيقي أثناء التلوين."""
+        if self._tool not in (self.TOOL_ERASE, self.TOOL_RESTORE,
+                              self.TOOL_REGION):
+            return
+        d = max(6, int(self._brush_size * self._zoom))
+        d = min(d, 260)
+        pm = QPixmap(d + 2, d + 2)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        color = QColor(220, 60, 60) if self._tool == self.TOOL_ERASE \
+            else QColor(30, 130, 60) if self._tool == self.TOOL_RESTORE \
+            else QColor(230, 140, 30)
+        pen = QPen(color, 2)
+        p.setPen(pen)
+        p.drawEllipse(1, 1, d, d)
+        p.end()
+        self.viewport().setCursor(QCursor(pm, d // 2 + 1, d // 2 + 1))
 
     # ------------------------------------------------------------- events
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -198,6 +248,7 @@ class EditorCanvas(QGraphicsView):
         self.translate(delta.x(), delta.y())
         self._zoom = new_zoom
         self.zoom_changed.emit(self._zoom)
+        self._update_cursor_preview()
 
     def mousePressEvent(self, event) -> None:
         if self._tool in (self.TOOL_ERASE, self.TOOL_RESTORE, self.TOOL_REGION) \
@@ -206,7 +257,8 @@ class EditorCanvas(QGraphicsView):
             self._stroke_points = []
             self._add_point(event.position())
             return
-        if self._tool == self.TOOL_REGION_RECT and event.button() == Qt.LeftButton:
+        if self._tool in (self.TOOL_REGION_RECT, self.TOOL_DATE_BLUR) \
+                and event.button() == Qt.LeftButton:
             self._rect_start = self.mapToScene(event.position().toPoint())
             if self._rect_item is not None:
                 self._scene.removeItem(self._rect_item)
@@ -222,7 +274,8 @@ class EditorCanvas(QGraphicsView):
         if self._painting:
             self._add_point(event.position())
             return
-        if self._tool == self.TOOL_REGION_RECT and self._rect_start is not None:
+        if self._tool in (self.TOOL_REGION_RECT, self.TOOL_DATE_BLUR) \
+                and self._rect_start is not None:
             cur = self.mapToScene(event.position().toPoint())
             self._rect_item.setRect(QRectF(self._rect_start, cur).normalized())
             return
@@ -236,7 +289,8 @@ class EditorCanvas(QGraphicsView):
                                        self._brush_size, self._tool)
             self._stroke_points = []
             return
-        if self._tool == self.TOOL_REGION_RECT and self._rect_start is not None \
+        if self._tool in (self.TOOL_REGION_RECT, self.TOOL_DATE_BLUR) \
+                and self._rect_start is not None \
                 and event.button() == Qt.LeftButton:
             rect = self._rect_item.rect().normalized()
             self._scene.removeItem(self._rect_item)
@@ -244,7 +298,7 @@ class EditorCanvas(QGraphicsView):
             self._rect_start = None
             # أرسل زوايا المستطيل كنقطتين مع أداة خاصة
             pts = [(rect.left(), rect.top()), (rect.right(), rect.bottom())]
-            self.brush_stroke.emit(pts, 0, self.TOOL_REGION_RECT)
+            self.brush_stroke.emit(pts, 0, self._tool)
             return
         super().mouseReleaseEvent(event)
 
@@ -362,8 +416,13 @@ class V2PhotoEditorDialog(QDialog):
         self.mode_label = QLabel("")
         self.mode_label.setStyleSheet("color:#0a6e3a;font-weight:700;")
 
+        self.help_btn = QPushButton("؟ تعليمات")
+        self.help_btn.setMinimumHeight(38)
+        self.help_btn.clicked.connect(self._show_help)
+
         for wdg in (self.open_btn, self.save_btn, self.undo_btn, self.redo_btn,
-                    self.before_btn, self.reset_btn, self.fit_btn):
+                    self.before_btn, self.reset_btn, self.fit_btn,
+                    self.help_btn):
             top.addWidget(wdg)
         top.addWidget(self.zoom_label)
         top.addStretch(1)
@@ -475,33 +534,91 @@ class V2PhotoEditorDialog(QDialog):
         v1.addWidget(self.center_btn)
         lay.addWidget(g1)
 
-        g2 = QGroupBox("الظل الواقعي (قريب من 3D)")
+        # الظل المبسّط: مفتاح واحد + منزلق قوة — دائمًا أسفل المنتج
+        g2 = QGroupBox("الظل (أسفل المنتج)")
         v2 = QVBoxLayout(g2)
-        self.shadow_combo = QComboBox()
-        self.shadow_combo.setMinimumHeight(36)
-        v2.addWidget(self.shadow_combo)
-
+        self.shadow_enable_cb = QCheckBox("تفعيل ظل طبيعي أسفل المنتج")
+        self.shadow_enable_cb.setToolTip(
+            "ظل أرضي ناعم فقط — بلا اتجاهات معقدة")
+        v2.addWidget(self.shadow_enable_cb)
         row = QGridLayout()
-        row.addWidget(QLabel("الشفافية"), 0, 0)
-        self.shadow_opacity = QSlider(Qt.Horizontal)
-        self.shadow_opacity.setRange(5, 90)
-        self.shadow_opacity.setValue(38)
-        row.addWidget(self.shadow_opacity, 0, 1)
-        row.addWidget(QLabel("الضبابية"), 1, 0)
-        self.shadow_blur = QSlider(Qt.Horizontal)
-        self.shadow_blur.setRange(5, 60)
-        self.shadow_blur.setValue(23)
-        row.addWidget(self.shadow_blur, 1, 1)
-        row.addWidget(QLabel("الاتجاه"), 2, 0)
-        self.shadow_angle = QSlider(Qt.Horizontal)
-        self.shadow_angle.setRange(0, 180)
-        self.shadow_angle.setValue(35)
-        row.addWidget(self.shadow_angle, 2, 1)
+        row.addWidget(QLabel("قوة الظل"), 0, 0)
+        self.shadow_strength = QSlider(Qt.Horizontal)
+        self.shadow_strength.setLayoutDirection(Qt.LeftToRight)
+        self.shadow_strength.setRange(10, 100)
+        self.shadow_strength.setValue(45)
+        self.shadow_strength.setToolTip("اسحب يمينًا لزيادة الظل")
+        row.addWidget(self.shadow_strength, 0, 1)
+        self.shadow_strength_lbl = QLabel("45")
+        self.shadow_strength.valueChanged.connect(
+            lambda v: self.shadow_strength_lbl.setText(str(v)))
+        row.addWidget(self.shadow_strength_lbl, 0, 2)
         v2.addLayout(row)
-        for s in (self.shadow_opacity, self.shadow_blur, self.shadow_angle):
-            s.valueChanged.connect(self._shadow_changed)
+        # متقدم (مطوي): القوالب القديمة لمن يريدها
+        self.shadow_combo = QComboBox()
+        self.shadow_combo.setMinimumHeight(30)
+        self.shadow_combo.setVisible(False)
+        adv_btn = QPushButton("خيارات متقدمة ▾")
+        adv_btn.setFlat(True)
+        adv_btn.setStyleSheet("color:#2563eb;text-align:right;")
+        adv_btn.clicked.connect(
+            lambda: self.shadow_combo.setVisible(
+                not self.shadow_combo.isVisible()))
+        v2.addWidget(adv_btn)
+        v2.addWidget(self.shadow_combo)
+        self.shadow_enable_cb.toggled.connect(self._shadow_changed)
+        self.shadow_strength.valueChanged.connect(self._shadow_changed)
         self.shadow_combo.currentIndexChanged.connect(self._shadow_changed)
         lay.addWidget(g2)
+
+        # إزالة الانعكاسات — في الشاشة الخارجية مباشرة
+        g_glare = QGroupBox("إزالة انعكاسات التصوير (اللمعان)")
+        vg = QVBoxLayout(g_glare)
+        self.glare_enable_cb = QCheckBox("تفعيل إزالة الانعكاسات")
+        self.glare_enable_cb.setToolTip(
+            "يكشف لمعان الفلاش والإضاءة ويزيله مع حفظ تفاصيل العبوة")
+        vg.addWidget(self.glare_enable_cb)
+        grow = QGridLayout()
+        grow.addWidget(QLabel("القوة"), 0, 0)
+        self.glare_strength = QSlider(Qt.Horizontal)
+        self.glare_strength.setLayoutDirection(Qt.LeftToRight)
+        self.glare_strength.setRange(10, 100)
+        self.glare_strength.setValue(60)
+        self.glare_strength.setToolTip(
+            "اسحب يمينًا للتقوية ويسارًا للتضعيف — النتيجة تظهر فورًا")
+        grow.addWidget(self.glare_strength, 0, 1)
+        self.glare_strength_lbl = QLabel("60")
+        self.glare_strength.valueChanged.connect(
+            lambda v: self.glare_strength_lbl.setText(str(v)))
+        grow.addWidget(self.glare_strength_lbl, 0, 2)
+        vg.addLayout(grow)
+        self.glare_enable_cb.toggled.connect(self._schedule_preview)
+        self.glare_strength.valueChanged.connect(self._schedule_preview)
+        lay.addWidget(g_glare)
+
+        # المساعد الذكي: اقتراحات تلقائية لكل صورة
+        g_ai = QGroupBox("المساعد الذكي — اقتراحات")
+        vai = QVBoxLayout(g_ai)
+        self.suggest_btn = QPushButton("حلل الصورة واقترح تحسينات ✦")
+        self.suggest_btn.setMinimumHeight(36)
+        self.suggest_btn.clicked.connect(self._show_suggestions)
+        vai.addWidget(self.suggest_btn)
+        self.suggestions_box = QVBoxLayout()
+        vai.addLayout(self.suggestions_box)
+        erow = QHBoxLayout()
+        self.refine_edges_btn = QPushButton("تنعيم الحواف الذكي")
+        self.refine_edges_btn.setMinimumHeight(34)
+        self.refine_edges_btn.setToolTip(
+            "للمنتجات الصعبة: أغلفة شفافة وانحناءات (مثل الدجاج)")
+        self.refine_edges_btn.clicked.connect(self._refine_edges)
+        self.dehalo_btn = QPushButton("إزالة هالة الخلفية")
+        self.dehalo_btn.setMinimumHeight(34)
+        self.dehalo_btn.setToolTip("يزيل بقايا لون الخلفية العالقة على الحواف")
+        self.dehalo_btn.clicked.connect(self._remove_halo)
+        erow.addWidget(self.refine_edges_btn)
+        erow.addWidget(self.dehalo_btn)
+        vai.addLayout(erow)
+        lay.addWidget(g_ai)
 
         g3 = QGroupBox("منطقة العزل (للدمج الانتقائي)")
         v3 = QVBoxLayout(g3)
@@ -574,9 +691,29 @@ class V2PhotoEditorDialog(QDialog):
         prow.addWidget(self.pan_btn)
         v1.addLayout(prow)
 
+        drow = QHBoxLayout()
+        self.date_blur_btn = QPushButton("طمس تاريخ يدوي")
+        self.date_blur_btn.setCheckable(True)
+        self.date_blur_btn.setMinimumHeight(38)
+        self.date_blur_btn.setToolTip(
+            "اسحب مستطيلًا فوق التاريخ المطبوع — يُطمس بتمويه طفيف\n"
+            "بلون المنتج نفسه دون أثر واضح")
+        self.date_blur_btn.toggled.connect(
+            lambda on: self._pick_tool(EditorCanvas.TOOL_DATE_BLUR, on,
+                                       self.date_blur_btn))
+        drow.addWidget(self.date_blur_btn)
+        self.auto_date_btn = QPushButton("طمس التواريخ تلقائيًا")
+        self.auto_date_btn.setMinimumHeight(38)
+        self.auto_date_btn.setToolTip(
+            "يكشف تواريخ الإنتاج/الانتهاء المطبوعة في الصورة ويطمسها تلقائيًا")
+        self.auto_date_btn.clicked.connect(self._auto_blur_dates)
+        drow.addWidget(self.auto_date_btn)
+        v1.addLayout(drow)
+
         srow = QHBoxLayout()
         srow.addWidget(QLabel("حجم الفرشاة"))
         self.brush_slider = QSlider(Qt.Horizontal)
+        self.brush_slider.setLayoutDirection(Qt.LeftToRight)
         self.brush_slider.setRange(6, 200)
         self.brush_slider.setValue(40)
         self.brush_slider.valueChanged.connect(self.canvas.set_brush_size)
@@ -590,6 +727,7 @@ class V2PhotoEditorDialog(QDialog):
         frow = QHBoxLayout()
         frow.addWidget(QLabel("نعومة الحواف"))
         self.feather_slider = QSlider(Qt.Horizontal)
+        self.feather_slider.setLayoutDirection(Qt.LeftToRight)
         self.feather_slider.setRange(0, 30)
         self.feather_slider.setValue(6)
         self.feather_slider.valueChanged.connect(self._schedule_preview)
@@ -610,8 +748,11 @@ class V2PhotoEditorDialog(QDialog):
         for i, (label, key, lo, hi, dv) in enumerate(specs):
             v2.addWidget(QLabel(label), i, 0)
             s = QSlider(Qt.Horizontal)
+            # LTR ثابت حتى لا ينعكس السحب في واجهة RTL: يمين = زيادة
+            s.setLayoutDirection(Qt.LeftToRight)
             s.setRange(lo, hi)
             s.setValue(dv)
+            s.setToolTip("اسحب يمينًا للزيادة ويسارًا للنقصان")
             s.valueChanged.connect(self._schedule_preview)
             self._sliders[key] = s
             v2.addWidget(s, i, 1)
@@ -624,20 +765,49 @@ class V2PhotoEditorDialog(QDialog):
         v2.addWidget(reset_sliders, len(specs), 0, 1, 3)
         lay.addWidget(g2)
 
-        g3 = QGroupBox("اقتصاص وتدوير")
+        g3 = QGroupBox("اقتصاص وتوزين المنتج (تدوير دقيق)")
         v3 = QVBoxLayout(g3)
         rot_row = QHBoxLayout()
-        rot_row.addWidget(QLabel("تدوير"))
+        rot_row.addWidget(QLabel("ميول"))
+        # دقة 0.1°: القيمة الداخلية بأعشار الدرجة (-1800..1800)
         self.rotate_slider = QSlider(Qt.Horizontal)
-        self.rotate_slider.setRange(-180, 180)
+        self.rotate_slider.setLayoutDirection(Qt.LeftToRight)
+        self.rotate_slider.setRange(-1800, 1800)
         self.rotate_slider.setValue(0)
+        self.rotate_slider.setSingleStep(1)   # 0.1°
+        self.rotate_slider.setPageStep(10)    # 1°
+        self.rotate_slider.setToolTip(
+            "اسحب لتوزين المنتج بدقة 0.1 درجة — تظهر شبكة إرشادية أثناء السحب")
         self.rotate_slider.valueChanged.connect(self._schedule_preview)
+        self.rotate_slider.sliderPressed.connect(
+            lambda: setattr(self.canvas, "show_grid", True))
+        self.rotate_slider.sliderReleased.connect(self._rot_released)
         rot_row.addWidget(self.rotate_slider)
-        self.rot_lbl = QLabel("0°")
+        self.rot_lbl = QLabel("0.0°")
+        self.rot_lbl.setMinimumWidth(48)
         self.rotate_slider.valueChanged.connect(
-            lambda v: self.rot_lbl.setText(f"{v}°"))
+            lambda v: self.rot_lbl.setText(f"{v / 10.0:.1f}°"))
         rot_row.addWidget(self.rot_lbl)
         v3.addLayout(rot_row)
+        fine_row = QHBoxLayout()
+        for txt, delta in (("−٠.٥", -5), ("+٠.٥", 5)):
+            b = QPushButton(txt + "°")
+            b.setMinimumHeight(30)
+            b.setToolTip("ضبط دقيق نصف درجة")
+            b.clicked.connect(lambda _, d=delta: self.rotate_slider.setValue(
+                self.rotate_slider.value() + d))
+            fine_row.addWidget(b)
+        self.auto_level_btn = QPushButton("توزين تلقائي ذكي")
+        self.auto_level_btn.setMinimumHeight(30)
+        self.auto_level_btn.setToolTip(
+            "يكشف ميل المنتج تلقائيًا ويصححه بدقة")
+        self.auto_level_btn.clicked.connect(self._auto_level)
+        fine_row.addWidget(self.auto_level_btn)
+        rot_zero = QPushButton("تصفير")
+        rot_zero.setMinimumHeight(30)
+        rot_zero.clicked.connect(lambda: self.rotate_slider.setValue(0))
+        fine_row.addWidget(rot_zero)
+        v3.addLayout(fine_row)
         crop_row = QHBoxLayout()
         self.crop_btn = QPushButton("اقتصاص للتحديد")
         self.crop_btn.setMinimumHeight(34)
@@ -646,6 +816,33 @@ class V2PhotoEditorDialog(QDialog):
         crop_row.addWidget(self.crop_btn)
         v3.addLayout(crop_row)
         lay.addWidget(g3)
+
+        # تنقيح نهائي بمظهر الاستوديو — في الشاشة الخارجية مباشرة
+        g4 = QGroupBox("تنقيح استوديو للتسليم (حواف نظيفة + لمعة متجر)")
+        v4 = QVBoxLayout(g4)
+        self.polish_enable_cb = QCheckBox("تفعيل تنقيح الاستوديو")
+        self.polish_enable_cb.setToolTip(
+            "ينظف الحواف من أي سواد وهالات ويضيف لمعة تصوير استوديو:\n"
+            "توازن أبيض + إضاءة ناعمة + نضارة ألوان + حدة نظيفة —\n"
+            "النتيجة تظهر فورًا في المعاينة")
+        self.polish_enable_cb.toggled.connect(self._schedule_preview)
+        v4.addWidget(self.polish_enable_cb)
+        prow = QGridLayout()
+        prow.addWidget(QLabel("قوة اللمعة"), 0, 0)
+        self.polish_strength = QSlider(Qt.Horizontal)
+        self.polish_strength.setLayoutDirection(Qt.LeftToRight)
+        self.polish_strength.setRange(0, 100)
+        self.polish_strength.setValue(50)
+        self.polish_strength.setToolTip(
+            "يمينًا = لمعة أقوى — تنظيف الحواف يتم دائمًا كاملًا")
+        self.polish_strength.valueChanged.connect(self._schedule_preview)
+        prow.addWidget(self.polish_strength, 0, 1)
+        self.polish_strength_lbl = QLabel("50")
+        self.polish_strength.valueChanged.connect(
+            lambda v: self.polish_strength_lbl.setText(str(v)))
+        prow.addWidget(self.polish_strength_lbl, 0, 2)
+        v4.addLayout(prow)
+        lay.addWidget(g4)
 
         lay.addStretch(1)
         scroll.setWidget(inner)
@@ -656,16 +853,19 @@ class V2PhotoEditorDialog(QDialog):
     def _pick_tool(self, tool: str, on: bool, source_btn) -> None:
         if not on:
             # لو أطفأ المستخدم الزر نرجع للتحريك
-            if not any(b.isChecked() for b in
-                       (self.erase_btn, self.restore_btn,
-                        self.region_brush_btn, self.region_rect_btn)):
+            _btns = [self.erase_btn, self.restore_btn,
+                     self.region_brush_btn, self.region_rect_btn]
+            if getattr(self, "date_blur_btn", None) is not None:
+                _btns.append(self.date_blur_btn)
+            if not any(b.isChecked() for b in _btns):
                 self.pan_btn.setChecked(True)
                 self.canvas.set_tool(EditorCanvas.TOOL_PAN)
             return
         # أطفئ بقية أزرار الأدوات
         for b in (self.erase_btn, self.restore_btn, self.pan_btn,
-                  self.region_brush_btn, self.region_rect_btn):
-            if b is not source_btn and b.isChecked():
+                  self.region_brush_btn, self.region_rect_btn,
+                  getattr(self, "date_blur_btn", None)):
+            if b is not None and b is not source_btn and b.isChecked():
                 b.blockSignals(True)
                 b.setChecked(False)
                 b.blockSignals(False)
@@ -725,6 +925,15 @@ class V2PhotoEditorDialog(QDialog):
         self.rotate_slider.setValue(0)
         self.rotate_slider.blockSignals(False)
         self._populate_shadow_presets()
+        # التعلم المحلي: اقترح حجم الفرشاة والنعومة المفضلين للمستخدم
+        try:
+            from engine_v2 import learning_v2
+            size, soft = learning_v2.suggest_brush(
+                self.brush_slider.value(), self.feather_slider.value())
+            self.brush_slider.setValue(int(size))
+            self.feather_slider.setValue(int(soft))
+        except Exception:
+            pass
         self.canvas._first_fit_done = False
         self._recompose(fit=True)
         self.status_label.setText(Path(path).name)
@@ -767,6 +976,17 @@ class V2PhotoEditorDialog(QDialog):
         buf.tofile(path)
         self._saved_path = path
         self.status_label.setText(f"تم الحفظ: {Path(path).name}")
+        # التعلم المحلي: احفظ تفضيلات الجلسة عند الحفظ الناجح
+        try:
+            from engine_v2 import learning_v2
+            learning_v2.record_brush(self.brush_slider.value(),
+                                     self.feather_slider.value())
+            learning_v2.record_shadow(self._shadow_opts is not None)
+            sh = self._sliders["sharpness"].value()
+            if sh:
+                learning_v2.record_enhance_strength(sh / 100.0)
+        except Exception:
+            pass
 
     # -------------------------------------------------------- smart tools
     def _segmenter(self):
@@ -891,31 +1111,160 @@ class V2PhotoEditorDialog(QDialog):
 
         def after_cutout():
             self._smart_enhance()
-            # ظل افتراضي جميل إن لم يختر المستخدم ظلًا
-            if self.shadow_combo.currentIndex() == 0:
-                idx = self.shadow_combo.findText("ظل أرضي ناعم")
-                if idx >= 0:
-                    self.shadow_combo.setCurrentIndex(idx)  # يستدعي recompose
+            # ظل افتراضي طبيعي إن لم يفعّله المستخدم — وفق تفضيله المتعلّم
+            if not self.shadow_enable_cb.isChecked():
+                want_shadow = True
+                try:
+                    from engine_v2 import learning_v2
+                    want_shadow = learning_v2.suggest_shadow(True)
+                except Exception:
+                    pass
+                if want_shadow:
+                    self.shadow_enable_cb.setChecked(True)  # يستدعي recompose
             self._smart_frame()
             self.status_label.setText("اكتملت المعالجة الذكية الكاملة ✓")
 
         self._smart_cutout(then=after_cutout)
 
     def _shadow_changed(self) -> None:
+        """الظل المبسّط: مفتاح تفعيل + قوة واحدة — ظل أرضي أسفل المنتج دائمًا."""
         from engine_v2.shadow_v2 import SHADOW_PRESETS, ShadowOptions
-        name = self.shadow_combo.currentText()
-        if not name:
-            return
-        base = SHADOW_PRESETS.get(name, ShadowOptions(kind="none"))
-        if base.kind == "none":
+        if not self.shadow_enable_cb.isChecked():
             self._shadow_opts = None
-        else:
-            opts = ShadowOptions.from_dict(base.to_dict())
-            opts.opacity = self.shadow_opacity.value() / 100.0
-            opts.blur = self.shadow_blur.value()
-            opts.drop_angle_deg = float(self.shadow_angle.value())
-            self._shadow_opts = opts
+            self._schedule_preview()
+            return
+        # إن فتح المستخدم الخيارات المتقدمة واختار قالبًا، استخدمه كأساس
+        base = None
+        if self.shadow_combo.isVisible() and self.shadow_combo.currentText():
+            base = SHADOW_PRESETS.get(self.shadow_combo.currentText())
+        if base is None or getattr(base, "kind", "none") == "none":
+            base = SHADOW_PRESETS.get("ظل أرضي ناعم")
+        if base is None or getattr(base, "kind", "none") == "none":
+            # أمان: ظل أرضي افتراضي
+            base = ShadowOptions(kind="contact")
+        opts = ShadowOptions.from_dict(base.to_dict())
+        st = self.shadow_strength.value() / 100.0  # 0.10 .. 1.00
+        opts.opacity = 0.15 + st * 0.55            # 0.21 .. 0.70
+        opts.blur = int(12 + st * 34)              # 15 .. 46
+        self._shadow_opts = opts
+        try:
+            from engine_v2 import learning_v2
+            learning_v2.record_shadow(True)
+        except Exception:
+            pass
         self._schedule_preview()
+
+    # ---------------------------------------------------- smart assistant
+    def _show_help(self) -> None:
+        QMessageBox.information(
+            self, "تعليمات المحرر",
+            "خطوات العمل المقترحة:\n"
+            "1) افتح الصورة ثم اضغط َ‘معالجة ذكية كاملة’ للقص والتحسين تلقائيًا.\n"
+            "2) استخدم َ‘حلل الصورة واقترح تحسينات’ ليقترح المساعد الذكي تحسينات جاهزة بنقرة.\n"
+            "3) للحواف الصعبة (أغلفة شفافة، دجاج، انحناءات): ‘تنعيم الحواف الذكي’ ثم ‘إزالة هالة الخلفية’.\n"
+            "4) اللمعان والانعكاسات: فعّل ‘إزالة الانعكاسات’ واضبط القوة — النتيجة تظهر فورًا.\n"
+            "5) الفرشاة: قلم التبييض يمسح للخلفية البيضاء، والاسترجاع يعيد من الأصل. كبّر بعجلة الماوس للدقة.\n"
+            "6) المنزلقات: السحب يمينًا زيادة ويسارًا نقصان — دائمًا.\n"
+            "7) الظل: مفتاح واحد + قوة — ظل طبيعي أسفل المنتج فقط.\n"
+            "8) احفظ بصيغة WebP لأفضل جودة وحجم.\n\n"
+            "✦ التطبيق يتعلم منك: يحفظ تفضيلاتك (حجم الفرشاة، الظل، قوة التحسين) محليًا "
+            "داخل جهازك فقط ويقترحها تلقائيًا للصور المشابهة.")
+
+    def _clear_suggestions(self) -> None:
+        while self.suggestions_box.count():
+            item = self.suggestions_box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _show_suggestions(self) -> None:
+        """المساعد الذكي: تحليل الصورة وعرض اقتراحات تُطبَّق بنقرة."""
+        if self._original is None:
+            return
+        from engine_v2.edge_refine_v2 import smart_suggestions
+        alpha = self._base[:, :, 3] if (self._base is not None and
+                                        self._cutout_applied) else None
+        img = self._base[:, :, :3] if self._base is not None else self._original
+        sugg = smart_suggestions(img, alpha)
+        self._clear_suggestions()
+        if not sugg:
+            lbl = QLabel("الصورة ممتازة — لا توجد تحسينات مقترحة ✓")
+            lbl.setStyleSheet("color:#0a6e3a;")
+            self.suggestions_box.addWidget(lbl)
+            return
+        for s in sugg[:5]:
+            btn = QPushButton("✦ " + s["label_ar"])
+            btn.setToolTip(s.get("reason_ar", ""))
+            btn.setMinimumHeight(32)
+            btn.setStyleSheet(
+                "text-align:right;padding:4px 10px;"
+                "background:#eef6ff;border:1px solid #bfdcff;border-radius:6px;")
+            btn.clicked.connect(
+                lambda _=False, item=s: self._apply_suggestion(item))
+            self.suggestions_box.addWidget(btn)
+        self.status_label.setText(f"اقترح المساعد {len(sugg)} تحسينًا — اضغط للتطبيق")
+
+    def _apply_suggestion(self, s: dict) -> None:
+        key = s.get("key", "")
+        params = s.get("params", {})
+        if key == "brightness":
+            self._sliders["brightness"].setValue(int(params.get("value", 15)))
+        elif key == "contrast":
+            self._sliders["contrast"].setValue(25)
+        elif key == "sharpen":
+            self._sliders["sharpness"].setValue(
+                int(params.get("amount", 0.6) * 50))
+        elif key == "denoise":
+            self._sliders["denoise"].setValue(int(params.get("h", 7) * 5))
+        elif key == "refine_alpha":
+            self._refine_edges()
+            return
+        elif key == "remove_halo":
+            self._remove_halo()
+            return
+        elif key == "edge_review":
+            rects = params.get("rects", [])
+            QMessageBox.information(
+                self, "مراجعة الحواف",
+                f"توجد {len(rects)} منطقة حواف غير مؤكدة.\n"
+                "كبّر على أطراف المنتج واستخدم فرشاة الاسترجاع أو "
+                "‘تنعيم الحواف الذكي’.")
+            return
+        self.status_label.setText(f"طُبّق: {s['label_ar']} ✓")
+        self._schedule_preview()
+
+    def _refine_edges(self) -> None:
+        """تنعيم الحواف الذكي — للمنتجات الصعبة (شفافيات/انحناءات)."""
+        if self._base is None or not self._cutout_applied:
+            QMessageBox.information(self, "تنعيم الحواف",
+                                    "نفّذ إزالة الخلفية أولًا.")
+            return
+        self._push_history()
+        from engine_v2.edge_refine_v2 import refine_alpha
+        self._base = self._base.copy()
+        self._base[:, :, 3] = refine_alpha(self._base[:, :, :3],
+                                           self._base[:, :, 3])
+        try:
+            from engine_v2 import learning_v2
+            learning_v2.record_edge_correction(True)
+        except Exception:
+            pass
+        self.status_label.setText("تم تنعيم الحواف الذكي ✓")
+        self._recompose()
+
+    def _remove_halo(self) -> None:
+        """إزالة هالة لون الخلفية العالقة على الحواف."""
+        if self._base is None or not self._cutout_applied:
+            QMessageBox.information(self, "إزالة الهالة",
+                                    "نفّذ إزالة الخلفية أولًا.")
+            return
+        self._push_history()
+        from engine_v2.edge_refine_v2 import remove_halo
+        self._base = self._base.copy()
+        self._base[:, :, :3] = remove_halo(self._base[:, :, :3],
+                                           self._base[:, :, 3])
+        self.status_label.setText("تمت إزالة هالة الخلفية ✓")
+        self._recompose()
 
     # ------------------------------------------------------- manual tools
     def _on_stroke(self, points: list, size: int, tool: str) -> None:
@@ -925,6 +1274,23 @@ class V2PhotoEditorDialog(QDialog):
             return
         import cv2
         h, w = self._original.shape[:2]
+
+        if tool_base == EditorCanvas.TOOL_DATE_BLUR:
+            (x0, y0), (x1, y1) = points
+            x0, y0 = max(0, int(x0)), max(0, int(y0))
+            x1, y1 = min(w - 1, int(x1)), min(h - 1, int(y1))
+            if x1 - x0 < 3 or y1 - y0 < 3:
+                return
+            self._push_history()
+            try:
+                from engine_v2.date_blur_v2 import blur_region_manual
+                self._original = blur_region_manual(
+                    self._original, (x0, y0, x1 - x0, y1 - y0))
+                self.status_label.setText("طُمس التاريخ بتمويه طفيف بلون المنتج ✓")
+            except Exception as exc:
+                self.status_label.setText(f"تعذر الطمس: {exc}")
+            self._schedule_preview()
+            return
 
         if tool_base == EditorCanvas.TOOL_REGION_RECT:
             (x0, y0), (x1, y1) = points
@@ -970,6 +1336,26 @@ class V2PhotoEditorDialog(QDialog):
                 cv2.line(self._alpha_manual, p0, pts[i], value,
                          thickness=max(4, size), lineType=cv2.LINE_AA)
             self._schedule_preview()
+
+    def _auto_blur_dates(self) -> None:
+        """كشف وطمس التواريخ المطبوعة تلقائيًا في الصورة الحالية."""
+        if self._original is None:
+            return
+        self.status_label.setText("جارٍ كشف التواريخ المطبوعة...")
+        QApplication.processEvents()
+        try:
+            from engine_v2.date_blur_v2 import auto_blur_dates
+            self._push_history()
+            out, n = auto_blur_dates(self._original)
+            if n > 0:
+                self._original = out
+                self._schedule_preview()
+                self.status_label.setText(f"طُمس {n} تاريخ مطبوع ✓")
+            else:
+                self.status_label.setText(
+                    "لم يُكشف تاريخ تلقائيًا — استخدم (طمس تاريخ يدوي) واسحب فوقه")
+        except Exception as exc:
+            self.status_label.setText(f"تعذر الكشف التلقائي: {exc}")
 
     def _clear_region(self) -> None:
         self._region_mask = None
@@ -1069,8 +1455,26 @@ class V2PhotoEditorDialog(QDialog):
             adjusted = self._blend_region(rgb, adjusted)
         rgba[:, :, :3] = adjusted
 
-        # التدوير
-        angle = self.rotate_slider.value()
+        # إزالة الانعكاسات (معاينة فورية عند التفعيل)
+        if getattr(self, "glare_enable_cb", None) is not None and \
+                self.glare_enable_cb.isChecked():
+            from engine_v2.edge_refine_v2 import remove_glare
+            st = self.glare_strength.value() / 100.0
+            rgba[:, :, :3] = remove_glare(rgba[:, :, :3], st)
+
+        # تنقيح الاستوديو (حواف نظيفة + لمعة متجر) — معاينة فورية
+        if getattr(self, "polish_enable_cb", None) is not None and \
+                self.polish_enable_cb.isChecked():
+            from engine_v2.edge_refine_v2 import polish_for_store
+            ps = self.polish_strength.value() / 100.0
+            p_alpha = rgba[:, :, 3] if self._cutout_applied else None
+            p_rgb, p_a = polish_for_store(rgba[:, :, :3], p_alpha, ps)
+            rgba[:, :, :3] = p_rgb
+            if p_a is not None:
+                rgba[:, :, 3] = p_a
+
+        # التدوير — القيمة الداخلية بأعشار الدرجة (دقة 0.1°)
+        angle = self.rotate_slider.value() / 10.0
         if angle:
             h, w = rgba.shape[:2]
             M = cv2.getRotationMatrix2D((w / 2, h / 2), -angle, 1.0)
@@ -1083,6 +1487,40 @@ class V2PhotoEditorDialog(QDialog):
                                   borderValue=(0, 0, 0, 0) if self._cutout_applied
                                   else (255, 255, 255, 255))
         return rgba
+
+    def _rot_released(self) -> None:
+        """إخفاء الشبكة الإرشادية بعد انتهاء سحب منزلق التوزين."""
+        try:
+            self.canvas.show_grid = False
+            self.canvas.viewport().update()
+        except Exception:
+            pass
+
+    def _auto_level(self) -> None:
+        """توزين تلقائي ذكي: يكشف ميل المنتج من قناع ألفا ويصححه."""
+        if self._original is None:
+            return
+        try:
+            from engine_v2.edge_refine_v2 import auto_straighten_angle
+            # نستخدم ألفا بعد القص إن وجدت، وإلا نقدّر من السطوع
+            if self._cutout_applied and self._base is not None:
+                alpha = self._base[:, :, 3]
+            else:
+                import cv2 as _cv
+                gray = _cv.cvtColor(self._original[:, :, :3],
+                                    _cv.COLOR_BGR2GRAY)
+                alpha = (gray < 245).astype("uint8") * 255
+            ang = auto_straighten_angle(alpha)
+            if abs(ang) < 0.1:
+                QMessageBox.information(
+                    self, "توزين تلقائي",
+                    "المنتج متوازن بالفعل — لا حاجة للتصحيح.")
+                return
+            self.rotate_slider.setValue(int(round(ang * 10)))
+            self.status_label.setText(f"تم التوزين التلقائي: {ang:+.1f}° ✓")
+        except Exception as exc:
+            QMessageBox.warning(self, "توزين تلقائي",
+                                f"تعذر الكشف التلقائي: {exc}")
 
     def _sliders_active(self) -> bool:
         return any(s.value() != 0 for s in self._sliders.values())

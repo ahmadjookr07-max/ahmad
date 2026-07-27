@@ -38,7 +38,14 @@ class RefineOptions:
     excel_path: str = ""            # اختياري: أي ملف إكسل يختاره المستخدم
     recursive: bool = False         # معالجة المجلدات الفرعية أيضًا
     workers: int = 0                # 0 = تلقائي
-    webp_quality: int = 101         # lossless
+    webp_quality: int = 101         # 101 = lossless (جودة كاملة)
+    compress: bool = False          # ضغط الملفات: حجم أصغر بجودة عالية جدًا
+    compress_quality: int = 95      # جودة الضغط (عالية جدًا — تحافظ على حقائق المنتج)
+    out_format: str = "webp"        # صيغة الإخراج النهائية: webp | jpg | png (واحدة فقط يختارها المستخدم)
+    polish: bool = False            # تنقيح استوديو نهائي للتسليم (حواف نظيفة + لمعة متجر)
+    polish_strength: float = 0.5    # قوة التنقيح 0..1
+    text_aware: bool = True         # محرك الجودة الواعي بالنص: حدة ذكية + تصغير تدريجي
+    blur_dates: bool = True         # طمس تواريخ الإنتاج/الانتهاء المطبوعة تلقائيًا (تمويه طفيف بلون المنتج)
 
 
 @dataclass
@@ -89,13 +96,33 @@ class BatchRefiner:
         return self._catalog
 
     @staticmethod
-    def list_images(folder: str | Path, recursive: bool = False) -> list[Path]:
-        """كل الصور بأي مسمى وأي صيغة مدعومة — لا يشترط نمط تسمية."""
+    def list_images(folder: str | Path, recursive: bool = False,
+                    exclude_dir: str | Path | None = None) -> list[Path]:
+        """كل الصور بأي مسمى وأي صيغة مدعومة — لا يشترط نمط تسمية.
+
+        exclude_dir: مجلد الحفظ — يُستبعد من المصدر دائمًا حتى لو كان
+        متداخلًا داخل شجرة المصدر (سبب رئيسي لتضخم 991 ← 1200 صورة)."""
         folder = Path(folder)
+        excl = None
+        if exclude_dir:
+            try:
+                excl = Path(exclude_dir).resolve()
+            except Exception:
+                excl = None
         it = folder.rglob("*") if recursive else folder.iterdir()
-        files = [p for p in sorted(it)
-                 if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-                 and not p.name.startswith(".")]
+        files = []
+        for p in sorted(it):
+            if not (p.is_file() and p.suffix.lower() in IMAGE_EXTS
+                    and not p.name.startswith(".")):
+                continue
+            if excl is not None:
+                try:
+                    if excl == p.parent.resolve() or \
+                            excl in p.parent.resolve().parents:
+                        continue
+                except Exception:
+                    pass
+            files.append(p)
         return files
 
     # --------------------------------------------------------- checkpoint
@@ -116,8 +143,17 @@ class BatchRefiner:
     @staticmethod
     def _save_checkpoint(out_dir: Path, done: dict) -> None:
         try:
-            BatchRefiner._checkpoint_path(out_dir).write_text(
-                json.dumps(done, ensure_ascii=False), encoding="utf-8")
+            p = BatchRefiner._checkpoint_path(out_dir)
+            if os.name == "nt" and p.exists():
+                # إزالة سمة الإخفاء مؤقتًا (الكتابة فوق ملف مخفي تفشل على ويندوز)
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(p), 0x80)
+            p.write_text(json.dumps(done, ensure_ascii=False),
+                         encoding="utf-8")
+            if os.name == "nt":
+                # إخفاء ملف التقدم عن المستخدم داخل مجلد الصور
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(p), 0x02)
         except Exception:
             pass
 
@@ -128,6 +164,11 @@ class BatchRefiner:
         الوضع الحر (fix_names=False أو بلا إكسل): الاسم الأصلي يُحفظ كما هو
         مهما كان المسمى — لا يُشترط أي نمط تسمية ولا ملف إكسل.
         """
+        try:
+            from engine_v2.naming_v2 import normalize_stem
+            stem = normalize_stem(stem)
+        except Exception:
+            pass
         if not self.options.fix_names:
             return stem, ""
         if not self.options.excel_path:
@@ -177,10 +218,25 @@ class BatchRefiner:
                 r.status, r.error = "error", "تعذر قراءة الصورة"
                 return r
             h, w = img.shape[:2]
-            if max(h, w) > 2400:
-                sc = 2400 / max(h, w)
-                img = cv2.resize(img, (int(w * sc), int(h * sc)),
-                                 interpolation=cv2.INTER_AREA)
+            # حد أعلى مرفوع (3600 بدل 2400) + تصغير ذكي حافظ للنص —
+            # التصغير المبكر القاسي كان يفقد مقروئية كتابات المنتج
+            if max(h, w) > 3600:
+                sc = 3600 / max(h, w)
+                try:
+                    from engine_v2.quality_v2 import smart_downscale
+                    img = smart_downscale(img, int(w * sc), int(h * sc),
+                                          text_aware=o.text_aware)
+                except Exception:
+                    img = cv2.resize(img, (int(w * sc), int(h * sc)),
+                                     interpolation=cv2.INTER_AREA)
+
+            # طمس التواريخ المطبوعة تلقائيًا (قبل القص — على الصورة الأصلية)
+            if o.blur_dates:
+                try:
+                    from engine_v2.date_blur_v2 import auto_blur_dates
+                    img, _n = auto_blur_dates(img)
+                except Exception:
+                    pass  # ميزة تجميلية — لا توقف المعالجة
 
             rgba = None
             if o.recut:
@@ -194,11 +250,18 @@ class BatchRefiner:
                     rgba[:, :, 3] = alpha
 
             if o.enhance:
-                from engine_v2.enhancement_v2 import auto_enhance
+                # تحسين حافظ للنص: لا denoise فوق الكتابات — تبقى الحقائق واضحة
+                try:
+                    if o.text_aware:
+                        from engine_v2.quality_v2 import enhance_preserving_text as _enh
+                    else:
+                        from engine_v2.enhancement_v2 import auto_enhance as _enh
+                except Exception:
+                    from engine_v2.enhancement_v2 import auto_enhance as _enh
                 if rgba is not None:
-                    rgba[:, :, :3] = auto_enhance(rgba[:, :, :3])
+                    rgba[:, :, :3] = _enh(rgba[:, :, :3])
                 else:
-                    img = auto_enhance(img)
+                    img = _enh(img)
 
             # الظل الاختياري
             if o.shadow_preset and rgba is not None:
@@ -212,6 +275,23 @@ class BatchRefiner:
                     rgba = apply_shadow(rgba, preset,
                                         pad_bottom=int(rgba.shape[0] * 0.05))
 
+            # تنقيح استوديو نهائي للتسليم (اختياري): حواف نظيفة + لمعة متجر
+            if o.polish:
+                try:
+                    from engine_v2.edge_refine_v2 import polish_for_store
+                    st = float(max(0.0, min(1.0, o.polish_strength)))
+                    if rgba is not None:
+                        p_rgb, p_a = polish_for_store(rgba[:, :, :3],
+                                                      rgba[:, :, 3], st)
+                        rgba[:, :, :3] = p_rgb
+                        if p_a is not None:
+                            rgba[:, :, 3] = p_a
+                    else:
+                        p_rgb, _ = polish_for_store(img, None, st)
+                        img = p_rgb
+                except Exception:
+                    pass  # التنقيح تجميلي — لا يوقف المعالجة
+
             # التأطير على أبيض
             if o.frame:
                 final = self._frame_on_white(rgba if rgba is not None else img)
@@ -223,20 +303,52 @@ class BatchRefiner:
                 else:
                     final = img
 
-            # الاسم المضبوط
+            # الاسم المضبوط (مطبّع نهائيًا — لا شرطات مزدوجة أبدًا)
+            from engine_v2.naming_v2 import normalize_stem, parse_name
+            fmt = (o.out_format or "webp").lower().lstrip(".")
+            if fmt in ("jpeg",):
+                fmt = "jpg"
+            if fmt not in ("webp", "jpg", "png"):
+                fmt = "webp"
+            ext = "." + fmt
             new_stem, note = self._fixed_name(src.stem)
-            r.new_name = new_stem + ".webp"
+            new_stem = normalize_stem(new_stem)
+            r.new_name = new_stem + ext
             r.name_note = note
             out_path = out_dir / r.new_name
-            # تفادى الكتابة فوق ملف مختلف بنفس الاسم
-            counter = 2
-            while out_path.exists() and str(out_path) != str(src):
-                out_path = out_dir / f"{new_stem}__{counter}.webp"
-                counter += 1
-            ok, buf = cv2.imencode(".webp", final,
-                                   [cv2.IMWRITE_WEBP_QUALITY, o.webp_quality])
+            if out_path.exists() and str(out_path) != str(src):
+                # لا تولّد نسخًا مكررة: إن كان الناتج موجودًا مسبقًا لنفس الاسم
+                # (تشغيل ثانٍ لنفس المجلد) نتخطاه — هذا ما سبب تضخم
+                # 991 صورة إلى 1200+ بأسماء مثل `10004696_2__حبه`.
+                parsed_src = parse_name(src.stem)
+                if parsed_src is None and src.parent != out_dir:
+                    # مصدر غير قياسي اصطدم باسم موجود: أضف لاحقة تسلسل
+                    # قانونية (رقم لقطة تالٍ) بدل الشرطة المزدوجة الفاسدة.
+                    counter = 2
+                    cand = normalize_stem(f"{new_stem}_{counter}")
+                    while (out_dir / (cand + ext)).exists():
+                        counter += 1
+                        cand = normalize_stem(f"{new_stem}_{counter}")
+                    new_stem = cand
+                    r.new_name = new_stem + ext
+                    out_path = out_dir / r.new_name
+                else:
+                    r.output = str(out_path)
+                    r.status = "skipped"
+                    r.name_note = note or "موجود مسبقًا — تُخُطّي لمنع التكرار"
+                    return r
+            quality = int(o.compress_quality) if o.compress else int(o.webp_quality)
+            if fmt == "webp":
+                enc_params = [cv2.IMWRITE_WEBP_QUALITY, quality]
+            elif fmt == "jpg":
+                # JPG لا يدعم lossless — نقص الجودة عند 100 كحد أقصى
+                enc_params = [cv2.IMWRITE_JPEG_QUALITY, min(100, quality)]
+            else:  # png — بلا فقدان دائمًا؛ مستوى الضغط يؤثر في الحجم فقط
+                enc_params = [cv2.IMWRITE_PNG_COMPRESSION,
+                              6 if o.compress else 3]
+            ok, buf = cv2.imencode(ext, final, enc_params)
             if not ok:
-                r.status, r.error = "error", "فشل ترميز WebP"
+                r.status, r.error = "error", f"فشل ترميز {fmt.upper()}"
                 return r
             buf.tofile(str(out_path))
             r.output = str(out_path)
@@ -274,9 +386,30 @@ class BatchRefiner:
         ih, iw = img.shape[:2]
         sc = min(tw * (1 - 2 * m) / iw, th * (1 - 2 * m) / ih)
         nw, nh = max(1, int(iw * sc)), max(1, int(ih * sc))
-        resized = cv2.resize(img, (nw, nh),
-                             interpolation=cv2.INTER_AREA if sc < 1
-                             else cv2.INTER_CUBIC)
+        # محرك الجودة الواعي بالنص: تصغير تدريجي + حدة تعويضية —
+        # يحافظ على مقروئية كتابات المنتج والحقائق الغذائية عند التأطير
+        if sc < 1 and getattr(o, "text_aware", True) and \
+                (img.ndim != 3 or img.shape[2] != 4):
+            try:
+                from engine_v2.quality_v2 import smart_downscale
+                resized = smart_downscale(img, nw, nh, text_aware=True)
+            except Exception:
+                resized = cv2.resize(img, (nw, nh),
+                                     interpolation=cv2.INTER_AREA)
+        else:
+            # قناة ألفا أو تكبير: LANCZOS4 يحافظ على حدة التفاصيل
+            resized = cv2.resize(img, (nw, nh),
+                                 interpolation=cv2.INTER_AREA if sc < 1
+                                 else cv2.INTER_LANCZOS4)
+            if sc < 1 and getattr(o, "text_aware", True) and \
+                    resized.ndim == 3 and resized.shape[2] == 4:
+                # حدة نصية لقنوات اللون فقط مع إبقاء ألفا
+                try:
+                    from engine_v2.quality_v2 import adaptive_text_sharpen
+                    resized[:, :, :3] = adaptive_text_sharpen(
+                        resized[:, :, :3], strength=0.6)
+                except Exception:
+                    pass
         canvas = np.full((th, tw, 3), 255, np.uint8)
         ox, oy = (tw - nw) // 2, (th - nh) // 2
         if resized.ndim == 3 and resized.shape[2] == 4:
@@ -297,7 +430,9 @@ class BatchRefiner:
         self._stop.clear()
         folder, out_dir = Path(folder), Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        files = self.list_images(folder, recursive=self.options.recursive)
+        # استبعد مجلد الحفظ من المصدر دائمًا (منع إعادة معالجة النواتج)
+        files = self.list_images(folder, recursive=self.options.recursive,
+                                 exclude_dir=out_dir)
         done_map = self.load_checkpoint(out_dir) if resume else {}
 
         results: list[RefineItemResult] = []

@@ -410,11 +410,14 @@ class OwnerSettingsDialog(QDialog):
 
 
 def ensure_activated(parent=None) -> bool:
-    """يضمن الموافقة على الاتفاقية + ترخيصًا صالحًا. False = خروج."""
+    """يضمن الموافقة على الاتفاقية + ترخيصًا صالحًا أو تجربة فعالة.
+
+    التجربة التلقائية (3 أيام) تبدأ وحدها لأي جهاز جديد — لا تُطلب
+    نافذة التفعيل إلا بعد انتهاء التجربة أو الاشتراك. False = خروج."""
     if not eula_accepted():
         if EulaDialog(parent).exec() != QDialog.Accepted:
             return False
-    info = lv.check_license()
+    info = lv.effective_license()
     if info.valid:
         return True
     dlg = ActivationDialog(parent)
@@ -422,12 +425,19 @@ def ensure_activated(parent=None) -> bool:
 
 
 def license_badge_text() -> str:
-    info = lv.check_license()
+    """نص الشارة الحقيقي — يقرأ الحالة الفعلية (ترخيص أو تجربة)
+    ويعرض المدة المتبقية الصحيحة دائمًا — لا يظهر "دائم" إلا للترخيص
+    الدائم الفعلي الموقّع من المالك."""
+    info = lv.effective_license()
     if not info.valid:
+        if getattr(info, "plan", "") == "trial":
+            return "انتهت التجربة — يلزم تفعيل"
         return "الاشتراك: غير مفعل"
+    if getattr(info, "plan", "") == "trial":
+        return f"تجربة مجانية: متبق {info.days_left} أيام"
     if info.days_left < 0:
         return "الاشتراك: دائم"
-    return f"الاشتراك: {info.days_left} يومًا"
+    return f"الاشتراك: متبق {info.days_left} يومًا"
 
 
 def install_license_badge(main_window) -> None:
@@ -449,3 +459,14 @@ def install_license_badge(main_window) -> None:
     header_layout.insertWidget(insert_at, badge)
     header_layout.insertWidget(insert_at, owner_btn)
     main_window.v2_license_badge = badge
+
+    # تحديث دوري للشارة (كل ساعة) — تبقى المدة المعروضة صحيحة دائمًا
+    try:
+        from PySide6.QtCore import QTimer
+        timer = QTimer(main_window)
+        timer.setInterval(60 * 60 * 1000)
+        timer.timeout.connect(lambda: badge.setText(license_badge_text()))
+        timer.start()
+        main_window._v2_badge_timer = timer
+    except Exception:
+        pass

@@ -12,21 +12,40 @@ import os
 import threading
 from pathlib import Path
 
-from .processor_v2 import ProcessorV2, ProcessOptionsV2
+from typing import TYPE_CHECKING
+
 from .naming_v2 import next_sequence, build_name, UNIT_SUFFIX_DEFAULT
 
+if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
+    from .processor_v2 import ProcessorV2, ProcessOptionsV2
+
+
+def _lazy_processor_mod():
+    """استيراد كسول لـ processor_v2 (cv2/numpy ثقيلة) — يسرّع الإقلاع
+    لأن activate() تُستدعى قبل ظهور النافذة، والمحرك لا يُحتاج فعليًا
+    إلا عند معالجة أول صورة."""
+    from . import processor_v2
+    return processor_v2
+
+
+def __getattr__(name):  # PEP 562 — توافق خلفي لمن يستورد الأسماء من هنا
+    if name in ("ProcessorV2", "ProcessOptionsV2"):
+        return getattr(_lazy_processor_mod(), name)
+    raise AttributeError(name)
+
+
 _LOCK = threading.Lock()
-_PROCESSOR: ProcessorV2 | None = None
+_PROCESSOR = None  # ProcessorV2 | None — يُنشأ كسوليًا
 _MODEL_DIR = ""
 _ACTIVE = False
 
 # per-source-path overrides: {source_path: ProcessOptionsV2}
-IMAGE_OVERRIDES: dict[str, ProcessOptionsV2] = {}
+IMAGE_OVERRIDES: dict[str, object] = {}
 # per-source-path unit override: {source_path: unit}
 UNIT_OVERRIDES: dict[str, str] = {}
 
 
-def set_override(source_path: str, options: ProcessOptionsV2) -> None:
+def set_override(source_path: str, options) -> None:
     IMAGE_OVERRIDES[str(source_path)] = options
 
 
@@ -39,12 +58,12 @@ def clear_overrides() -> None:
     UNIT_OVERRIDES.clear()
 
 
-def get_processor(model_dir: str = "") -> ProcessorV2:
+def get_processor(model_dir: str = ""):
     global _PROCESSOR, _MODEL_DIR
     with _LOCK:
         if _PROCESSOR is None or (model_dir and model_dir != _MODEL_DIR):
             _MODEL_DIR = model_dir or _default_model_dir()
-            _PROCESSOR = ProcessorV2(_MODEL_DIR)
+            _PROCESSOR = _lazy_processor_mod().ProcessorV2(_MODEL_DIR)
     return _PROCESSOR
 
 
@@ -117,7 +136,8 @@ def activate(model_dir: str = "") -> bool:
             def _v2_process(self, source_path, output_path, *args, **kwargs):
                 try:
                     src = str(source_path)
-                    opts = IMAGE_OVERRIDES.get(src) or ProcessOptionsV2()
+                    opts = IMAGE_OVERRIDES.get(src) or \
+                        _lazy_processor_mod().ProcessOptionsV2()
                     proc = get_processor(model_dir)
                     res = proc.process(src, str(output_path), opts)
                     if res.ok:

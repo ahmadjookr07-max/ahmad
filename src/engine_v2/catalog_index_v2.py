@@ -220,10 +220,11 @@ class CatalogIndex:
         return [self.rows[i] for i in self.by_code_all.get(_clean_code(code), [])]
 
     def units_for_code(self, code: str) -> list[str]:
-        """الوحدات الحرفية كما في الإكسل بترتيب الظهور."""
+        """الوحدات الحرفية كما في الإكسل بترتيب الظهور (معقّمة من
+        الشرطات والمسافات الطرفية التي كانت تسبب أسماء `__حبه` مكررة)."""
         units = []
         for r in self.rows_for_code(code):
-            u = (r.get("unit") or "").strip()
+            u = (r.get("unit") or "").strip().strip("_").strip()
             if u and u not in units:
                 units.append(u)
         return units

@@ -447,7 +447,7 @@ class OwnerStudio(tk.Tk):
                 activeforeground=C_GOLD, font=F_BODY, indicatoron=True)
             rb.grid(row=0, column=col, sticky="e", padx=6)
 
-        mk_plan("trial", "تجريبي (7 أيام)", 3)
+        mk_plan("trial", "تجريبي (3 أيام)", 3)
         mk_plan("monthly", "شهري (30)", 2)
         mk_plan("yearly", "سنوي (365)", 1)
         mk_plan("lifetime", "دائم", 0)
