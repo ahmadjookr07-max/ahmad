@@ -91,9 +91,11 @@ def _candidate_text_boxes(img: np.ndarray) -> list[tuple[int, int, int, int]]:
     boxes = []
     for i in range(1, n):
         x, y, bw_, bh_, area = stats[i]
-        if bh_ < 8 or bh_ > h * 0.18:        # سطر تاريخ: ارتفاع محدود
+        if bh_ < 8 or bh_ > h * 0.08:        # سطر تاريخ: ارتفاع محدود فعلاً
             continue
-        if bw_ < bh_ * 1.6 or bw_ > w * 0.75:  # شريط أفقي وليس إطارًا
+        if bw_ < bh_ * 1.6 or bw_ > w * 0.6:   # شريط أفقي وليس إطارًا/عنوانًا
+            continue
+        if (bw_ * bh_) > (h * w) * 0.03:       # مساحة سطر تاريخ معقولة فقط
             continue
         fill = area / max(1, bw_ * bh_)
         if fill < 0.18:
@@ -176,6 +178,11 @@ def detect_date_regions(img: np.ndarray,
         candidates = [(int(x * inv), int(y * inv),
                        int(w_ * inv), int(h_ * inv))
                       for (x, y, w_, h_) in candidates]
+    # قيود صارمة بعد إرجاع المقياس الأصلي: منطقة تاريخ مطبوع لا تتجاوز
+    # 8% من ارتفاع الصورة ولا 60% من عرضها ولا 3% من مساحتها
+    candidates = [(x, y, w_, h_) for (x, y, w_, h_) in candidates
+                  if h_ <= H0 * 0.08 and w_ <= W0 * 0.6
+                  and (w_ * h_) <= (H0 * W0) * 0.03]
     # أولوية: أسفل الصورة أولاً (موضع طباعة التواريخ المعتاد) ثم الأعلى
     candidates.sort(key=lambda b: -(b[1] + b[3]))
     candidates = candidates[:max_candidates]
@@ -263,8 +270,32 @@ def _color_match_fill(img: np.ndarray, box: tuple[int, int, int, int],
     mask = np.zeros(win.shape[:2], np.uint8)
     mask[ly:ly + h_, lx:lx + w_] = 255
     radius = max(3, min(w_, h_) // 3)
+    # سقف زمني: inpaint على مناطق كبيرة بطيء جداً — نفذه على نسخة
+    # مصغرة ثم أعد التكبير (الطمس لا يحتاج دقة عالية أصلاً)
+    _scale = 1.0
+    if mask.sum() // 255 > 40000:
+        _scale = (40000.0 / (mask.sum() // 255)) ** 0.5
+        small_win = cv2.resize(win, None, fx=_scale, fy=_scale,
+                               interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(mask, (small_win.shape[1],
+                                       small_win.shape[0]),
+                                interpolation=cv2.INTER_NEAREST)
+        try:
+            small_fill = cv2.inpaint(small_win, small_mask,
+                                     max(3, int(radius * _scale)),
+                                     cv2.INPAINT_TELEA)
+            filled = cv2.resize(small_fill, (win.shape[1], win.shape[0]),
+                                interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            filled = win.copy()
+            filled[ly:ly + h_, lx:lx + w_] = np.median(
+                win.reshape(-1, 3), axis=0)
+        _done = True
+    else:
+        _done = False
     try:
-        filled = cv2.inpaint(win, mask, radius, cv2.INPAINT_TELEA)
+        if not _done:
+            filled = cv2.inpaint(win, mask, radius, cv2.INPAINT_TELEA)
     except Exception:
         filled = win.copy()
         ring = win.reshape(-1, 3)
