@@ -1,0 +1,10 @@
+__pycache__/
+*.py[co]
+!src/smart_catalog_vision/*.pyc
+build_tmp/
+dist/
+src/engine_v2/models/*.onnx
+resources/models/*.onnx
+owner_secrets.json
+*.lic
+.DS_Store

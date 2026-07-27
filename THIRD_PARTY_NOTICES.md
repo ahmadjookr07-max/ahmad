@@ -1,0 +1,1 @@
+Third-party notices: PySide6 (LGPL), OpenCV (Apache-2.0), onnxruntime (MIT), ISNet/DIS (Apache-2.0), Pillow (HPND), openpyxl (MIT), pytesseract (Apache-2.0), Tesseract OCR (Apache-2.0), Noto Naskh Arabic (OFL), dilithium-py (MIT), cryptography (Apache/BSD), zxing-cpp (Apache-2.0).
