@@ -1023,7 +1023,7 @@ class BulkRenameDialog(QDialog):
 
     def _browse_excel(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "اختر ملف الإكسل", "", "Excel (*.xlsx *.xls)")
+            self, "اختر ملف الإكسل", "", "ملفات الأصناف (*.xlsx *.xlsm *.xls *.csv)")
         if path:
             self.excel_edit.setText(path)
 
@@ -1835,7 +1835,7 @@ class BatchRefineDialog(QDialog):
 
     def _pick_excel(self):
         f, _ = QFileDialog.getOpenFileName(
-            self, "اختر ملف الإكسل", "", "Excel (*.xlsx *.xls)")
+            self, "اختر ملف الإكسل", "", "ملفات الأصناف (*.xlsx *.xlsm *.xls *.csv)")
         if f:
             self.xls_edit.setText(f)
 

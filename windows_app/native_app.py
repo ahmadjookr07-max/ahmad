@@ -3080,7 +3080,7 @@ class MainWindow(QMainWindow):
             self,
             "اختيار ملف المنتجات",
             str(Path.home()),
-            "ملفات Excel (*.xlsx *.xlsm)",
+            "ملفات الأصناف (*.xlsx *.xlsm *.xls *.csv)",
         )
         if filename:
             self.catalog_path = Path(filename)

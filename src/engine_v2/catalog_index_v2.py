@@ -36,20 +36,35 @@ def _clean_code(v) -> str:
 
 # ------------------------------------------------------- column detection
 _HINTS = {
-    "code": ["i_code", "code", "item", "رقم الصنف", "رقمالصنف", "الرقم", "كود"],
-    "name": ["i_name", "name", "اسم الصنف", "اسمالصنف", "الاسم", "اسم"],
-    "unit": ["itm_unt", "unt", "unit", "الوحده", "الوحدة", "وحده", "وحدة"],
-    "size": ["p_size", "size", "حجم", "العبوه", "العبوة"],
-    "barcode": ["barcode", "بار كود", "باركود", "الباركود"],
+    "code": ["i_code", "code", "item no", "item number", "item_no", "itemno",
+             "item", "sku", "رقم الصنف", "رقمالصنف", "رقم المنتج", "رقم",
+             "الرقم", "كود الصنف", "كود", "الكود", "معرف"],
+    "name": ["i_name", "item name", "product name", "description", "desc",
+             "name", "اسم الصنف", "اسمالصنف", "اسم المنتج", "الاسم", "اسم",
+             "الوصف", "وصف", "البيان", "بيان الصنف"],
+    "unit": ["itm_unt", "unt", "unit", "uom", "الوحده", "الوحدة", "وحده",
+             "وحدة", "وحدة البيع", "التعبئة"],
+    "size": ["p_size", "pack size", "pack", "size", "qty", "حجم",
+             "العبوه", "العبوة", "الكمية", "كمية", "عدد"],
+    "barcode": ["barcode", "bar code", "ean", "upc", "gtin", "بار كود",
+                "باركود", "الباركود", "رقم الباركود", "رمز شريطي"],
 }
+
+# كلمات لا تعني اسم صنف رغم احتوائها على "اسم" (تفادي التقاط أعمدة خاطئة)
+_NAME_BLACKLIST = ["اسم المورد", "اسم الفرع", "اسم المستخدم", "supplier",
+                   "vendor", "branch"]
 
 
 def detect_columns(header_row: list) -> dict[str, int]:
-    """يكشف مواقع الأعمدة من صف الرؤوس بمرونة."""
+    """يكشف مواقع الأعمدة من صف الرؤوس بمرونة (يتجاهل بادئات مثل Table5.)."""
     cols: dict[str, int] = {}
     for i, cell in enumerate(header_row):
-        label = normalize_text(str(cell or "")).replace("table5.", "")
+        raw = str(cell or "")
+        label = normalize_text(re.sub(r"^\w+\.", "", raw))
         label_compact = label.replace(" ", "").replace("_", "")
+        if any(normalize_text(b).replace(" ", "") in label_compact
+               for b in _NAME_BLACKLIST):
+            continue
         for key, hints in _HINTS.items():
             if key in cols:
                 continue
@@ -59,6 +74,11 @@ def detect_columns(header_row: list) -> dict[str, int]:
                     cols[key] = i
                     break
     return cols
+
+
+def _score_header_row(row: list) -> int:
+    """عدد الأعمدة المفهومة في صف — لاختيار صف الرؤوس الحقيقي."""
+    return len(detect_columns(list(row)))
 
 
 def _looks_like_barcode(s: str) -> bool:
@@ -104,21 +124,94 @@ class CatalogIndex:
             except Exception:
                 pass
 
-        import openpyxl
-        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-        ws = wb.active
-        it = ws.iter_rows(values_only=True)
-        header = next(it, None)
-        if header is None:
-            raise ValueError("ملف الإكسل فارغ")
-        cols = detect_columns(list(header))
-        first_data = None
-        if "code" not in cols or "name" not in cols:
-            # ربما لا يوجد صف رؤوس: استنتج من أول صف بيانات
-            first_data = list(header)
-            cols = self._infer_columns_from_data(first_data)
+        rows = self._read_any_table(path)
 
-        self.columns = cols
+        self.rows = rows
+        self._build_maps()
+        if use_cache:
+            try:
+                cache.write_text(json.dumps(
+                    {"mtime": mtime, "columns": self.columns, "rows": rows},
+                    ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+        self.load_seconds = time.time() - t0
+
+    # ------------------------------------------------- universal reader
+    def _read_any_table(self, path: Path) -> list[dict]:
+        """يقرأ أي ملف جدولي مستقبلي: xlsx/xlsm/xls/csv، كل الأوراق،
+        ويبحث عن صف الرؤوس في أول 10 صفوف، ويستدل من البيانات إذا غابت."""
+        suffix = path.suffix.lower()
+        all_rows: list[dict] = []
+        if suffix == ".csv":
+            import csv
+            for enc in ("utf-8-sig", "utf-8", "cp1256", "utf-16"):
+                try:
+                    with open(path, newline="", encoding=enc) as f:
+                        table = [list(r) for r in csv.reader(f)]
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            else:
+                raise ValueError("تعذر تحديد ترميز ملف CSV")
+            all_rows.extend(self._parse_table(table))
+        elif suffix == ".xls":
+            try:
+                import xlrd
+            except ImportError:
+                raise ValueError("صيغة .xls القديمة تتطلب تحويل الملف إلى "
+                                 ".xlsx (احفظه بصيغة أحدث من Excel)")
+            book = xlrd.open_workbook(str(path))
+            for sh in book.sheets():
+                table = [[sh.cell_value(r, c) for c in range(sh.ncols)]
+                         for r in range(sh.nrows)]
+                all_rows.extend(self._parse_table(table))
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(str(path), read_only=True,
+                                        data_only=True)
+            for ws in wb.worksheets:
+                table_iter = ws.iter_rows(values_only=True)
+                all_rows.extend(self._parse_table_iter(table_iter))
+            wb.close()
+        if not all_rows:
+            raise ValueError("لم يُعثر على أعمدة مفهومة (رقم الصنف/الاسم) "
+                             "في أي ورقة من الملف")
+        return all_rows
+
+    def _parse_table(self, table: list) -> list[dict]:
+        return self._parse_table_iter(iter(table))
+
+    def _parse_table_iter(self, it) -> list[dict]:
+        """يحدد صف الرؤوس (بحث في أول 10 صفوف) ثم يستخرج الصفوف."""
+        buffered: list[list] = []
+        for _ in range(10):
+            nxt = next(it, None)
+            if nxt is None:
+                break
+            buffered.append(list(nxt))
+        if not buffered:
+            return []
+        # اختر الصف صاحب أعلى نتيجة كشف كرؤوس
+        best_i, best_cols, best_score = -1, {}, 0
+        for i, row in enumerate(buffered):
+            c = detect_columns(row)
+            score = len(c) + (2 if "code" in c and "name" in c else 0)
+            if score > best_score:
+                best_i, best_cols, best_score = i, c, score
+        data_start = best_i + 1
+        cols = best_cols
+        if "code" not in cols or "name" not in cols:
+            # لا رؤوس واضحة: استدلال من أول صف بيانات غير فارغ
+            for i, row in enumerate(buffered):
+                inferred = self._infer_columns_from_data(row)
+                if "code" in inferred and "name" in inferred:
+                    cols, data_start = inferred, i
+                    break
+            else:
+                return []
+        if not self.columns:
+            self.columns = cols
         rows: list[dict] = []
 
         def add_row(vals):
@@ -128,32 +221,22 @@ class CatalogIndex:
                     return ""
                 return str(vals[i]).strip()
             code = _clean_code(get("code"))
-            if not code:
+            name = get("name")
+            if not code or not name:
                 return
             rows.append({
                 "code": code,
-                "name": get("name"),
+                "name": name,
                 "unit": get("unit"),
                 "size": get("size"),
                 "barcode": _clean_code(get("barcode")),
             })
 
-        if first_data is not None:
-            add_row(first_data)
+        for vals in buffered[data_start:]:
+            add_row(vals)
         for vals in it:
             add_row(list(vals))
-        wb.close()
-
-        self.rows = rows
-        self._build_maps()
-        if use_cache:
-            try:
-                cache.write_text(json.dumps(
-                    {"mtime": mtime, "columns": cols, "rows": rows},
-                    ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
-        self.load_seconds = time.time() - t0
+        return rows
 
     @staticmethod
     def _infer_columns_from_data(row: list) -> dict[str, int]:
