@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-"""session_v2 — حفظ واستئناف الجلسات (Save & Resume).
+"""session_v2 — حفظ واستئناف الجلسات (Save & Resume) — نسخة 2.2 موسعة.
 
-SessionStore يحفظ حالة كل صورة (الربط، الاسم المخصص، أوضاع حقائق التغذية،
-موضع المستخدم في الجدول) في JSON تحت data_root/sessions/.
+SessionStore يحفظ حالة كل صورة (الربط، الاسم المخصص، حالة الاعتماد،
+موضع المستخدم في الجدول) وكذلك حالة صفحة الإعداد (ملف الإكسل وقائمة
+الصور المختارة والخيارات) في JSON تحت data_root/sessions/ حتى يمكن
+العودة للعمل من حيث توقف المستخدم حتى قبل بدء المعالجة.
+
+الكتابة ذرّية (tmp ثم replace) لمنع تلف ملف الجلسة عند انقطاع الطاقة.
 """
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,6 +29,10 @@ class SessionState:
     output_folder: str = ""
     images: dict = field(default_factory=dict)   # key=source_name -> dict
     position: dict = field(default_factory=dict)  # {source_name,row,col}
+    # --- جديد 2.2 ---
+    setup: dict = field(default_factory=dict)     # حالة صفحة الإعداد كاملة
+    approved: dict = field(default_factory=dict)  # source_name -> True للمعتمد
+    phase: str = ""                               # setup | results
 
     def to_dict(self) -> dict:
         return {
@@ -31,20 +40,47 @@ class SessionState:
             "created_at": self.created_at, "updated_at": self.updated_at,
             "excel_path": self.excel_path, "source_folder": self.source_folder,
             "output_folder": self.output_folder, "images": self.images,
-            "position": self.position,
+            "position": self.position, "setup": self.setup,
+            "approved": self.approved, "phase": self.phase,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionState":
         s = cls()
         for k in ("session_id", "title", "excel_path", "source_folder",
-                  "output_folder"):
+                  "output_folder", "phase"):
             setattr(s, k, d.get(k, ""))
         s.created_at = d.get("created_at", 0.0)
         s.updated_at = d.get("updated_at", 0.0)
         s.images = d.get("images", {}) or {}
         s.position = d.get("position", {}) or {}
+        s.setup = d.get("setup", {}) or {}
+        s.approved = d.get("approved", {}) or {}
         return s
+
+    # -------------------------------------------------------- helpers
+    def done_count(self) -> int:
+        done = 0
+        for v in self.images.values():
+            st = str(v.get("status", ""))
+            if st in ("matched", "done", "approved") or \
+                    v.get("approved"):
+                done += 1
+        return done
+
+    def mark_approved(self, key: str, value: bool = True) -> None:
+        if value:
+            self.approved[key] = True
+            entry = self.images.setdefault(key, {})
+            entry["approved"] = True
+        else:
+            self.approved.pop(key, None)
+            if key in self.images:
+                self.images[key].pop("approved", None)
+
+    def is_approved(self, key: str) -> bool:
+        return bool(self.approved.get(key)) or \
+            bool(self.images.get(key, {}).get("approved"))
 
 
 class SessionStore:
@@ -64,6 +100,12 @@ class SessionStore:
             created_at=time.time(), updated_at=time.time())
         return self.state
 
+    def ensure_session(self, title: str = "") -> SessionState:
+        """يضمن وجود جلسة حالية (ينشئها إن لم توجد) — تُستخدم قبل أي حفظ."""
+        if not self.state.session_id:
+            self.new_session(title)
+        return self.state
+
     def _path(self, sid: str) -> Path:
         return self.root / f"{sid}.json"
 
@@ -75,9 +117,12 @@ class SessionStore:
             return False
         self.state.updated_at = now
         try:
-            self._path(self.state.session_id).write_text(
+            final = self._path(self.state.session_id)
+            tmp = final.with_suffix(".json.tmp")
+            tmp.write_text(
                 json.dumps(self.state.to_dict(), ensure_ascii=False),
                 encoding="utf-8")
+            os.replace(tmp, final)  # كتابة ذرّية — لا ملفات جلسات تالفة
             self._last_save = now
             return True
         except OSError:
@@ -107,11 +152,24 @@ class SessionStore:
                         key=lambda x: x.stat().st_mtime, reverse=True):
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
+                images = d.get("images", {}) or {}
+                setup = d.get("setup", {}) or {}
+                src = d.get("source_folder", "") or \
+                    setup.get("source_folder", "") or \
+                    d.get("output_folder", "") or \
+                    (setup.get("image_paths", [""]) or [""])[0]
+                state = SessionState.from_dict(d)
                 out.append({
                     "session_id": d.get("session_id", p.stem),
                     "title": d.get("title", p.stem),
                     "updated_at": d.get("updated_at", 0.0),
-                    "image_count": len(d.get("images", {})),
+                    "image_count": len(images),
+                    # المفاتيح التي يعرضها SessionDialog
+                    "source_folder": src,
+                    "total": len(images) or
+                    len(setup.get("image_paths", []) or []),
+                    "done": state.done_count(),
+                    "phase": d.get("phase", ""),
                 })
             except Exception:
                 continue

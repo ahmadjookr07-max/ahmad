@@ -53,10 +53,14 @@ def t_mainwindow():
     win = native_app.MainWindow()
     # الأزرار الجديدة موجودة
     assert hasattr(win, "link_by_image_button"), "link_by_image_button missing"
-    names = [w.objectName() for w in win.header_frame.findChildren(
+    # v2.2: الأزرار انتقلت من الهيدر إلى شريط أدوات v2Toolbar مستقل (إصلاح التداخل)
+    names = [w.objectName() for w in win.findChildren(
         __import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)]
-    for expected in ("v2HelpBtn", "v2SaveNowBtn", "v2RefineBtn", "v2EditorBtn"):
-        assert expected in names, f"{expected} not in header: {names}"
+    for expected in ("v2HelpBtn", "v2SaveNowBtn", "v2RefineBtn",
+                     "v2EditorBtn", "v2NutritionToolbarBtn"):
+        assert expected in names, f"{expected} not in window: {names[:20]}"
+    # v2.2: أداة الميول اليدوية الخارجية في شريط الربط
+    assert hasattr(win, "manual_tilt_spin"), "manual_tilt_spin missing"
     # جدول النتائج بمصغرات مكبرة
     assert win.results_table.iconSize().width() == 80
     win.close()

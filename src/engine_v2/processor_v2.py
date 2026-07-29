@@ -37,6 +37,7 @@ class ProcessOptionsV2:
     nutrition_bbox: tuple | None = None          # (x,y,w,h) يدوي
     nutrition_source_path: str = ""              # صورة منفصلة للجدول
     nutrition_placement: InsetPlacement | None = None
+    nutrition_values: dict | None = None         # قيم معتمدة بعد مراجعة المستخدم
     # تعديلات يدوية
     manual_rotation_degrees: float = 0.0
     manual_crop_corners: list | None = None      # 8 قيم منظور
@@ -161,6 +162,25 @@ class ProcessorV2:
                         else:
                             res.warnings.append("لم يُكشف جدول حقائق التغذية")
 
+            # وضع الإزالة: ترميم موضع الجدول من صورة المنتج نفسها
+            elif opts.nutrition_mode == "remove":
+                box = (tuple(opts.nutrition_bbox) if opts.nutrition_bbox
+                       else detect_nutrition_table(img))
+                if box:
+                    try:
+                        x, y, bw, bh = (int(v) for v in box)
+                        H, W = img.shape[:2]
+                        x = max(0, min(W - 1, x)); y = max(0, min(H - 1, y))
+                        bw = max(1, min(W - x, bw)); bh = max(1, min(H - y, bh))
+                        mask = np.zeros((H, W), np.uint8)
+                        mask[y:y + bh, x:x + bw] = 255
+                        img = cv2.inpaint(img, mask, 7, cv2.INPAINT_TELEA)
+                        res.warnings.append("أُزيل جدول حقائق التغذية من الصورة")
+                    except Exception as exc:
+                        res.warnings.append(f"تعذرت إزالة الجدول: {exc}")
+                else:
+                    res.warnings.append("لم يُكشف جدول لإزالته")
+
             # القص
             seg = self.segmenter.segment(img)
             res.confidence = seg.confidence
@@ -223,9 +243,15 @@ class ProcessorV2:
                     res.nutrition_output_path = str(nut_path)
             elif opts.nutrition_mode == "rebuild" and label_img is not None:
                 try:
-                    from .nutrition_ocr_v2 import extract_nutrition_data
+                    from .nutrition_ocr_v2 import (NutritionData,
+                                                   extract_nutrition_data)
                     from .nutrition_render_v2 import render_nutrition_table
-                    data = extract_nutrition_data(label_img)
+                    if opts.nutrition_values:
+                        # قيم معتمدة بعد مراجعة المستخدم — تطابق 100%،
+                        # لا يعاد OCR مرة أخرى
+                        data = NutritionData.from_dict(opts.nutrition_values)
+                    else:
+                        data = extract_nutrition_data(label_img)
                     table = render_nutrition_table(data)
                     nut_dir = out_path.parent / "حقائق التغذية"
                     nut_dir.mkdir(parents=True, exist_ok=True)

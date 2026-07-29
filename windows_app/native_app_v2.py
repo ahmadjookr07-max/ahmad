@@ -17,7 +17,7 @@ for p in (str(_SRC), str(_HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-APP_VERSION_V2 = "2.1.0"
+APP_VERSION_V2 = "2.2.0"
 
 _SPLASH = None  # مرجع شاشة البدء الفورية
 
@@ -77,6 +77,21 @@ def _activate_engine() -> None:
               file=sys.stderr)
 
 
+def _fix_text_clipping(window) -> None:
+    """إصلاح عام: يمنع قص نصوص كل الأزرار والشارات في النافذة."""
+    try:
+        from PySide6.QtWidgets import QPushButton
+        for btn in window.findChildren(QPushButton):
+            text = (btn.text() or "").strip()
+            if len(text) < 3:
+                continue  # أزرار الأسهم/الرموز الصغيرة
+            needed = btn.fontMetrics().horizontalAdvance(text) + 28
+            if btn.minimumWidth() < needed:
+                btn.setMinimumWidth(needed)
+    except Exception as exc:
+        print(f"[V2] fix_text_clipping failed: {exc}", file=sys.stderr)
+
+
 def _patch_ui(native_app) -> None:
     """Extend MainWindow with V2 buttons/dialogs after it is constructed."""
     from PySide6.QtWidgets import QPushButton, QDialog
@@ -111,18 +126,25 @@ def _patch_ui(native_app) -> None:
 
             def _save_now():
                 try:
+                    from PySide6.QtWidgets import QMessageBox
                     saver = getattr(self, "v2_save_session", None)
-                    if callable(saver) and getattr(self, "current_result", None) is not None:
+                    checker = getattr(self, "v2_has_work", None)
+                    has_work = checker() if callable(checker) else \
+                        getattr(self, "current_result", None) is not None
+                    if callable(saver) and has_work:
                         saver()
-                        from PySide6.QtWidgets import QMessageBox
-                        QMessageBox.information(
-                            self, "تم الحفظ",
-                            "حُفظت الجلسة بنجاح — يمكنك استئنافها من زر (الجلسات)")
+                        has_results = getattr(self, "current_result",
+                                              None) is not None
+                        msg = ("حُفظت الجلسة بنجاح (النتائج والإعداد) — "
+                               "يمكنك استئنافها من زر (الجلسات)"
+                               if has_results else
+                               "حُفظت حالة الإعداد (ملف الإكسل وقائمة الصور) — "
+                               "يمكنك استئنافها من زر (الجلسات)")
+                        QMessageBox.information(self, "تم الحفظ", msg)
                     else:
-                        from PySide6.QtWidgets import QMessageBox
                         QMessageBox.information(
                             self, "لا يوجد عمل مفتوح",
-                            "لا توجد نتائج مفتوحة لحفظها حاليًا")
+                            "لا يوجد عمل لحفظه — اختر ملف الإكسل أو أضف صورًا أولًا")
                 except Exception as exc:
                     print(f"[V2] save now failed: {exc}", file=sys.stderr)
 
@@ -153,17 +175,39 @@ def _patch_ui(native_app) -> None:
             help_btn.setToolTip("دليل استخدام مختصر لكل أدوات البرنامج")
             help_btn.clicked.connect(lambda: _show_app_help(self))
 
-            # insert before the version badge (last widget)
-            insert_at = max(header_layout.count() - 1, 0)
-            header_layout.insertWidget(insert_at, help_btn)
-            header_layout.insertWidget(insert_at, rename_btn)
-            header_layout.insertWidget(insert_at, save_now_btn)
-            header_layout.insertWidget(insert_at, sessions_btn)
-            header_layout.insertWidget(insert_at, naming_btn)
-            header_layout.insertWidget(insert_at, editor_btn)
-            header_layout.insertWidget(insert_at, refine_btn)
+            nutrition_btn = QPushButton("حقائق التغذية")
+            nutrition_btn.setObjectName("v2NutritionToolbarBtn")
+            nutrition_btn.setMinimumHeight(40)
+            nutrition_btn.setCursor(native_app.Qt.PointingHandCursor)
+            nutrition_btn.setToolTip(
+                "استخراج جدول حقائق التغذية من صورة المنتج:\n"
+                "كشف تلقائي + OCR ذكي + دمج مصغر / صورة مستقلة / "
+                "إعادة صياغة جدول عربي / إزالة الجدول")
+            nutrition_btn.clicked.connect(
+                lambda: _open_nutrition_center(self, v2_ui))
 
-            # شارة الاشتراك + زر لوحة المالك
+            # إصلاح تداخل الهيدر: صف أدوات مستقل تحت الهيدر بدل حشر الأزرار فيه
+            from PySide6.QtWidgets import QWidget, QHBoxLayout, QSizePolicy
+            toolbar = QWidget()
+            toolbar.setObjectName("v2Toolbar")
+            tl = QHBoxLayout(toolbar)
+            tl.setContentsMargins(4, 2, 4, 2)
+            tl.setSpacing(8)
+            all_btns = (refine_btn, editor_btn, nutrition_btn, naming_btn,
+                        sessions_btn, save_now_btn, rename_btn, help_btn)
+            for b in all_btns:
+                b.setMinimumHeight(36)
+                # منع قص النص: العرض الأدنى من عرض النص الفعلي
+                b.setMinimumWidth(
+                    b.fontMetrics().horizontalAdvance(b.text()) + 30)
+                tl.addWidget(b)
+            tl.addStretch(1)
+            self.v2_toolbar_layout = tl
+
+            root_layout = self.centralWidget().layout()
+            root_layout.insertWidget(1, toolbar)
+
+            # شارة الاشتراك + زر لوحة المالك (تُدرج في صف الأدوات الجديد)
             try:
                 import license_ui
                 license_ui.install_license_badge(self)
@@ -172,6 +216,9 @@ def _patch_ui(native_app) -> None:
 
             self.v2_nutrition_dialog_cls = v2_ui.NutritionDialog
             _attach_nutrition_button(self, native_app, v2_ui)
+
+            # إصلاح عام لقص النصوص في كل أزرار النافذة
+            _fix_text_clipping(self)
         except Exception as exc:  # pragma: no cover
             print(f"[V2] UI wiring failed: {exc}", file=sys.stderr)
 
@@ -184,7 +231,9 @@ def _patch_ui(native_app) -> None:
         """عند الإغلاق مع عمل مفتوح: حفظ / إغلاق بلا حفظ / إلغاء."""
         try:
             from PySide6.QtWidgets import QMessageBox
-            has_work = getattr(self, "current_result", None) is not None
+            checker = getattr(self, "v2_has_work", None)
+            has_work = checker() if callable(checker) else \
+                getattr(self, "current_result", None) is not None
             saver = getattr(self, "v2_save_session", None)
             if has_work and callable(saver):
                 box = QMessageBox(self)
@@ -370,6 +419,77 @@ def _show_app_help(window) -> None:
         dlg.exec()
     except Exception as exc:
         print(f"[V2] help dialog failed: {exc}", file=sys.stderr)
+
+
+def _open_nutrition_center(window, v2_ui) -> None:
+    """مركز حقائق التغذية من صف الأدوات — يعمل من أي صفحة:
+
+    إن كانت هناك صورة محددة (إعداد أو نتائج) تُفتح عليها مباشرة،
+    وإلا يُطلب من المستخدم اختيار صورة. بعد الاعتماد يُسأل:
+    تطبيق على هذه الصورة فقط أم اعتماد الوضع لكل صور الدفعة القادمة."""
+    from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
+
+    source = _current_source_path(window)
+    if not source:
+        # جرّب أول صورة من قائمة صور الإعداد إن وجدت
+        for attr in ("images_list", "image_list"):
+            lst = getattr(window, attr, None)
+            if lst is not None and hasattr(lst, "currentItem"):
+                item = lst.currentItem()
+                if item is not None:
+                    data = item.data(256)
+                    if data:
+                        source = str(data)
+                        break
+    if not source:
+        source, _ = QFileDialog.getOpenFileName(
+            window, "اختر صورة المنتج (أو صورة جدول حقائق التغذية)", "",
+            "صور (*.jpg *.jpeg *.png *.webp *.bmp)")
+        if not source:
+            return
+    item_no = _current_item_number(window)
+    try:
+        dlg = v2_ui.NutritionDialog(source, item_no, parent=window)
+    except Exception as exc:
+        QMessageBox.warning(window, "حقائق التغذية", f"تعذر الفتح: {exc}")
+        return
+    if dlg.exec() != QDialog.Accepted:
+        return
+    settings = dlg.result_settings
+    try:
+        from engine_v2.integration_v2 import (set_default_nutrition,
+                                              set_override)
+        set_override(source, settings)
+        mode = settings.get("nutrition_mode", "none")
+        if mode not in ("none", "not_found"):
+            box = QMessageBox(window)
+            box.setLayoutDirection(native_app_qt_rtl())
+            box.setWindowTitle("نطاق التطبيق")
+            box.setText("اعتُمدت إعدادات حقائق التغذية لهذه الصورة.")
+            box.setInformativeText(
+                "هل تريد أيضًا تطبيق نفس الوضع (الكشف التلقائي) على "
+                "جميع صور الدفعة القادمة تلقائيًا؟")
+            all_btn = box.addButton("تطبيق على كل الدفعة",
+                                    QMessageBox.AcceptRole)
+            box.addButton("هذه الصورة فقط", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is all_btn:
+                # للدفعة: الوضع والموضع فقط — الكشف تلقائي لكل صورة
+                batch = {k: settings.get(k) for k in
+                         ("nutrition_mode", "nutrition_anchor",
+                          "nutrition_scale", "nutrition_offset")}
+                set_default_nutrition(batch)
+        status = getattr(window, "status_label", None)
+        if status is not None:
+            status.setText(
+                "تم اعتماد إعدادات حقائق التغذية — ستُطبق عند المعالجة التالية.")
+    except Exception as exc:
+        QMessageBox.warning(window, "حقائق التغذية", f"تعذر الاعتماد: {exc}")
+
+
+def native_app_qt_rtl():
+    from PySide6.QtCore import Qt
+    return Qt.RightToLeft
 
 
 def _current_source_path(window) -> str:

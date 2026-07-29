@@ -14,7 +14,9 @@ from pathlib import Path
 
 from typing import TYPE_CHECKING
 
-from .naming_v2 import next_sequence, build_name, UNIT_SUFFIX_DEFAULT
+from .naming_v2 import (next_sequence, build_name, build_name_dash,
+                        UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
+                        load_saved_settings, parse_name)
 
 if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
     from .processor_v2 import ProcessorV2, ProcessOptionsV2
@@ -39,13 +41,99 @@ _PROCESSOR = None  # ProcessorV2 | None — يُنشأ كسوليًا
 _MODEL_DIR = ""
 _ACTIVE = False
 
-# per-source-path overrides: {source_path: ProcessOptionsV2}
+# per-source-path overrides: {source_path: ProcessOptionsV2 | dict}
 IMAGE_OVERRIDES: dict[str, object] = {}
 # per-source-path unit override: {source_path: unit}
 UNIT_OVERRIDES: dict[str, str] = {}
+# إعدادات حقائق تغذية افتراضية تطبق على كل صور الدفعة (تفعلها الواجهة)
+DEFAULT_NUTRITION: dict = {}
+
+
+def set_default_nutrition(settings: dict | None) -> None:
+    """يعتمد إعدادات حقائق التغذية كوضع افتراضي لكل الصور القادمة."""
+    DEFAULT_NUTRITION.clear()
+    if settings:
+        DEFAULT_NUTRITION.update(settings)
+
+
+def _coerce_options(obj, source_path: str = ""):
+    """يحول dict قادمة من نافذة حقائق التغذية (أو أي مصدر) إلى
+    ProcessOptionsV2 جاهزة للمعالج — مع تحويل bbox النسبي (x1,y1,x2,y2)
+    إلى بكسلات (x,y,w,h) وبناء InsetPlacement من anchor/scale/offset."""
+    mod = _lazy_processor_mod()
+    if obj is None:
+        opts = mod.ProcessOptionsV2()
+        if DEFAULT_NUTRITION:
+            return _apply_nutrition_dict(opts, DEFAULT_NUTRITION, source_path)
+        return opts
+    if isinstance(obj, mod.ProcessOptionsV2):
+        return obj
+    if isinstance(obj, dict):
+        opts = mod.ProcessOptionsV2()
+        return _apply_nutrition_dict(opts, obj, source_path)
+    return obj
+
+
+def _apply_nutrition_dict(opts, d: dict, source_path: str = ""):
+    """يطبق مفاتيح نافذة حقائق التغذية على ProcessOptionsV2."""
+    mode = str(d.get("nutrition_mode", "none") or "none")
+    if mode in ("none", "not_found"):
+        opts.nutrition_mode = "none"
+    elif mode == "remove":
+        # الإزالة تتم في طبقة لاحقة — المعالج لا يدمج شيئًا
+        opts.nutrition_mode = "remove"
+    else:
+        opts.nutrition_mode = mode
+    src = str(d.get("nutrition_source", "") or
+              d.get("nutrition_source_path", "") or "")
+    if src and src != str(source_path):
+        opts.nutrition_source_path = src
+    bbox = d.get("nutrition_bbox")
+    if bbox and len(bbox) == 4:
+        x1, y1, x2, y2 = (float(v) for v in bbox)
+        if max(x1, y1, x2, y2) <= 1.0:
+            # نسب — حولها لبكسلات عند المعالجة لاحقًا عبر مصدر الصورة
+            try:
+                import numpy as _np
+                import cv2 as _cv2  # noqa: F401 — ضمان توفر القراءة
+                ref = src or str(source_path)
+                img = None
+                if ref:
+                    data = _np.fromfile(ref, _np.uint8)
+                    img = _cv2.imdecode(data, 1)
+                if img is not None:
+                    H, W = img.shape[:2]
+                    px = (int(x1 * W), int(y1 * H),
+                          max(1, int((x2 - x1) * W)),
+                          max(1, int((y2 - y1) * H)))
+                    opts.nutrition_bbox = px
+            except Exception:
+                opts.nutrition_bbox = None
+        else:
+            # قيم بكسلية جاهزة بصيغة (x, y, w, h) — تمر كما هي
+            opts.nutrition_bbox = (int(x1), int(y1), int(x2), int(y2))
+    anchor = d.get("nutrition_anchor")
+    scale = d.get("nutrition_scale")
+    offset = d.get("nutrition_offset") or (0.0, 0.0)
+    if anchor or scale:
+        try:
+            from .nutrition_v2 import InsetPlacement
+            ox, oy = (float(offset[0]), float(offset[1]))
+            opts.nutrition_placement = InsetPlacement(
+                anchor=str(anchor or "bottom_left"),
+                offset_x=int(ox * 800), offset_y=int(oy * 700),
+                scale=float(scale or 0.28)).clamp()
+        except Exception:
+            pass
+    values = d.get("nutrition_values")
+    if values and hasattr(opts, "nutrition_values"):
+        opts.nutrition_values = values
+    return opts
 
 
 def set_override(source_path: str, options) -> None:
+    if isinstance(options, dict):
+        options = _coerce_options(options, str(source_path))
     IMAGE_OVERRIDES[str(source_path)] = options
 
 
@@ -81,12 +169,43 @@ def _default_model_dir() -> str:
         return str(here)
 
 
+# مجلد بيانات التطبيق الذي تحفظ فيه سياسة التسمية (تعيّنه الواجهة عند الإقلاع)
+NAMING_DATA_ROOT: str = ""
+
+
+def set_naming_data_root(path: str | Path) -> None:
+    global NAMING_DATA_ROOT
+    NAMING_DATA_ROOT = str(path)
+
+
+def _current_naming_settings():
+    if NAMING_DATA_ROOT:
+        try:
+            return load_saved_settings(NAMING_DATA_ROOT)
+        except Exception:
+            pass
+    return None
+
+
 def build_output_stem(out_dir: str | Path, item: str,
                       unit: str = UNIT_SUFFIX_DEFAULT) -> str:
-    """اسم الملف التالي للصنف وفق التسلسل الموحد (حبه، 2_حبه، 3_حبه...)."""
+    """اسم الملف التالي للصنف وفق سياسة التسمية المحفوظة.
+
+    النمط الجديد (dash): الصورة الأولى {item}_{unit} ثم عند وصول صورة
+    ثانية تُرقّم الجديدة -2 (ويُعاد ترقيم الأولى إلى -1 عبر rename لاحق
+    في طبقة الواجهة إن أمكن). النمط الكلاسيكي: حبه، 2_حبه، 3_حبه..."""
     out_dir = Path(out_dir)
     stems = [p.stem for p in out_dir.glob("*.webp")] if out_dir.is_dir() else []
     seq = next_sequence(stems, item)
+    settings = _current_naming_settings()
+    if settings is not None and settings.enabled and \
+            settings.scheme == SCHEME_DASH:
+        # عدد الصور الموجودة للصنف حتى الآن + هذه = total
+        existing = sum(1 for s in stems
+                       if (pn := parse_name(s)) and pn.item == str(item))
+        return build_name_dash(item, seq, unit, total=existing + 1)
+    if settings is not None and settings.enabled:
+        return settings.render(item, seq, unit, total=seq)
     return build_name(item, seq, unit)
 
 
@@ -136,8 +255,7 @@ def activate(model_dir: str = "") -> bool:
             def _v2_process(self, source_path, output_path, *args, **kwargs):
                 try:
                     src = str(source_path)
-                    opts = IMAGE_OVERRIDES.get(src) or \
-                        _lazy_processor_mod().ProcessOptionsV2()
+                    opts = _coerce_options(IMAGE_OVERRIDES.get(src), src)
                     proc = get_processor(model_dir)
                     res = proc.process(src, str(output_path), opts)
                     if res.ok:

@@ -44,8 +44,11 @@ class ProductSegmenterV2:
         for c in candidates:
             if c.is_file():
                 return c
-        # u2net احتياطي
+        # u2net احتياطي (وu2netp الأخف للبيئات المحدودة)
         for c in [self.model_dir / "u2net.onnx",
+                  self.model_dir / "u2netp.onnx",
+                  self.model_dir / "models" / "u2net.onnx",
+                  self.model_dir / "models" / "u2netp.onnx",
                   self.model_dir.parent.parent / "resources" / "models" / "u2net.onnx"]:
             if c.is_file():
                 return c

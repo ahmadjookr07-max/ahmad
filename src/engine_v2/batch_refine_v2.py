@@ -46,6 +46,9 @@ class RefineOptions:
     polish_strength: float = 0.5    # قوة التنقيح 0..1
     text_aware: bool = True         # محرك الجودة الواعي بالنص: حدة ذكية + تصغير تدريجي
     blur_dates: bool = True         # طمس تواريخ الإنتاج/الانتهاء المطبوعة تلقائيًا (تمويه طفيف بلون المنتج)
+    naming_scheme: str = "dash"     # نمط التسمية: dash (رقم_وحدة-1) | classic (رقم_1_وحدة)
+    naming_enabled: bool = True     # تفعيل نظام التسمية (مع fix_names)
+    skip_approved: bool = True      # لا يلمس مخرجات موجودة معتمدة سابقًا (لا يعاد إنتاجها أو تغيير اسمها)
 
 
 @dataclass
@@ -169,7 +172,7 @@ class BatchRefiner:
             stem = normalize_stem(stem)
         except Exception:
             pass
-        if not self.options.fix_names:
+        if not self.options.fix_names or not self.options.naming_enabled:
             return stem, ""
         if not self.options.excel_path:
             return stem, "وضع حر — لم يُحدد إكسل، أُبقي الاسم"
@@ -200,11 +203,54 @@ class BatchRefiner:
             unit = "حبه"
             note = note or "أُضيفت الوحدة الافتراضية حبه"
         try:
-            from engine_v2.naming_v2 import build_name
-            new_stem = build_name(code, seq, unit)
+            if (self.options.naming_scheme or "dash") == "dash":
+                from engine_v2.naming_v2 import build_name_dash
+                total = self._group_total(code, unit)
+                new_stem = build_name_dash(code, seq, unit, total=total)
+            else:
+                from engine_v2.naming_v2 import build_name
+                new_stem = build_name(code, seq, unit)
         except Exception:
-            new_stem = f"{code}_{unit}" if seq <= 1 else f"{code}_{seq}_{unit}"
+            new_stem = f"{code}_{unit}" if seq <= 1 else f"{code}_{unit}-{seq}"
         return new_stem, note
+
+    def _group_total(self, code: str, unit: str) -> int:
+        """عدد صور نفس (الصنف، الوحدة) في الدفعة — لتحديد التسلسل -1/-2 أو بدونه."""
+        totals = getattr(self, "_group_totals", None)
+        if not totals:
+            return 1
+        return int(totals.get((str(code), str(unit or "")), 1) or 1)
+
+    def _compute_group_totals(self, files: list[Path]) -> None:
+        """تمريرة مسبقة: تحصي صور كل (صنف، وحدة) ليعرف النمط dash متى يضيف -1/-2."""
+        totals: dict[tuple[str, str], int] = {}
+        try:
+            from engine_v2.naming_v2 import normalize_stem, parse_name
+        except Exception:
+            self._group_totals = {}
+            return
+        idx = self._get_catalog()
+        for p in files:
+            try:
+                parsed = parse_name(normalize_stem(p.stem))
+            except Exception:
+                parsed = None
+            if not parsed or not getattr(parsed, "item", None):
+                continue
+            code = str(parsed.item)
+            unit = (getattr(parsed, "unit", "") or "").strip()
+            if idx is not None:
+                try:
+                    units = list(dict.fromkeys(idx.units_for_code(code)))
+                except Exception:
+                    units = []
+                if units and unit not in units:
+                    unit = units[0]
+            if not unit:
+                unit = "حبه"
+            key = (code, unit)
+            totals[key] = totals.get(key, 0) + 1
+        self._group_totals = totals
 
     # ------------------------------------------------------------ process
     def _process_one(self, src: Path, out_dir: Path) -> RefineItemResult:
@@ -435,6 +481,13 @@ class BatchRefiner:
                                  exclude_dir=out_dir)
         done_map = self.load_checkpoint(out_dir) if resume else {}
 
+        # تمريرة مسبقة لإحصاء صور كل (صنف، وحدة) — يلزم للنمط dash (-1/-2)
+        if self.options.fix_names and self.options.naming_enabled:
+            try:
+                self._compute_group_totals(files)
+            except Exception:
+                self._group_totals = {}
+
         results: list[RefineItemResult] = []
         todo: list[Path] = []
         for p in files:
@@ -444,8 +497,20 @@ class BatchRefiner:
                                      output=done_map[key].get("output", ""),
                                      new_name=done_map[key].get("new_name", ""))
                 results.append(r)
-            else:
-                todo.append(p)
+                continue
+            if self.options.skip_approved:
+                # حماية العمل المعتمد: لا يعاد إنتاج مخرج موجود مسبقًا
+                stem, _ = self._fixed_name(p.stem)
+                ext = (self.options.out_format or "webp").lower().strip(".")
+                existing = out_dir / f"{stem}.{ext}"
+                if existing.is_file():
+                    r = RefineItemResult(
+                        source=str(p), status="skipped",
+                        output=str(existing), new_name=existing.name,
+                        error="موجود مسبقًا — محمي (معتمد)")
+                    results.append(r)
+                    continue
+            todo.append(p)
 
         total = len(files)
         counter = {"i": len(results)}

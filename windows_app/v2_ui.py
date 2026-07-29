@@ -344,6 +344,8 @@ class NutritionDialog(QDialog):
             self.anchor_combo.addItem(label, key)
         form.addRow("المحاذاة:", self.anchor_combo)
         self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setLayoutDirection(Qt.LeftToRight)
+        self.scale_slider.setInvertedAppearance(False)
         self.scale_slider.setRange(12, 60)
         self.scale_slider.setValue(28)
         self.scale_value = QLabel("28%")
@@ -414,7 +416,12 @@ class NutritionDialog(QDialog):
             from engine_v2.nutrition_v2 import detect_nutrition_table
             bbox = detect_nutrition_table(self._image)
             if bbox:
-                self.crop_view.set_selection(bbox)
+                # detect يعيد (x, y, w, h) بالبكسل — والعرض يتوقع نسبًا (x1,y1,x2,y2)
+                x, y, w, h = bbox
+                H, W = self._image.shape[:2]
+                self.crop_view.set_selection((x / max(1, W), y / max(1, H),
+                                              (x + w) / max(1, W),
+                                              (y + h) / max(1, H)))
                 return
         except Exception:
             pass
@@ -1147,24 +1154,16 @@ class SessionDialog(QDialog):
         root.addWidget(QLabel("اختر جلسة سابقة لاستئناف العمل من حيث توقفت، أو ابدأ جلسة جديدة:"))
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["آخر تحديث", "مجلد الصور", "الإجمالي", "المكتمل"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(
+            ["العنوان", "آخر تحديث", "مجلد الصور", "الإجمالي", "المكتمل"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setDefaultSectionSize(34)
         root.addWidget(self.table, 1)
 
-        sessions = store.list_sessions()
-        import datetime
-        self.table.setRowCount(len(sessions))
-        self._sessions = sessions
-        for i, s in enumerate(sessions):
-            dt = datetime.datetime.fromtimestamp(s["updated_at"]).strftime("%Y-%m-%d %H:%M")
-            self.table.setItem(i, 0, QTableWidgetItem(dt))
-            self.table.setItem(i, 1, QTableWidgetItem(s["source_folder"]))
-            self.table.setItem(i, 2, QTableWidgetItem(str(s["total"])))
-            self.table.setItem(i, 3, QTableWidgetItem(str(s["done"])))
+        self._reload_sessions()
         self.table.doubleClicked.connect(self._resume)
 
         btns = QHBoxLayout()
@@ -1172,12 +1171,46 @@ class SessionDialog(QDialog):
         resume_btn = QPushButton("استئناف الجلسة المحددة")
         resume_btn.setMinimumSize(210, 48)
         resume_btn.clicked.connect(self._resume)
+        del_btn = QPushButton("حذف الجلسة المحددة")
+        del_btn.setMinimumSize(170, 48)
+        del_btn.clicked.connect(self._delete_selected)
         new_btn = QPushButton("جلسة جديدة")
         new_btn.setMinimumSize(150, 48)
         new_btn.clicked.connect(self.reject)
         btns.addWidget(resume_btn)
+        btns.addWidget(del_btn)
         btns.addWidget(new_btn)
         root.addLayout(btns)
+
+    def _reload_sessions(self):
+        import datetime
+        sessions = self.store.list_sessions()
+        self._sessions = sessions
+        self.table.setRowCount(len(sessions))
+        for i, s in enumerate(sessions):
+            dt = datetime.datetime.fromtimestamp(
+                s.get("updated_at", 0.0)).strftime("%Y-%m-%d %H:%M")
+            phase = " (إعداد)" if s.get("phase") == "setup" else ""
+            self.table.setItem(i, 0, QTableWidgetItem(
+                (s.get("title") or s.get("session_id", "")) + phase))
+            self.table.setItem(i, 1, QTableWidgetItem(dt))
+            self.table.setItem(i, 2, QTableWidgetItem(
+                s.get("source_folder", "")))
+            self.table.setItem(i, 3, QTableWidgetItem(str(s.get("total", 0))))
+            self.table.setItem(i, 4, QTableWidgetItem(str(s.get("done", 0))))
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._sessions):
+            QMessageBox.information(self, "تنبيه", "حدد جلسة من الجدول أولًا")
+            return
+        s = self._sessions[row]
+        if QMessageBox.question(
+                self, "حذف الجلسة",
+                f"هل تريد حذف الجلسة «{s.get('title', '')}» نهائيًا؟"
+        ) == QMessageBox.Yes:
+            self.store.delete(s["session_id"])
+            self._reload_sessions()
 
     def _resume(self):
         row = self.table.currentRow()
@@ -1260,10 +1293,32 @@ def install_v2(main_window, data_root: Path) -> None:
     # 5) real save/resume wiring — captures the review & linking state of the
     #    legacy window and restores it, so work can continue after a restart.
     def _capture_state() -> dict:
-        state: dict = {"version": "2.0.0"}
+        state: dict = {"version": "2.2.0"}
         try:
             catalog = getattr(main_window, "catalog_edit", None)
             state["catalog_path"] = (catalog.toolTip() or catalog.text()) if catalog else ""
+            # حالة صفحة الإعداد: قائمة الصور المختارة قبل بدء المعالجة
+            setup: dict = {"catalog_path": state["catalog_path"]}
+            try:
+                lst = getattr(main_window, "images_list", None) or \
+                    getattr(main_window, "image_list", None)
+                paths = []
+                if lst is not None and hasattr(lst, "count"):
+                    for i in range(lst.count()):
+                        it = lst.item(i)
+                        p = (it.data(256) or it.toolTip() or it.text())
+                        if p:
+                            paths.append(str(p))
+                if not paths:
+                    paths = [str(p) for p in
+                             (getattr(main_window, "selected_images", [])
+                              or [])]
+                setup["image_paths"] = paths
+                if paths:
+                    setup["source_folder"] = str(Path(paths[0]).parent)
+            except Exception:
+                pass
+            state["setup"] = setup
             result = getattr(main_window, "current_result", None)
             if result is not None:
                 items = []
@@ -1290,13 +1345,23 @@ def install_v2(main_window, data_root: Path) -> None:
         from engine_v2.session_v2 import SessionState
         store = main_window.v2_session_store
         snap = _capture_state()
-        if store.state is None:
+        if store.state is None or not getattr(store.state, "session_id", ""):
             import uuid, time as _t
             store.state = SessionState(session_id=uuid.uuid4().hex[:12],
                                        created_at=_t.time(),
                                        updated_at=_t.time())
+        if name:
+            store.state.title = name
+        elif not store.state.title:
+            import time as _t2
+            store.state.title = _t2.strftime("جلسة %Y-%m-%d %H:%M")
         store.state.excel_path = snap.get("catalog_path", "")
         store.state.output_folder = snap.get("workspace", "")
+        setup = snap.get("setup", {}) or {}
+        store.state.setup = setup
+        if setup.get("source_folder"):
+            store.state.source_folder = setup["source_folder"]
+        store.state.phase = "results" if snap.get("items") else "setup"
         store.state.current_position = int(snap.get("current_row", 0) or 0)
         for d in snap.get("items", []):
             key = d.get("source_name") or d.get("source_path")
@@ -1317,6 +1382,38 @@ def install_v2(main_window, data_root: Path) -> None:
 
     def v2_restore_session(state) -> None:
         try:
+            setup = {}
+            if hasattr(state, "setup"):
+                setup = state.setup or {}
+            elif isinstance(state, dict):
+                setup = state.get("setup", {}) or {}
+            # استعادة حالة الإعداد (ملف الإكسل + قائمة الصور) دائمًا
+            try:
+                excel = ""
+                if hasattr(state, "excel_path"):
+                    excel = state.excel_path or ""
+                excel = excel or setup.get("catalog_path", "")
+                catalog = getattr(main_window, "catalog_edit", None)
+                if excel and catalog is not None and Path(excel).is_file():
+                    catalog.setText(excel)
+                    catalog.setToolTip(excel)
+                paths = [p for p in setup.get("image_paths", [])
+                         if p and Path(p).is_file()]
+                add_paths = getattr(main_window, "_add_image_paths", None) or \
+                    getattr(main_window, "add_images", None)
+                lst = getattr(main_window, "images_list", None) or \
+                    getattr(main_window, "image_list", None)
+                already = set()
+                if lst is not None and hasattr(lst, "count"):
+                    for i in range(lst.count()):
+                        it = lst.item(i)
+                        already.add(str(it.data(256) or it.toolTip()
+                                        or it.text()))
+                new_paths = [p for p in paths if p not in already]
+                if new_paths and callable(add_paths):
+                    add_paths(new_paths)
+            except Exception:
+                pass
             if hasattr(state, "images"):  # SessionState object
                 items_data = [
                     {
@@ -1338,6 +1435,7 @@ def install_v2(main_window, data_root: Path) -> None:
                 }
             items_data = state.get("items") or []
             if not items_data:
+                # جلسة إعداد فقط — استُعيد الإكسل والصور أعلاه، لا نتائج تُستعاد
                 return
             import native_app as _na
             items = [
@@ -1403,18 +1501,34 @@ def install_v2(main_window, data_root: Path) -> None:
     main_window.v2_save_session = v2_save_session
     main_window.v2_restore_session = v2_restore_session
 
-    # auto-save every 3 minutes while results exist
+    # auto-save every 90 seconds whenever there is ANY work (setup or results)
     from PySide6.QtCore import QTimer
+
+    def _has_work() -> bool:
+        try:
+            if getattr(main_window, "current_result", None) is not None:
+                return True
+            catalog = getattr(main_window, "catalog_edit", None)
+            if catalog is not None and (catalog.toolTip() or catalog.text()):
+                return True
+            lst = getattr(main_window, "images_list", None) or \
+                getattr(main_window, "image_list", None)
+            if lst is not None and hasattr(lst, "count") and lst.count() > 0:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _auto_save():
         try:
-            if getattr(main_window, "current_result", None) is not None:
+            if _has_work():
                 v2_save_session()
         except Exception:
             pass
 
+    main_window.v2_has_work = _has_work
     timer = QTimer(main_window)
-    timer.setInterval(3 * 60 * 1000)
+    timer.setInterval(90 * 1000)
     timer.timeout.connect(_auto_save)
     timer.start()
     main_window._v2_autosave_timer = timer
@@ -1422,6 +1536,12 @@ def install_v2(main_window, data_root: Path) -> None:
     # 6) unit & bulk naming policy (حبه/شدة/كرتون — verbatim from Excel)
     main_window.v2_data_root = data_root
     _install_unit_naming(main_window)
+    # ربط سياسة التسمية المحفوظة بمحرك المعالجة (المخرجات الجديدة)
+    try:
+        from engine_v2 import integration_v2 as _iv2
+        _iv2.set_naming_data_root(str(data_root))
+    except Exception:
+        pass
 
 
 # ==================================================== unit naming (V2.0)
@@ -1469,19 +1589,75 @@ class UnitNamingDialog(QDialog):
         pol_lay.addWidget(self.rb_free)
         root.addWidget(pol_box)
 
-        tpl_box = QGroupBox("قالب التسمية الموحد (تطبيق على الكل بنقرة واحدة)")
+        # ------------------------------ نمط التسمية (جديد 2.2)
+        scheme_box = QGroupBox("نمط التسمية")
+        scheme_lay = QVBoxLayout(scheme_box)
+        self.chk_naming_enabled = QCheckBox(
+            "تفعيل نظام التسمية (يُطبّق على الملفات الجديدة والقديمة عند الضبط)")
+        self.chk_naming_enabled.setChecked(True)
+        self.rb_scheme_dash = QRadioButton(
+            "النمط الجديد (موصى به): رقم الصنف_الوحدة-1 و رقم الصنف_الوحدة-2 — وبلا رقم للصورة الوحيدة")
+        self.rb_scheme_classic = QRadioButton(
+            "النمط الكلاسيكي 2.1: رقم الصنف_الوحدة ثم رقم الصنف_2_الوحدة")
+        self.rb_scheme_custom = QRadioButton("قالب مخصص أكتبه بنفسي:")
+        self.rb_scheme_dash.setChecked(True)
+        scheme_lay.addWidget(self.chk_naming_enabled)
+        scheme_lay.addWidget(self.rb_scheme_dash)
+        scheme_lay.addWidget(self.rb_scheme_classic)
+        scheme_lay.addWidget(self.rb_scheme_custom)
+        root.addWidget(scheme_box)
+
+        tpl_box = QGroupBox("قالب التسمية الموحد (تطبيق على الكل بنقرة واحدة) — يناسب أغلب المواقع والمتاجر")
         tpl_lay = QFormLayout(tpl_box)
-        self.template_edit = QLineEdit("{item}_{seq}_{unit}")
+        # قوالب جاهزة للمتاجر — اختيار بنقرة واحدة
+        self.store_tpl_combo = QComboBox()
+        self.store_tpl_combo.addItem("— اختر قالبًا جاهزًا (اختياري) —", "")
+        try:
+            _ensure_engine_path()
+            from engine_v2.naming_v2 import STORE_TEMPLATES
+            for label, tpl in STORE_TEMPLATES:
+                self.store_tpl_combo.addItem(label, tpl)
+        except Exception:
+            pass
+        tpl_lay.addRow("قوالب جاهزة:", self.store_tpl_combo)
+        self.template_edit = QLineEdit("{item}_{unit}-{seq}")
         self.template_edit.setToolTip(
-            "{item}=رقم الصنف، {seq}=التسلسل (يُحذف للصورة الأولى)، {unit}=الوحدة الحرفية من الإكسل"
+            "المتغيرات: {item}=رقم الصنف، {seq}=التسلسل (يُحذف للصورة الوحيدة)،"
+            " {unit}=الوحدة الحرفية من الإكسل، {barcode}=الباركود، {name}=اسم المنتج"
         )
+        self.template_edit.setEnabled(False)
         tpl_lay.addRow("القالب:", self.template_edit)
+        # خيارات الترقيم الحرة
+        seq_row = QHBoxLayout()
+        self.seq_start_combo = QComboBox()
+        self.seq_start_combo.addItem("يبدأ من 1", 1)
+        self.seq_start_combo.addItem("يبدأ من 0", 0)
+        self.seq_pad_combo = QComboBox()
+        self.seq_pad_combo.addItem("1، 2، 3 (بلا أصفار)", 0)
+        self.seq_pad_combo.addItem("01، 02، 03", 2)
+        self.seq_pad_combo.addItem("001، 002، 003", 3)
+        self.chk_number_single = QCheckBox("رقّم حتى الصورة الوحيدة")
+        seq_row.addWidget(self.seq_start_combo)
+        seq_row.addWidget(self.seq_pad_combo)
+        seq_row.addWidget(self.chk_number_single)
+        seq_row.addStretch(1)
+        tpl_lay.addRow("الترقيم:", seq_row)
         self.preview_lbl = QLabel("")
         self.preview_lbl.setStyleSheet("color:#2c5aa0; font-weight:600;")
+        self.preview_lbl.setWordWrap(True)
         tpl_lay.addRow("معاينة:", self.preview_lbl)
         root.addWidget(tpl_box)
 
         self.template_edit.textChanged.connect(self._update_preview)
+        self.store_tpl_combo.currentIndexChanged.connect(
+            self._on_store_template)
+        for combo in (self.seq_start_combo, self.seq_pad_combo):
+            combo.currentIndexChanged.connect(self._update_preview)
+        self.chk_number_single.toggled.connect(self._update_preview)
+        for rb in (self.rb_scheme_dash, self.rb_scheme_classic,
+                   self.rb_scheme_custom):
+            rb.toggled.connect(self._on_scheme_changed)
+        self.chk_naming_enabled.toggled.connect(self._update_preview)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
@@ -1543,35 +1719,110 @@ class UnitNamingDialog(QDialog):
             i = self.default_unit_combo.findText(data["default_unit"])
             if i >= 0:
                 self.default_unit_combo.setCurrentIndex(i)
-        if data.get("template"):
+        # نمط التسمية المحفوظ (آخر اختيار يُعتمد تلقائيًا)
+        scheme = data.get("scheme", "")
+        if not scheme:
+            scheme = ("classic" if data.get("template") == "{item}_{seq}_{unit}"
+                      else "dash")
+        {"dash": self.rb_scheme_dash,
+         "classic": self.rb_scheme_classic,
+         "custom": self.rb_scheme_custom}.get(
+            scheme, self.rb_scheme_dash).setChecked(True)
+        self.chk_naming_enabled.setChecked(bool(data.get("enabled", True)))
+        # خيارات الترقيم المحفوظة (آخر اختيار يُعتمد تلقائيًا)
+        try:
+            i = self.seq_start_combo.findData(int(data.get("seq_start", 1)))
+            if i >= 0:
+                self.seq_start_combo.setCurrentIndex(i)
+            i = self.seq_pad_combo.findData(int(data.get("seq_pad", 0)))
+            if i >= 0:
+                self.seq_pad_combo.setCurrentIndex(i)
+        except (TypeError, ValueError):
+            pass
+        self.chk_number_single.setChecked(
+            bool(data.get("always_number_single", False)))
+        self._on_scheme_changed()
+        if scheme == "custom" and data.get("template"):
             self.template_edit.setText(data["template"])
+            self._update_preview()
+
+    def _current_scheme(self) -> str:
+        if self.rb_scheme_classic.isChecked():
+            return "classic"
+        if self.rb_scheme_custom.isChecked():
+            return "custom"
+        return "dash"
+
+    def _on_scheme_changed(self, *_):
+        scheme = self._current_scheme()
+        self.template_edit.setEnabled(scheme == "custom")
+        self.store_tpl_combo.setEnabled(scheme == "custom")
+        if scheme == "dash":
+            self.template_edit.setText("{item}_{unit}-{seq}")
+        elif scheme == "classic":
+            self.template_edit.setText("{item}_{seq}_{unit}")
+        self._update_preview()
+
+    def _on_store_template(self, *_):
+        tpl = self.store_tpl_combo.currentData()
+        if tpl:
+            # اختيار قالب جاهز يحوّل تلقائيًا للنمط المخصص ويملأ القالب
+            if not self.rb_scheme_custom.isChecked():
+                self.rb_scheme_custom.setChecked(True)
+            self.template_edit.setText(tpl)
+            self._update_preview()
 
     def current_policy(self) -> dict:
         pol = ("replicate_all_units" if self.rb_replicate.isChecked()
                else "default_unit" if self.rb_default.isChecked()
                else "free" if self.rb_free.isChecked()
                else "per_image")
+        scheme = self._current_scheme()
+        default_tpl = ("{item}_{seq}_{unit}" if scheme == "classic"
+                       else "{item}_{unit}-{seq}")
         return {
             "unit_policy": pol,
             "default_unit": self.default_unit_combo.currentText(),
-            "template": self.template_edit.text().strip() or "{item}_{seq}_{unit}",
+            "template": self.template_edit.text().strip() or default_tpl,
+            "scheme": scheme,
+            "enabled": self.chk_naming_enabled.isChecked(),
+            "seq_start": int(self.seq_start_combo.currentData() or 1),
+            "seq_pad": int(self.seq_pad_combo.currentData() or 0),
+            "always_number_single": self.chk_number_single.isChecked(),
         }
 
     def _update_preview(self):
-        tpl = self.template_edit.text().strip() or "{item}_{seq}_{unit}"
+        if not self.chk_naming_enabled.isChecked():
+            self.preview_lbl.setText(
+                "نظام التسمية معطّل — تبقى الأسماء كما هي دون تغيير.")
+            return
+        scheme = self._current_scheme()
         try:
-            first = tpl.replace("_{seq}", "").replace("{seq}", "").format(
-                item="10014649", unit="حبه", seq="")
-            second = tpl.format(item="10014649", seq="2", unit="حبه")
-            self.preview_lbl.setText(f"{first}.webp   ،   {second}.webp")
+            _ensure_engine_path()
+            from engine_v2.naming_v2 import NamingSettings
+            s = NamingSettings.from_dict(self.current_policy())
+            kw = {"barcode": "6281057260003", "name": "نادك-زيت-زيتون"}
+            single = s.render("10014649", 1, "حبه", total=1, **kw)
+            first = s.render("10014649", 1, "حبه", total=2, **kw)
+            second = s.render("10014649", 2, "حبه", total=2, **kw)
+            self.preview_lbl.setText(
+                f"صورة وحيدة: {single}.webp\n"
+                f"صورتان: {first}.webp ، {second}.webp")
         except Exception:
-            self.preview_lbl.setText("قالب غير صالح — استخدم {item} و{seq} و{unit}")
+            self.preview_lbl.setText(
+                "قالب غير صالح — استخدم {item} و{seq} و{unit} و{barcode} و{name}")
 
     def _save_policy(self):
         data = self.current_policy()
         self._settings_path().write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._mw.v2_naming_policy = data
+        try:  # تعلم ذاتي: تذكر نمط التسمية المفضل
+            from engine_v2 import learning_v2 as _lrn
+            _lrn.record_naming_choice(data.get("scheme", "dash"),
+                                      data.get("enabled", True))
+        except Exception:
+            pass
         QMessageBox.information(self, "تم", "حُفظت سياسة الوحدات والتسمية وستُطبق على جميع الأصناف.")
 
     def _apply_all(self):
@@ -1579,6 +1830,12 @@ class UnitNamingDialog(QDialog):
         self._settings_path().write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._mw.v2_naming_policy = data
+        try:  # تعلم ذاتي
+            from engine_v2 import learning_v2 as _lrn
+            _lrn.record_naming_choice(data.get("scheme", "dash"),
+                                      data.get("enabled", True))
+        except Exception:
+            pass
         result = getattr(self._mw, "current_result", None)
         if result is None or not getattr(result, "items", None):
             QMessageBox.information(self, "تنبيه", "لا توجد نتائج حالية — حُفظت السياسة وستُطبق عند المعالجة.")
@@ -1586,11 +1843,7 @@ class UnitNamingDialog(QDialog):
         try:
             from engine_v2.naming_v2 import (
                 NamingSettings, plan_names_for_item)
-            settings = NamingSettings(
-                unit_policy=data["unit_policy"],
-                default_unit=data["default_unit"],
-                template=data["template"],
-            )
+            settings = NamingSettings.from_dict(data)
             idx = getattr(self._mw, "v2_catalog_index", None)
             groups: dict = {}
             for it in result.items:
@@ -1775,6 +2028,27 @@ class BatchRefineDialog(QDialog):
         self.chk_blur_dates.setToolTip(
             "يكشف التواريخ المطبوعة على العبوة ويطمسها بتمويه طفيف بلون"
             " المنتج نفسه — دون المساس بالحقائق الغذائية أو الباركود.")
+        self.chk_skip_approved = QCheckBox(
+            "حماية المنجز سابقًا (لا يُمس أي ملف موجود في مجلد الحفظ)")
+        self.chk_skip_approved.setChecked(True)
+        self.chk_skip_approved.setToolTip(
+            "أي عمل محفوظ سابقًا يعتبر معتمدًا ولا يتغير تلقائيًا —"
+            " أزل التحديد فقط إذا أردت إعادة إنتاج كل الصور من جديد.")
+        self.naming_combo = QComboBox()
+        self.naming_combo.addItems([
+            "النمط الجديد — رقم الصنف_الوحدة-1 (موصى به)",
+            "النمط الكلاسيكي — رقم الصنف_1_الوحدة"])
+        self.naming_combo.setToolTip(
+            "النمط الجديد: صورة واحدة = رقم الصنف_الوحدة بلا رقم،"
+            " وعند تعدد الصور: -1 و-2 وهكذا. يُحفظ آخر اختيار تلقائيًا.")
+        try:
+            _ensure_engine_path()
+            from engine_v2.naming_v2 import load_saved_settings as _lss
+            _saved = _lss(getattr(self, "_data_root", None))
+            if getattr(_saved, "scheme", "dash") != "dash":
+                self.naming_combo.setCurrentIndex(1)
+        except Exception:
+            pass
         self.shadow_combo = QComboBox()
         self.shadow_combo.addItems(["بدون ظل", "ظل أرضي ناعم", "ظل أرضي قوي",
                                     "ظل مسقط يمين", "ظل مسقط يسار",
@@ -1794,10 +2068,13 @@ class BatchRefineDialog(QDialog):
         opts.addWidget(self.chk_polish, 3, 0)
         opts.addWidget(self.chk_text_aware, 3, 1)
         opts.addWidget(self.chk_blur_dates, 4, 0)
-        opts.addWidget(QLabel("الظل:"), 5, 0)
-        opts.addWidget(self.shadow_combo, 5, 1)
-        opts.addWidget(QLabel("صيغة الإخراج:"), 6, 0)
-        opts.addWidget(self.fmt_combo, 6, 1)
+        opts.addWidget(self.chk_skip_approved, 4, 1)
+        opts.addWidget(QLabel("نمط التسمية:"), 5, 0)
+        opts.addWidget(self.naming_combo, 5, 1)
+        opts.addWidget(QLabel("الظل:"), 6, 0)
+        opts.addWidget(self.shadow_combo, 6, 1)
+        opts.addWidget(QLabel("صيغة الإخراج:"), 7, 0)
+        opts.addWidget(self.fmt_combo, 7, 1)
         root.addWidget(opts_box)
 
         self.progress_bar = QProgressBar()
@@ -1876,7 +2153,20 @@ class BatchRefineDialog(QDialog):
             polish=self.chk_polish.isChecked(),
             text_aware=self.chk_text_aware.isChecked(),
             blur_dates=self.chk_blur_dates.isChecked(),
+            naming_scheme=("dash" if self.naming_combo.currentIndex() == 0
+                           else "classic"),
+            naming_enabled=self.chk_names.isChecked(),
+            skip_approved=self.chk_skip_approved.isChecked(),
         )
+        # حفظ آخر اختيار لنمط التسمية ليُعتمد تلقائيًا في المرات القادمة
+        try:
+            from engine_v2.naming_v2 import (load_saved_settings as _lss,
+                                             save_settings as _sss)
+            _cur = _lss(getattr(self, "_data_root", None))
+            _cur.scheme = opts.naming_scheme
+            _sss(_cur, getattr(self, "_data_root", None))
+        except Exception:
+            pass
         from engine_v2.paths_v2 import models_dir as _models_dir
         models_dir = _models_dir()
         self._worker = _BatchRefineWorker(src, dst, opts, models_dir, self)

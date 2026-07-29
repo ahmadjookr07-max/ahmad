@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -144,7 +145,7 @@ _vision_pipeline._prepare_individual_source = _prepare_individual_perspective_so
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "1.2.1"
+APP_VERSION = "2.2.0"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -347,6 +348,7 @@ class ManualLinkWorker(QThread):
         remove_background: bool,
         enhance_product: bool,
         image_options: FinalImageOptions | None = None,
+        manual_rotation: float = 0.0,
     ) -> None:
         super().__init__()
         self.workspace = workspace
@@ -362,6 +364,45 @@ class ManualLinkWorker(QThread):
         self.remove_background = remove_background
         self.enhance_product = enhance_product
         self.image_options = image_options
+        self.manual_rotation = float(manual_rotation)
+
+    def _apply_rotation_to_outputs(self, result: object) -> None:
+        """تطبيق الميل اليدوي على مخرجات الربط مباشرة —
+        فتخرج الصورة معتدلة بالشكل المناسب فور الربط."""
+        if abs(self.manual_rotation) < 0.05:
+            return
+        try:
+            import cv2
+            import numpy as np
+            wanted = set(self.source_names)
+            for it in getattr(result, "items", []) or []:
+                if getattr(it, "source_name", None) not in wanted:
+                    continue
+                out = getattr(it, "output_path", None)
+                if not out:
+                    continue
+                p = Path(out)
+                if not p.is_file():
+                    continue
+                data = np.fromfile(str(p), dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                h, w = img.shape[:2]
+                m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0),
+                                            self.manual_rotation, 1.0)
+                img = cv2.warpAffine(
+                    img, m, (w, h), flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(255, 255, 255))
+                ext = p.suffix.lower() or ".webp"
+                params = [cv2.IMWRITE_WEBP_QUALITY, 95] if ext == ".webp" \
+                    else []
+                ok, buf = cv2.imencode(ext, img, params)
+                if ok:
+                    buf.tofile(str(p))
+        except Exception:
+            pass
 
     def run(self) -> None:
         try:
@@ -383,6 +424,7 @@ class ManualLinkWorker(QThread):
                     enhance_product=self.enhance_product,
                     final_image_options=self.image_options,
                 )
+            self._apply_rotation_to_outputs(result)
             self.completed.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -406,6 +448,9 @@ class IndividualEditWorker(QThread):
         auto_straighten: bool,
         remove_background: bool,
         image_options: FinalImageOptions | None = None,
+        blur_dates: bool = False,
+        deglare: bool = False,
+        manual_rotation: float = 0.0,
     ) -> None:
         super().__init__()
         self.workspace = workspace
@@ -418,6 +463,47 @@ class IndividualEditWorker(QThread):
         self.auto_straighten = bool(auto_straighten)
         self.remove_background = bool(remove_background)
         self.image_options = image_options
+        self.blur_dates = bool(blur_dates)
+        self.deglare = bool(deglare)
+        self.manual_rotation = float(manual_rotation)
+
+    def _post_process_file(self, path: "Path | str | None") -> None:
+        """تطبيق الميل اليدوي وطمس التواريخ وإزالة الانعكاسات على الملف الناتج."""
+        needs_rotation = abs(self.manual_rotation) > 0.049
+        if not (self.blur_dates or self.deglare or needs_rotation) or not path:
+            return
+        try:
+            import cv2
+            import numpy as np
+            p = Path(path)
+            if not p.is_file():
+                return
+            data = np.fromfile(str(p), dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            if img is None:
+                return
+            if needs_rotation:
+                # تدوير دقيق حول المركز مع تعبئة بيضاء — المنتج على
+                # خلفية بيضاء أصلًا فتبقى النتيجة نظيفة بلا زوايا داكنة
+                h, w = img.shape[:2]
+                m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0),
+                                            self.manual_rotation, 1.0)
+                img = cv2.warpAffine(
+                    img, m, (w, h), flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(255, 255, 255))
+            if self.deglare:
+                from engine_v2.edge_refine_v2 import remove_glare
+                img = remove_glare(img, 0.6)
+            if self.blur_dates:
+                from engine_v2.date_blur_v2 import auto_blur_dates
+                img, _count = auto_blur_dates(img)
+            ext = p.suffix.lower() or ".webp"
+            ok, buf = cv2.imencode(ext, img, [cv2.IMWRITE_WEBP_QUALITY, 95] if ext == ".webp" else [])
+            if ok:
+                buf.tofile(str(p))
+        except Exception:
+            pass
 
     def run(self) -> None:
         try:
@@ -437,6 +523,7 @@ class IndividualEditWorker(QThread):
                     self.source_name,
                     **arguments,
                 )
+                self._post_process_file(getattr(result, "preview_path", None))
                 self.progress_changed.emit(1, 1, "المعاينة جاهزة قبل الحفظ")
             else:
                 result = apply_individual_image_edit(
@@ -445,6 +532,12 @@ class IndividualEditWorker(QThread):
                     progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
                     **arguments,
                 )
+                if self.blur_dates or self.deglare or \
+                        abs(self.manual_rotation) > 0.049:
+                    for it in getattr(result, "items", []) or []:
+                        if getattr(it, "source_name", None) == self.source_name:
+                            self._post_process_file(getattr(it, "output_path", None))
+                            break
             self.completed.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -455,16 +548,19 @@ class StatCard(QFrame):
         super().__init__()
         self.setObjectName("statCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
         self.value = QLabel("0")
         self.value.setAlignment(Qt.AlignCenter)
-        self.value.setStyleSheet(f"font-size: 24px; font-weight: 800; color: {color};")
+        self.value.setStyleSheet(f"font-size: 20px; font-weight: 800; color: {color};")
         label = QLabel(title)
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet("color: #64748b; font-size: 11px;")
         layout.addWidget(self.value)
         layout.addWidget(label)
+        # إصلاح قص النص: العرض الأدنى يراعي عرض العنوان الفعلي
+        self.setMinimumWidth(
+            max(64, label.fontMetrics().horizontalAdvance(title) + 22))
 
 
 class ZoomableImageView(QScrollArea):
@@ -864,9 +960,35 @@ class ZoomableImageView(QScrollArea):
             self._resize_label_to_viewport()
             return
         self._path = candidate
-        self._pixmap = pixmap
+        self._base_pixmap = pixmap
+        self._pixmap = self._apply_preview_rotation(pixmap)
         self.image_label.setToolTip(str(candidate))
         self.fit_image()
+
+    def set_preview_rotation(self, degrees: float) -> None:
+        """معاينة الميل اليدوي فوريًا — تدوير العرض فقط دون لمس الملف."""
+        self._preview_rotation = float(degrees)
+        base = getattr(self, "_base_pixmap", None)
+        if base is None or base.isNull():
+            return
+        self._pixmap = self._apply_preview_rotation(base)
+        self._render()
+
+    def _apply_preview_rotation(self, pixmap: QPixmap) -> QPixmap:
+        deg = float(getattr(self, "_preview_rotation", 0.0) or 0.0)
+        if abs(deg) < 0.05 or pixmap.isNull():
+            return pixmap
+        from PySide6.QtGui import QTransform
+        # القيمة الموجبة = عكس العقارب (مطابق لـ cv2.getRotationMatrix2D)
+        rotated = pixmap.transformed(QTransform().rotate(-deg),
+                                     Qt.SmoothTransformation)
+        # تعبئة بيضاء خلف الدوران لمطابقة الناتج النهائي
+        canvas = QPixmap(rotated.size())
+        canvas.fill(Qt.white)
+        painter = QPainter(canvas)
+        painter.drawPixmap(0, 0, rotated)
+        painter.end()
+        return canvas
 
     def _resize_label_to_viewport(self) -> None:
         viewport = self.viewport().size()
@@ -1258,9 +1380,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "result_subtitle"):
             self.result_subtitle.setVisible(height_mode != "short")
         for card in getattr(self, "summary_cards", ()):
-            card.setFixedSize(72 if width_mode == "compact" else 78, 42 if height_mode == "short" else 46)
+            # لا نثبت العرض حتى لا تُقص العناوين — ارتفاع ثابت فقط
+            card.setFixedHeight(46 if height_mode == "short" else 52)
+            card.setMaximumWidth(120)
         if hasattr(self, "manual_group"):
-            self.manual_group.setMaximumHeight(124 if height_mode == "short" else 142)
+            self.manual_group.setMaximumHeight(136 if height_mode == "short" else 150)
         list_width = max(390, int(available * list_share))
         preview_width = max(560, available - list_width)
         self.results_splitter.setSizes([list_width, preview_width])
@@ -1387,6 +1511,9 @@ class MainWindow(QMainWindow):
         strength_row.addWidget(QLabel("قوة التحسين:"))
         self.enhancement_strength_slider = QSlider(Qt.Horizontal)
         self.enhancement_strength_slider.setObjectName("enhancementStrength")
+        # إصلاح الانعكاس: في واجهة RTL يظهر المقبض معكوسًا — نثبته LTR دائمًا
+        self.enhancement_strength_slider.setLayoutDirection(Qt.LeftToRight)
+        self.enhancement_strength_slider.setInvertedAppearance(False)
         self.enhancement_strength_slider.setRange(0, 100)
         self.enhancement_strength_slider.setSingleStep(5)
         self.enhancement_strength_slider.setPageStep(10)
@@ -1471,7 +1598,11 @@ class MainWindow(QMainWindow):
         quality_row.addWidget(self.text_polish_check)
         options_layout.addLayout(quality_row)
 
-        dimensions = QLabel("WebP ‏800×700 • خلفية بيضاء عند العزل • الاسم: رقم الصنف_حبه")
+        dimensions = QLabel(
+            "WebP ‏800×700 • خلفية بيضاء عند العزل • "
+            "الاسم: رقم_الصنف_الوحدة (صورة واحدة) أو رقم_الصنف_الوحدة-1/-2 (عدة صور) — "
+            "قوالب متاجر جاهزة وتخصيص كامل من نافذة التسمية"
+        )
         dimensions.setWordWrap(True)
         dimensions.setObjectName("hintLabel")
         options_layout.addWidget(dimensions)
@@ -1743,7 +1874,7 @@ class MainWindow(QMainWindow):
         self.manual_group = QFrame()
         self.manual_group.setObjectName("alwaysVisibleLinkBar")
         self.manual_group.setMinimumHeight(110)
-        self.manual_group.setMaximumHeight(124)
+        self.manual_group.setMaximumHeight(150)
         manual_layout = QVBoxLayout(self.manual_group)
         manual_layout.setContentsMargins(8, 6, 8, 6)
         manual_layout.setSpacing(4)
@@ -1824,16 +1955,68 @@ class MainWindow(QMainWindow):
             self.link_by_image_button,
             self.jump_to_previews_button,
         ):
-            button.setMinimumHeight(30)
-            button.setMinimumWidth(0)
+            button.setMinimumHeight(32)
+            # إصلاح قص النصوص: العرض الأدنى يُحسب من عرض النص الفعلي + هوامش
+            text_w = button.fontMetrics().horizontalAdvance(button.text())
+            button.setMinimumWidth(text_w + 24)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.manual_reference_badge.setMinimumWidth(76)
-        self.manual_reference_badge.setMaximumWidth(112)
+        self.manual_reference_badge.setMinimumWidth(
+            self.manual_reference_badge.fontMetrics().horizontalAdvance(
+                self.manual_reference_badge.text()) + 20)
+        self.manual_reference_badge.setMaximumWidth(160)
         quick_controls.addWidget(self.use_reference_button)
         quick_controls.addWidget(self.suggest_group_button)
         quick_controls.addWidget(self.reference_group_link_button)
         quick_controls.addWidget(self.link_by_image_button)
         quick_controls.addWidget(self.jump_to_previews_button)
+
+        # وزن الميل اليدوي الخارجي — متاح مباشرة أثناء الربط بلا فتح نوافذ
+        tilt_label = QLabel("الميل:")
+        tilt_label.setObjectName("manualTiltLabel")
+        self.manual_tilt_spin = QDoubleSpinBox()
+        self.manual_tilt_spin.setObjectName("manualTiltSpin")
+        self.manual_tilt_spin.setRange(-45.0, 45.0)
+        self.manual_tilt_spin.setDecimals(1)
+        self.manual_tilt_spin.setSingleStep(0.5)
+        self.manual_tilt_spin.setSuffix("°")
+        self.manual_tilt_spin.setValue(0.0)
+        self.manual_tilt_spin.setMinimumHeight(32)
+        self.manual_tilt_spin.setMinimumWidth(84)
+        self.manual_tilt_spin.setLayoutDirection(Qt.LeftToRight)
+        self.manual_tilt_spin.setAlignment(Qt.AlignCenter)
+        self.manual_tilt_spin.setToolTip(
+            "وزن الميل يدويًا من الأمام مباشرة أثناء الربط:\n"
+            "موجب = دوران لليسار (عكس العقارب)، سالب = لليمين.\n"
+            "المعاينة تتحدث فورًا والقيمة تُطبق عند الحفظ أو الربط —\n"
+            "فتخرج الصورة معتدلة بالشكل المناسب مباشرة")
+        self.manual_tilt_ccw_button = QPushButton("↺")
+        self.manual_tilt_ccw_button.setObjectName("manualTiltButton")
+        self.manual_tilt_ccw_button.setToolTip("إمالة لليسار 0.5°")
+        self.manual_tilt_cw_button = QPushButton("↻")
+        self.manual_tilt_cw_button.setObjectName("manualTiltButton")
+        self.manual_tilt_cw_button.setToolTip("إمالة لليمين 0.5°")
+        self.manual_tilt_reset_button = QPushButton("صفر")
+        self.manual_tilt_reset_button.setObjectName("manualTiltButton")
+        self.manual_tilt_reset_button.setToolTip("إرجاع الميل إلى الصفر")
+        for tb in (self.manual_tilt_ccw_button, self.manual_tilt_cw_button,
+                   self.manual_tilt_reset_button):
+            tb.setMinimumHeight(32)
+            tb.setMinimumWidth(34)
+            tb.setMaximumWidth(44)
+        self.manual_tilt_ccw_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(
+                self.manual_tilt_spin.value() + 0.5))
+        self.manual_tilt_cw_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(
+                self.manual_tilt_spin.value() - 0.5))
+        self.manual_tilt_reset_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(0.0))
+        self.manual_tilt_spin.valueChanged.connect(self._on_manual_tilt_changed)
+        quick_controls.addWidget(tilt_label)
+        quick_controls.addWidget(self.manual_tilt_ccw_button)
+        quick_controls.addWidget(self.manual_tilt_spin)
+        quick_controls.addWidget(self.manual_tilt_cw_button)
+        quick_controls.addWidget(self.manual_tilt_reset_button)
         quick_controls.addWidget(self.manual_reference_badge, 1)
         manual_layout.addLayout(quick_controls)
 
@@ -2170,8 +2353,38 @@ class MainWindow(QMainWindow):
             scroll.setWidget(host)
             self.individual_editor_tabs.addTab(scroll, label)
 
+        advanced_card = QFrame()
+        advanced_card.setObjectName("editorAdvancedCard")
+        advanced_layout = QVBoxLayout(advanced_card)
+        advanced_layout.setContentsMargins(9, 8, 9, 8)
+        advanced_layout.setSpacing(7)
+        advanced_title = QLabel("4  أدوات متقدمة")
+        advanced_title.setObjectName("editorToolSectionTitle")
+        advanced_layout.addWidget(advanced_title)
+        self.individual_blur_dates_check = QCheckBox("طمس تواريخ الإنتاج/الانتهاء تلقائيًا")
+        self.individual_blur_dates_check.setObjectName("individualBlurDates")
+        self.individual_blur_dates_check.setToolTip(
+            "يكتشف مناطق التواريخ ويطمسها بلون المنتج نفسه قبل الحفظ — بنفس محرك المحرر الكامل"
+        )
+        advanced_layout.addWidget(self.individual_blur_dates_check)
+        self.individual_deglare_check = QCheckBox("إزالة انعكاسات التصوير (اللمعان)")
+        self.individual_deglare_check.setObjectName("individualDeglare")
+        self.individual_deglare_check.setToolTip(
+            "يخفف اللمعان والانعكاسات الضوئية على العبوة من دون المساس بالكتابات"
+        )
+        advanced_layout.addWidget(self.individual_deglare_check)
+        self.individual_full_editor_button = QPushButton("فتح المحرر الكامل لهذه الصورة")
+        self.individual_full_editor_button.setObjectName("secondaryButton")
+        self.individual_full_editor_button.setMinimumHeight(34)
+        self.individual_full_editor_button.setToolTip(
+            "للحالات المعقدة فقط: يفتح محرر صور المتاجر الاحترافي الكامل على نفس الصورة"
+        )
+        advanced_layout.addWidget(self.individual_full_editor_button)
+        self._add_depth_effect(advanced_card, color="#b45309", blur=14, y_offset=3, alpha=36)
+
         add_tool_tab(crop_card, "الاقتصاص", "editorCropTab")
         add_tool_tab(enhance_card, "التحسين", "editorEnhanceTab")
+        add_tool_tab(advanced_card, "متقدم", "editorAdvancedTab")
         add_tool_tab(compare_card, "المقارنة", "editorCompareTab")
         self.individual_editor_tabs.setCurrentIndex(0)
         layout.addWidget(self.individual_editor_tabs, 1)
@@ -2205,6 +2418,9 @@ class MainWindow(QMainWindow):
         self.individual_show_source_button.clicked.connect(self._show_individual_source)
         self.individual_show_preview_button.clicked.connect(self._show_individual_preview)
         self.individual_reset_button.clicked.connect(self._reset_individual_editor)
+        self.individual_blur_dates_check.toggled.connect(self._invalidate_individual_preview)
+        self.individual_deglare_check.toggled.connect(self._invalidate_individual_preview)
+        self.individual_full_editor_button.clicked.connect(self._open_full_editor_for_individual)
         return panel
 
     def _build_individual_editor_dialog(self) -> QDialog:
@@ -2726,6 +2942,9 @@ class MainWindow(QMainWindow):
             auto_straighten=self.individual_straighten_check.isChecked(),
             remove_background=self.remove_background_check.isChecked(),
             image_options=self._final_image_options(),
+            blur_dates=self.individual_blur_dates_check.isChecked(),
+            deglare=self.individual_deglare_check.isChecked(),
+            manual_rotation=self._current_manual_tilt(),
         )
         self.individual_worker.progress_changed.connect(self._on_progress)
         self.individual_worker.completed.connect(self._on_individual_edit_completed)
@@ -2825,6 +3044,27 @@ class MainWindow(QMainWindow):
             f"سجل التفاصيل محفوظ في:\n{log_path}",
         )
         self._update_controls()
+
+    def _open_full_editor_for_individual(self) -> None:
+        """فتح محرر صور المتاجر الاحترافي الكامل على الصورة المحددة نفسها."""
+        item = self._individual_editable_item()
+        source: Path | None = None
+        if item is not None and self.current_workspace is not None:
+            cand = Path(self.current_workspace) / "uploads" / str(item.source_name)
+            if cand.is_file():
+                source = cand
+            else:
+                for sub in ("sources", "originals", "input", ""):
+                    cand = Path(self.current_workspace) / sub / str(item.source_name)
+                    if cand.is_file():
+                        source = cand
+                        break
+        try:
+            from photo_editor_v2 import V2PhotoEditorDialog
+            dlg = V2PhotoEditorDialog(str(source) if source else "", parent=self)
+            dlg.exec()
+        except Exception as exc:
+            QMessageBox.warning(self, APP_NAME, f"تعذر فتح المحرر الكامل: {exc}")
 
     def _on_individual_worker_finished(self) -> None:
         worker = self.sender()
@@ -3384,6 +3624,34 @@ class MainWindow(QMainWindow):
             self.result_search_edit.blockSignals(False)
             self.result_status_filter.blockSignals(False)
         self._apply_result_filters()
+
+    def _current_manual_tilt(self) -> float:
+        """قيمة الميل اليدوي الحالية من شريط الربط المباشر (بالدرجات)."""
+        spin = getattr(self, "manual_tilt_spin", None)
+        try:
+            return float(spin.value()) if spin is not None else 0.0
+        except Exception:
+            return 0.0
+
+    def _on_manual_tilt_changed(self, value: float) -> None:
+        """معاينة فورية للميل على لوحة النتيجة والأصل معًا."""
+        try:
+            deg = float(value)
+            for pane_name in ("output_preview", "source_preview"):
+                pane = getattr(self, pane_name, None)
+                viewer = getattr(pane, "viewer", None)
+                if viewer is not None and hasattr(viewer,
+                                                  "set_preview_rotation"):
+                    viewer.set_preview_rotation(deg)
+            editor_preview = getattr(self, "individual_editor_preview", None)
+            viewer = getattr(editor_preview, "viewer", None)
+            if viewer is not None and hasattr(viewer, "set_preview_rotation"):
+                viewer.set_preview_rotation(deg)
+            if abs(deg) > 0.049:
+                self.status_label.setText(
+                    f"ميل يدوي {deg:+.1f}° — سيُطبق على الصورة عند الحفظ أو الربط")
+        except Exception:
+            pass
 
     def _capture_results_position(self) -> tuple[str, int, int] | None:
         """Capture the selected source, row, and exact table scroll position."""
@@ -4042,17 +4310,43 @@ class MainWindow(QMainWindow):
                 self, APP_NAME, "لا توجد صور مرتبطة بعد لاختيار الصنف منها.")
             return
 
+        # اقتراح بصري تلقائي: المنتج نفسه من زوايا أخرى (أمام/جنب/خلف)
+        similarity: dict[str, float] = {}
+        try:
+            from engine_v2 import visual_match_v2 as _vm
+            tgt_sigs = [_vm.build_signature(t.source_path) for t in targets
+                        if getattr(t, "source_path", "")]
+            tgt_sigs = [s for s in tgt_sigs if s.ok]
+            if tgt_sigs:
+                for item in linked_items:
+                    ref_sig = _vm.build_signature(item.source_path)
+                    if not ref_sig.ok:
+                        continue
+                    best = max(_vm.pair_similarity(ts, ref_sig)
+                               for ts in tgt_sigs)
+                    similarity[item.source_name] = best
+        except Exception as exc:
+            print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
+
+        def _sim_of(item) -> float:
+            return similarity.get(item.source_name, 0.0)
+
+        # رتب القائمة: الأقرب بصريًا أولاً
+        linked_items = sorted(linked_items, key=_sim_of, reverse=True)
+
         from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QListWidget,
                                        QListWidgetItem, QVBoxLayout, QLineEdit,
-                                       QLabel)
+                                       QLabel, QPushButton, QHBoxLayout)
         dlg = QDialog(self)
         dlg.setWindowTitle("اختر الصورة المرتبطة مصدر الصنف")
         dlg.setLayoutDirection(Qt.RightToLeft)
-        dlg.resize(560, 620)
+        dlg.resize(600, 680)
         lay = QVBoxLayout(dlg)
         hint = QLabel(
             f"ستُربط {len(targets)} صورة بصنف الصورة التي تختارها هنا —"
-            " ابحث بالاسم أو الرقم أو انقر مباشرة على الصورة المطلوبة")
+            " القائمة مرتبة تلقائيًا: الأقرب بصريًا لصورتك يظهر أولاً."
+            " بعد الربط ترث الصورة رقم الصنف والوحدة وتخرج بالتسمية النهائية"
+            " تلقائيًا (رقم الصنف_الوحدة-1 و-2...).")
         hint.setWordWrap(True)
         lay.addWidget(hint)
         search = QLineEdit()
@@ -4071,18 +4365,44 @@ class MainWindow(QMainWindow):
                 hay = f"{item.product_name} {item.item_code} {item.barcode}"
                 if needle and needle not in hay:
                     continue
-                label = (f"{item.product_name or 'صنف'}\n"
+                sim = _sim_of(item)
+                sim_txt = ""
+                if sim >= 0.85:
+                    sim_txt = f" ★ تطابق بصري عالٍ جدًا {sim:.0%}"
+                elif sim >= 0.74:
+                    sim_txt = f" ★ تطابق بصري عالٍ {sim:.0%}"
+                elif sim >= 0.62:
+                    sim_txt = f" • تشابه محتمل {sim:.0%}"
+                label = (f"{item.product_name or 'صنف'}{sim_txt}\n"
                          f"{item.item_code} • {item.barcode or 'بلا باركود'}")
                 li = QListWidgetItem(self._result_thumbnail_icon(item), label)
                 li.setData(Qt.UserRole, item.item_code)
                 lst.addItem(li)
+            if lst.count():
+                lst.setCurrentRow(0)
 
         search.textChanged.connect(_fill)
         _fill()
+
         buttons = QDialogButtonBox()
+        best_sim = _sim_of(linked_items[0]) if linked_items else 0.0
+        if best_sim >= 0.62:
+            auto_btn = buttons.addButton(
+                f"ربط بالأقرب بصريًا ({best_sim:.0%})",
+                QDialogButtonBox.AcceptRole)
+            auto_btn.setMinimumHeight(40)
+            auto_btn.setStyleSheet(
+                "background:#1a7a4a; color:white; font-weight:700;")
+
+            def _pick_best():
+                lst.setCurrentRow(0)
+            auto_btn.clicked.connect(_pick_best)
         ok_btn = buttons.addButton("ربط الآن", QDialogButtonBox.AcceptRole)
         buttons.addButton("إلغاء", QDialogButtonBox.RejectRole)
         ok_btn.setMinimumHeight(40)
+        for b in buttons.buttons():
+            b.setMinimumWidth(
+                b.fontMetrics().horizontalAdvance(b.text()) + 28)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         lst.itemDoubleClicked.connect(lambda _i: dlg.accept())
@@ -4096,6 +4416,16 @@ class MainWindow(QMainWindow):
         reference = str(chosen.data(Qt.UserRole) or "").strip()
         if not reference:
             return
+        # تسجيل قرار الربط للتعلم الذاتي
+        try:
+            from engine_v2 import learning_v2 as _lrn
+            for t in targets:
+                _lrn.record_link_decision(
+                    source=t.source_name, item_code=reference,
+                    visual_score=similarity.get(t.source_name, 0.0),
+                    accepted=True)
+        except Exception:
+            pass
         self._begin_manual_links(
             targets,
             reference,
@@ -4131,6 +4461,7 @@ class MainWindow(QMainWindow):
             self.remove_background_check.isChecked(),
             self.enhance_product_check.isChecked(),
             self._final_image_options(),
+            manual_rotation=self._current_manual_tilt(),
         )
         self.manual_worker.completed.connect(self._on_manual_completed)
         self.manual_worker.failed.connect(self._on_manual_failed)
@@ -4155,6 +4486,13 @@ class MainWindow(QMainWindow):
             self._manual_reference_source_name = linked_items[0].source_name
         self.current_result = result
         self.manual_item_edit.clear()
+        # تصفير الميل اليدوي بعد تطبيقه — كي لا ينتقل سهوًا للصورة التالية
+        spin = getattr(self, "manual_tilt_spin", None)
+        if spin is not None and abs(spin.value()) > 0.049:
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+            self._on_manual_tilt_changed(0.0)
         self._populate_results(restore_position=restore_position)
         self.manual_link_button.setText("ربط الآن")
         self._set_busy(False)

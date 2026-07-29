@@ -124,6 +124,54 @@ def record_compression(level: str) -> None:
     _save(d)
 
 
+def record_link_decision(source: str = "", item_code: str = "",
+                         visual_score: float = 0.0,
+                         accepted: bool = True) -> None:
+    """يتعلم من قرارات ربط الصور بلا باركود: كلما قبل المستخدم
+    اقتراحًا بدرجة معينة، تُضبط عتبة الاقتراح البصري مستقبلاً."""
+    d = _load()
+    slot = d.setdefault("link_decisions",
+                        {"accepted": 0, "rejected": 0,
+                         "score_sum": 0.0, "score_n": 0})
+    slot["accepted" if accepted else "rejected"] = \
+        slot.get("accepted" if accepted else "rejected", 0) + 1
+    if visual_score > 0:
+        slot["score_sum"] = slot.get("score_sum", 0.0) + float(visual_score)
+        slot["score_n"] = slot.get("score_n", 0) + 1
+    d["events_count"] += 1
+    _save(d)
+
+
+def record_naming_choice(scheme: str, enabled: bool = True) -> None:
+    """يتذكر نمط التسمية الذي يفضله المستخدم."""
+    d = _load()
+    slot = d.setdefault("naming_choice", {})
+    slot[scheme] = slot.get(scheme, 0) + 1
+    slot["_enabled"] = bool(enabled)
+    d["events_count"] += 1
+    _save(d)
+
+
+def suggest_link_threshold(default: float = 0.62) -> float:
+    """عتبة الاقتراح البصري المتعلمة من قرارات المستخدم."""
+    slot = _load().get("link_decisions") or {}
+    n = slot.get("score_n", 0)
+    if n < 5:
+        return default
+    avg = slot.get("score_sum", 0.0) / n
+    # اجعل العتبة أقل بقليل من متوسط ما يقبله المستخدم
+    return round(min(0.85, max(0.5, avg - 0.08)), 2)
+
+
+def suggest_naming_scheme(default: str = "dash") -> str:
+    slot = _load().get("naming_choice") or {}
+    counts = {k: v for k, v in slot.items()
+              if not k.startswith("_") and isinstance(v, int)}
+    if not counts:
+        return default
+    return max(counts, key=counts.get)
+
+
 # ---------------------------------------------------------- suggest APIs
 def _avg(slot: dict, default: float) -> float:
     n = slot.get("n", 0)

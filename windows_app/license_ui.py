@@ -483,7 +483,10 @@ def license_badge_style() -> str:
 def install_license_badge(main_window) -> None:
     """يضيف شارة حالة الاشتراك + زر لوحة المالك إلى هيدر النافذة."""
     try:
-        header_layout = main_window.header_frame.layout()
+        # يُفضّل صف الأدوات الجديد (V2 toolbar) لتجنب ازدحام الهيدر وقص النصوص
+        header_layout = getattr(main_window, "v2_toolbar_layout", None)
+        if header_layout is None:
+            header_layout = main_window.header_frame.layout()
     except Exception:
         return
     badge = QLabel(license_badge_text())
@@ -500,8 +503,12 @@ def install_license_badge(main_window) -> None:
         pass
     owner_btn = QPushButton("المالك")
     owner_btn.setObjectName("v2OwnerBtn")
-    owner_btn.setMinimumHeight(40)
+    owner_btn.setMinimumHeight(36)
+    owner_btn.setMinimumWidth(
+        owner_btn.fontMetrics().horizontalAdvance(owner_btn.text()) + 30)
     owner_btn.clicked.connect(lambda: OwnerPanelDialog(main_window).exec())
+    badge.setMinimumWidth(
+        badge.fontMetrics().horizontalAdvance(badge.text()) + 20)
     insert_at = max(header_layout.count() - 1, 0)
     header_layout.insertWidget(insert_at, badge)
     header_layout.insertWidget(insert_at, owner_btn)
