@@ -211,7 +211,8 @@ class BatchRefiner:
                 from engine_v2.naming_v2 import build_name
                 new_stem = build_name(code, seq, unit)
         except Exception:
-            new_stem = f"{code}_{unit}" if seq <= 1 else f"{code}_{unit}-{seq}"
+            new_stem = (f"{code}_{unit}" if seq <= 1
+                        else f"{code}_{unit}-{seq - 1}")
         return new_stem, note
 
     def _group_total(self, code: str, unit: str) -> int:

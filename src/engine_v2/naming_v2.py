@@ -119,17 +119,18 @@ def build_name(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT) -> str:
 
 def build_name_dash(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT,
                     total: int = 1) -> str:
-    """النمط الجديد (2.2) بالشرطة:
-
-    - صورة واحدة فقط (total<=1):     {item}_{unit}
-    - أكثر من صورة: كل صورة تأخذ رقمًا {item}_{unit}-{seq} بدءًا من -1.
+    """النمط الجديد (2.3) بالشرطة — بطلب المالك:
+    - الصورة الرئيسية (الأولى/الواجهة) دائمًا بلا رقم: {item}_{unit}
+    - الصور الإضافية تبدأ من -1: {item}_{unit}-1 ثم -2 ثم -3 ...
+    (seq=1 للرئيسية، seq=2 تعطي -1، seq=3 تعطي -2 ...)
     """
     item = sanitize_item(item)
     unit = clean_unit(sanitize_item(str(unit))) if unit else ""
     unit = unit or UNIT_SUFFIX_DEFAULT
-    if total <= 1 and seq <= 1:
-        return normalize_stem(f"{item}_{unit}")
-    return normalize_stem(f"{item}_{unit}") + f"-{max(1, seq)}"
+    base = normalize_stem(f"{item}_{unit}")
+    if seq <= 1:
+        return base
+    return f"{base}-{seq - 1}"
 
 
 def parse_name(stem: str) -> ParsedName | None:
@@ -141,7 +142,9 @@ def parse_name(stem: str) -> ParsedName | None:
     stem = normalize_stem(stem)
     m = DASH_NAME_RE.match(stem)
     if m and not m.group("unit").isdigit():
-        return ParsedName(m.group("item"), int(m.group("seq")),
+        # في نمط dash الرقم الظاهر -1 يعني الصورة الثانية (الرئيسية بلا رقم)
+        # فنخزّن seq الداخلي = الرقم الظاهر + 1 ليبقى round-trip متسقًا.
+        return ParsedName(m.group("item"), int(m.group("seq")) + 1,
                           m.group("unit"))
     m = NAME_RE.match(stem)
     if m and not m.group("unit").isdigit():
@@ -291,8 +294,44 @@ def apply_bulk_rename(folder: str | Path,
 UNIT_POLICY_PER_IMAGE = "per_image"
 UNIT_POLICY_REPLICATE = "replicate_all_units"
 UNIT_POLICY_DEFAULT = "default_unit"
+# join_all_units (جديد 2.3): الصنف المكرر في الإكسل بعدة وحدات (حبة/شدة/كرتون)
+# تُجمع كل وحداته حرفيًا وبنفس ترتيب الإكسل في اسم واحد:
+#   الرئيسية: 10001102_حبة_شدة_كرتون — الإضافية: ...-1 ثم -2 ثم -3
+UNIT_POLICY_JOIN_ALL = "join_all_units"
 VALID_POLICIES = (UNIT_POLICY_PER_IMAGE, UNIT_POLICY_REPLICATE,
-                  UNIT_POLICY_DEFAULT)
+                  UNIT_POLICY_DEFAULT, UNIT_POLICY_JOIN_ALL)
+
+
+def join_units(units: list[str] | tuple[str, ...],
+               default_unit: str = UNIT_SUFFIX_DEFAULT) -> str:
+    """يجمع وحدات الصنف كما وردت في الإكسل حرفيًا وبنفس الترتيب
+    (مع إزالة التكرار فقط) في مقطع واحد: حبة_شدة_كرتون."""
+    seen: list[str] = []
+    for u in units or []:
+        cu = clean_unit(sanitize_item(str(u)))
+        if cu and cu not in seen:
+            seen.append(cu)
+    if not seen:
+        seen = [clean_unit(default_unit) or UNIT_SUFFIX_DEFAULT]
+    return "_".join(seen)
+
+
+def build_name_join_all(item: str, units: list[str] | tuple[str, ...],
+                        seq: int = 1, total: int = 1,
+                        default_unit: str = UNIT_SUFFIX_DEFAULT) -> str:
+    """اسم الصورة بسياسة جمع كل الوحدات (حسب الإكسل بالضبط):
+
+    - الصورة الرئيسية (الأولى): {item}_{u1}_{u2}_{u3} بلا رقم
+    - الصور الإضافية: {item}_{u1}_{u2}_{u3}-1 ثم -2 ...
+    """
+    item = sanitize_item(item)
+    joined = join_units(units, default_unit)
+    base = normalize_stem(f"{item}_{joined}")
+    if seq <= 1:
+        return base
+    # الصورة الثانية تأخذ -1، الثالثة -2 ... (الرئيسية بلا رقم)
+    return f"{base}-{seq - 1}"
+
 
 TEMPLATE_DASH = "{item}_{unit}-{seq}"
 TEMPLATE_CLASSIC = "{item}_{seq}_{unit}"
@@ -307,6 +346,7 @@ SCHEME_LABELS_AR = {
 # المتغيرات المتاحة: {item} {unit} {seq} {barcode} {name}
 STORE_TEMPLATES: list[tuple[str, str]] = [
     ("رقم الصنف_الوحدة-رقم الصورة (الموصى به)", "{item}_{unit}-{seq}"),
+    ("رقم الصنف_كل الوحدات من الإكسل (حبة_شدة_كرتون) — الرئيسية بلا رقم والبقية -1/-2", "{item}_{units}-{seq}"),
     ("رقم الصنف_رقم الصورة_الوحدة (كلاسيكي 2.1)", "{item}_{seq}_{unit}"),
     ("رقم الصنف فقط (مواقع تطلب رقم الصنف فقط)", "{item}-{seq}"),
     ("الباركود فقط (مواقع تطلب الباركود)", "{barcode}-{seq}"),
@@ -447,7 +487,11 @@ def plan_names_for_item(item: str, image_count: int, units: list[str],
     result: list[list[str]] = []
     for i in range(image_count):
         seq = i + 1
-        if settings.unit_policy == "replicate_all_units":
+        if settings.unit_policy == UNIT_POLICY_JOIN_ALL:
+            result.append([build_name_join_all(
+                item, units, seq, total=image_count,
+                default_unit=settings.default_unit)])
+        elif settings.unit_policy == "replicate_all_units":
             result.append([settings.render(item, seq, u, total=image_count)
                            for u in units])
         elif settings.unit_policy == "default_unit":

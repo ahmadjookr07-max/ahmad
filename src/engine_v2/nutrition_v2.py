@@ -130,17 +130,31 @@ def merge_label_inset(product_img: np.ndarray, label_img: np.ndarray,
 def render_standalone_label(label_img: np.ndarray,
                             canvas_w: int = 800, canvas_h: int = 700,
                             align: str = "center",
-                            enhance: bool = True) -> np.ndarray:
-    """يرسم ملصق حقائق التغذية منفردًا على لوحة بيضاء بالمقاس القياسي."""
+                            enhance: bool = True,
+                            hq: bool = True) -> np.ndarray:
+    """يرسم ملصق حقائق التغذية منفردًا على لوحة بيضاء.
+
+    وضع hq (افتراضي منذ 2.3): لا يُصغّر الملصق أبدًا — إذا كانت دقة
+    الملصق المقتص من الصورة الأصلية أعلى من اللوحة المطلوبة تتوسع اللوحة
+    لتحافظ على كامل التفاصيل، والملصقات الصغيرة تُكبّر بـ LANCZOS4
+    لتملأ اللوحة بوضوح أعلى — تصلح للاستخدام كصورة مستقلة للصنف."""
     if enhance:
         label_img = enhance_nutrition_label(label_img)
     lh, lw = label_img.shape[:2]
     margin = 30
+    if hq:
+        # وسّع اللوحة بدل تصغير ملصق عالي الدقة (حتى 3× المقاس المطلوب)
+        needed_w = lw + 2 * margin
+        needed_h = lh + 2 * margin
+        if needed_w > canvas_w or needed_h > canvas_h:
+            ratio = min(3.0, max(needed_w / canvas_w, needed_h / canvas_h))
+            canvas_w = int(canvas_w * ratio)
+            canvas_h = int(canvas_h * ratio)
     sc = min((canvas_w - 2 * margin) / lw, (canvas_h - 2 * margin) / lh)
     nw, nh = int(lw * sc), int(lh * sc)
     label = cv2.resize(label_img, (nw, nh),
                        interpolation=cv2.INTER_AREA if sc < 1
-                       else cv2.INTER_CUBIC)
+                       else cv2.INTER_LANCZOS4)
     canvas = np.full((canvas_h, canvas_w, 3), 255, np.uint8)
     if align == "left":
         x = margin

@@ -448,17 +448,27 @@ def license_badge_text() -> str:
     info = lv.effective_license()
     if not info.valid:
         if getattr(info, "plan", "") == "trial":
-            return "انتهت التجربة — يلزم تفعيل"
-        return "الاشتراك: غير مفعل"
+            return "انتهت التجربة المجانية — اضغط «المالك» للتفعيل"
+        return "الاشتراك: غير مفعل — اضغط «المالك» للتفعيل"
     exp_txt = _fmt_expiry_date(info)
+    # لا تُعرض قيم سالبة أبدًا: أي قيمة أقل من صفر تعني إما ترخيصًا
+    # دائمًا (بلا تاريخ انتهاء) أو حالة غير مكتملة — نعالج كلتيهما.
+    days = int(getattr(info, "days_left", 0) or 0)
     if getattr(info, "plan", "") == "trial":
-        return (f"تجربة مجانية: متبق {info.days_left} أيام"
+        if days < 0:
+            days = 0
+        if days <= 0:
+            return "التجربة المجانية تنتهي اليوم — فعّل الاشتراك"
+        return (f"تجربة مجانية: متبق {days} أيام"
                 + (f" — تنتهي {exp_txt}" if exp_txt else ""))
-    if info.days_left < 0:
+    if days < 0 or not int(getattr(info, "expires_at", 0) or 0):
         return "الاشتراك: دائم ✔"
     plan_ar = _PLAN_BADGE_AR.get(getattr(info, "plan", ""), "")
     plan_part = f" ({plan_ar})" if plan_ar else ""
-    return (f"الاشتراك{plan_part}: متبق {info.days_left} يومًا"
+    if days <= 0:
+        return (f"الاشتراك{plan_part}: ينتهي اليوم"
+                + (f" — {exp_txt}" if exp_txt else ""))
+    return (f"الاشتراك{plan_part}: متبق {days} يومًا"
             + (f" — ينتهي {exp_txt}" if exp_txt else ""))
 
 
@@ -473,7 +483,7 @@ def license_badge_style() -> str:
         return base % ("#c9d8ef", "#eef3fb", "#2c5aa0")
     if not info.valid:
         return base % ("#e8b4b4", "#fdeeee", "#b02a2a")
-    if info.days_left < 0:
+    if info.days_left < 0 or not int(getattr(info, "expires_at", 0) or 0):
         return base % ("#bfe3c8", "#eefaf1", "#1e7d3c")
     if info.days_left <= 7:
         return base % ("#f0d5a8", "#fdf6e9", "#a5690f")

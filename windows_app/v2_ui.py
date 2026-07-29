@@ -1293,7 +1293,7 @@ def install_v2(main_window, data_root: Path) -> None:
     # 5) real save/resume wiring — captures the review & linking state of the
     #    legacy window and restores it, so work can continue after a restart.
     def _capture_state() -> dict:
-        state: dict = {"version": "2.2.0"}
+        state: dict = {"version": "2.3.0"}
         try:
             catalog = getattr(main_window, "catalog_edit", None)
             state["catalog_path"] = (catalog.toolTip() or catalog.text()) if catalog else ""
@@ -1574,6 +1574,9 @@ class UnitNamingDialog(QDialog):
         pol_box = QGroupBox("سياسة الوحدات للأصناف متعددة الوحدات")
         pol_lay = QVBoxLayout(pol_box)
         self.rb_per_image = QRadioButton("اسألني لكل صورة (اختيار الوحدة يدويًا عند الربط)")
+        self.rb_join_all = QRadioButton(
+            "جمع كل وحدات الصنف من الإكسل في اسم واحد: رقم الصنف_حبة_شدة_كرتون —"
+            " الرئيسية بلا رقم والإضافية -1 / -2 / -3 (حسب الإكسل بالضبط)")
         self.rb_replicate = QRadioButton("توليد نسخة لكل وحدة تلقائيًا من نفس الصورة (حبه + شدة + كرتون...)")
         self.rb_default = QRadioButton("اعتماد وحدة افتراضية واحدة:")
         self.rb_free = QRadioButton("وضع حر — بلا وحدات ولا إكسل (اسم الملف كما أكتبه بنفسي)")
@@ -1584,6 +1587,7 @@ class UnitNamingDialog(QDialog):
         default_row.addWidget(self.default_unit_combo)
         default_row.addStretch(1)
         pol_lay.addWidget(self.rb_per_image)
+        pol_lay.addWidget(self.rb_join_all)
         pol_lay.addWidget(self.rb_replicate)
         pol_lay.addLayout(default_row)
         pol_lay.addWidget(self.rb_free)
@@ -1712,6 +1716,7 @@ class UnitNamingDialog(QDialog):
             data = {}
         pol = data.get("unit_policy", "per_image")
         {"per_image": self.rb_per_image,
+         "join_all_units": self.rb_join_all,
          "replicate_all_units": self.rb_replicate,
          "default_unit": self.rb_default,
          "free": self.rb_free}.get(pol, self.rb_per_image).setChecked(True)
@@ -1773,7 +1778,8 @@ class UnitNamingDialog(QDialog):
             self._update_preview()
 
     def current_policy(self) -> dict:
-        pol = ("replicate_all_units" if self.rb_replicate.isChecked()
+        pol = ("join_all_units" if self.rb_join_all.isChecked()
+               else "replicate_all_units" if self.rb_replicate.isChecked()
                else "default_unit" if self.rb_default.isChecked()
                else "free" if self.rb_free.isChecked()
                else "per_image")

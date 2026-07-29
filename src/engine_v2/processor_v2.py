@@ -234,9 +234,38 @@ class ProcessorV2:
                 final = merge_label_inset(final, label_img,
                                           opts.nutrition_placement)
             elif opts.nutrition_mode == "standalone" and label_img is not None:
-                nut_dir = out_path.parent / "حقائق التغذية"
-                nut_dir.mkdir(parents=True, exist_ok=True)
-                nut_path = nut_dir / (out_path.stem + "_تغذية.webp")
+                # 2.3: الصورة المنفردة تُحفظ بجانب صور الصنف وتُرقّم ضمنها
+                # وفق سياسة التسمية (مثل 10001102_حبة-2) لترفع للمتجر مباشرة،
+                # مع الحفاظ على الدقة الكاملة (hq).
+                nut_path = None
+                try:
+                    from .integration_v2 import build_output_stem
+                    from .naming_v2 import parse_name
+                    parsed = parse_name(out_path.stem)
+                    if parsed and parsed.item:
+                        # الناتج الرئيسي يُحفظ لاحقًا في هذه الدالة — اكتب ملفًا
+                        # مؤقتًا باسمه أولًا ليحتسبه build_output_stem في الترقيم
+                        placeholder = None
+                        if not out_path.exists():
+                            out_path.parent.mkdir(parents=True, exist_ok=True)
+                            out_path.touch()
+                            placeholder = out_path
+                        try:
+                            stem = build_output_stem(out_path.parent,
+                                                     parsed.item)
+                        finally:
+                            if placeholder is not None:
+                                try:
+                                    placeholder.unlink()
+                                except OSError:
+                                    pass
+                        nut_path = out_path.parent / f"{stem}.webp"
+                except Exception:
+                    nut_path = None
+                if nut_path is None:
+                    nut_dir = out_path.parent / "حقائق التغذية"
+                    nut_dir.mkdir(parents=True, exist_ok=True)
+                    nut_path = nut_dir / (out_path.stem + "_تغذية.webp")
                 nut_img = render_standalone_label(label_img, opts.width,
                                                   opts.height)
                 if imwrite_unicode(nut_path, nut_img, opts.webp_lossless):
@@ -258,7 +287,7 @@ class ProcessorV2:
                     nut_path = nut_dir / (out_path.stem + "_تغذية.webp")
                     nut_img = render_standalone_label(table, opts.width,
                                                       opts.height,
-                                                      enhance=False)
+                                                      enhance=False, hq=False)
                     if imwrite_unicode(nut_path, nut_img, opts.webp_lossless):
                         res.nutrition_output_path = str(nut_path)
                     # حفظ JSON للقيم للتحرير لاحقًا

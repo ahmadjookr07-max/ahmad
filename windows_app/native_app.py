@@ -12,6 +12,7 @@ os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 import re
 import shutil
 import sys
+import threading
 import traceback
 import unicodedata
 import uuid
@@ -145,7 +146,7 @@ _vision_pipeline._prepare_individual_source = _prepare_individual_perspective_so
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -1311,7 +1312,6 @@ class MainWindow(QMainWindow):
         self.workflow_pages.setObjectName("workflowPages")
         self.setup_page = self._build_inputs_panel()
         self.results_page = self._build_results_panel()
-        self.individual_editor_dialog = self._build_individual_editor_dialog()
         self.workflow_pages.addWidget(self.setup_page)
         self.workflow_pages.addWidget(self.results_page)
         self.workflow_pages.setCurrentWidget(self.setup_page)
@@ -1384,7 +1384,12 @@ class MainWindow(QMainWindow):
             card.setFixedHeight(46 if height_mode == "short" else 52)
             card.setMaximumWidth(120)
         if hasattr(self, "manual_group"):
-            self.manual_group.setMaximumHeight(168 if height_mode == "short" else 182)
+            # 2.3: لا سقف ثابت — نمنح اللوحة ارتفاعها الطبيعي الكامل حتى لا
+            # تنضغط الصفوف فوق بعضها (سبب التداخل في 2.2). نكتفي بحد أعلى
+            # مريح يمنع تمددها على حساب الجدول.
+            natural_height = self.manual_group.sizeHint().height()
+            self.manual_group.setMinimumHeight(natural_height)
+            self.manual_group.setMaximumHeight(natural_height + 12)
         list_width = max(390, int(available * list_share))
         preview_width = max(560, available - list_width)
         self.results_splitter.setSizes([list_width, preview_width])
@@ -1873,11 +1878,11 @@ class MainWindow(QMainWindow):
         # شريط الربط ظاهر دائمًا ومضغوط؛ لا يوجد زر إظهار أو تمرير للوصول إليه.
         self.manual_group = QFrame()
         self.manual_group.setObjectName("alwaysVisibleLinkBar")
-        self.manual_group.setMinimumHeight(110)
-        self.manual_group.setMaximumHeight(182)
+        # 2.3: لا سقف للارتفاع — هذا كان سبب تراكب العناصر فوق بعضها في 2.2.
+        self.manual_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         manual_layout = QVBoxLayout(self.manual_group)
         manual_layout.setContentsMargins(8, 6, 8, 6)
-        manual_layout.setSpacing(4)
+        manual_layout.setSpacing(5)
 
         link_heading = QHBoxLayout()
         link_heading.setSpacing(6)
@@ -1941,6 +1946,14 @@ class MainWindow(QMainWindow):
             "حدد صورة/عدة صور غير مرتبطة ثم اختر أي صورة مرتبطة — حتى البعيدة — لربطها بنفس صنفها"
         )
         self.link_by_image_button.clicked.connect(self._start_link_by_image)
+        self.link_same_item_button = QPushButton("ضم للصنف الأعلى")
+        self.link_same_item_button.setObjectName("referenceLinkButton")
+        self.link_same_item_button.setToolTip(
+            "ربط سريع لصور الصنف الواحد: يربط الصور المحددة غير المرتبطة\n"
+            "بنفس صنف أقرب صورة مرتبطة أعلاها في القائمة — مناسب لصنف له 2-4 صور\n"
+            "(صورة الباركود + الجهات الأخرى) ملتقطة متتالية"
+        )
+        self.link_same_item_button.clicked.connect(self._link_selected_to_nearest_above)
         self.manual_reference_badge = QLabel("لا يوجد مرجع")
         self.manual_reference_badge.setObjectName("manualReferenceBadge")
         self.manual_reference_badge.setAlignment(Qt.AlignCenter)
@@ -1953,9 +1966,11 @@ class MainWindow(QMainWindow):
             self.suggest_group_button,
             self.reference_group_link_button,
             self.link_by_image_button,
+            self.link_same_item_button,
             self.jump_to_previews_button,
         ):
             button.setMinimumHeight(32)
+            # 2.3: لا تُقص نصوص الأزرار أبدًا — الحد الأدنى للعرض هو عرض النص الفعلي
             # إصلاح قص النصوص: العرض الأدنى يُحسب من عرض النص الفعلي + هوامش
             text_w = button.fontMetrics().horizontalAdvance(button.text())
             button.setMinimumWidth(text_w + 24)
@@ -1969,6 +1984,7 @@ class MainWindow(QMainWindow):
         quick_controls.addWidget(self.reference_group_link_button)
         quick_controls2 = QHBoxLayout()
         quick_controls2.setSpacing(6)
+        quick_controls2.addWidget(self.link_same_item_button)
         quick_controls2.addWidget(self.link_by_image_button)
         quick_controls2.addWidget(self.jump_to_previews_button)
 
@@ -2014,7 +2030,9 @@ class MainWindow(QMainWindow):
         self.manual_tilt_reset_button.clicked.connect(
             lambda: self.manual_tilt_spin.setValue(0.0))
         self.manual_tilt_spin.valueChanged.connect(self._on_manual_tilt_changed)
-        quick_controls2.addWidget(self.manual_reference_badge, 1)
+        # 2.3: شارة المرجع انتقلت إلى صف العنوان — الصف الثالث للأزرار فقط بلا ازدحام
+        link_heading.addWidget(self.manual_reference_badge)
+        quick_controls2.addStretch(1)
         manual_layout.addLayout(quick_controls)
         manual_layout.addLayout(quick_controls2)
 
@@ -2028,6 +2046,9 @@ class MainWindow(QMainWindow):
         tilt_row.addWidget(self.manual_tilt_reset_button)
         self.manual_tilt_hint = QLabel("وزن الصورة من الأمام — يُطبق عند الربط مباشرة")
         self.manual_tilt_hint.setObjectName("manualTiltHint")
+        # 2.3: التلميح لا يزاحم أدوات الميل — يتقلص بحرية ولا يفرض عرضًا أدنى
+        self.manual_tilt_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.manual_tilt_hint.setToolTip(self.manual_tilt_hint.text())
         tilt_row.addWidget(self.manual_tilt_hint, 1)
         manual_layout.addLayout(tilt_row)
 
@@ -2098,9 +2119,19 @@ class MainWindow(QMainWindow):
         self.open_link_panel_button.clicked.connect(
             lambda: self.manual_item_edit.setFocus(Qt.OtherFocusReason)
         )
+        self.set_primary_button = QPushButton("تعيين كصورة رئيسية")
+        self.set_primary_button.setObjectName("focusLinkButton")
+        self.set_primary_button.setMinimumHeight(34)
+        self.set_primary_button.setEnabled(False)
+        self.set_primary_button.setToolTip(
+            "يجعل هذه الصورة صورة الواجهة الأولى للصنف فتخرج بلا رقم\n"
+            "(رقم الصنف_الوحدة)، وتُرقّم بقية صور الصنف تلقائيًا -1، -2…"
+        )
+        self.set_primary_button.clicked.connect(self._set_primary_image)
         product_heading.addWidget(self.selected_product_label, 1)
         product_heading.addWidget(self.selected_status_badge)
         product_heading.addWidget(self.edit_image_button)
+        product_heading.addWidget(self.set_primary_button)
         product_heading.addWidget(self.open_selected_file_button)
         product_heading.addWidget(self.open_link_panel_button)
         product_card_layout.addLayout(product_heading)
@@ -2148,13 +2179,15 @@ class MainWindow(QMainWindow):
             pane.viewer.setMinimumHeight(300)
         self.preview_tabs.addTab(self.output_preview, "النتيجة")
         self.preview_tabs.addTab(self.source_preview, "الأصل")
+
+        # 2.3: المحرر الكامل مدمج في مكان الصورة — تبويب «تحرير مباشر» بلا نوافذ منفصلة.
+        self.individual_editor_panel = self._build_individual_editor_panel()
+        self.edit_tab = self._build_embedded_editor_tab()
+        self.preview_tabs.addTab(self.edit_tab, "تحرير مباشر")
         self.preview_tabs.setCurrentWidget(self.output_preview)
+        self.preview_tabs.currentChanged.connect(self._on_preview_tab_changed)
         preview_layout.addWidget(self.preview_tabs, 1)
         self._add_depth_effect(self.previews_widget, color="#111827", blur=26, y_offset=6, alpha=52)
-
-        # تُبنى أدوات التحرير مرة واحدة وتستضيفها نافذة المحرر المستقلة.
-        self.individual_editor_panel = self._build_individual_editor_panel()
-        self.individual_editor_panel.setVisible(False)
 
         self.results_splitter = QSplitter(Qt.Horizontal)
         self.results_splitter.setObjectName("resultsHorizontalSplitter")
@@ -2200,6 +2233,109 @@ class MainWindow(QMainWindow):
 
     def _preview_box(self, title: str) -> ImagePreviewPane:
         return ImagePreviewPane(title)
+
+    def _build_embedded_editor_tab(self) -> QWidget:
+        """2.3: تبويب التحرير المباشر — المحرر الكامل مدمج مكان الصورة.
+
+        الصورة كبيرة يسارًا والأدوات في عمود مضغوط يمينًا، وأزرار المعاينة/الحفظ
+        ثابتة أسفل التبويب — بلا أي نافذة منفصلة ولا تداخل.
+        """
+        tab = QFrame()
+        tab.setObjectName("embeddedEditorTab")
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(6, 6, 6, 6)
+        tab_layout.setSpacing(6)
+
+        header = QFrame()
+        header.setObjectName("editorHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 6, 10, 6)
+        header_layout.setSpacing(8)
+        heading = QVBoxLayout()
+        heading.setSpacing(2)
+        self.individual_editor_product_label = QLabel("اختر صفًا مرتبطًا ثم اضغط «تحرير احترافي»")
+        self.individual_editor_product_label.setObjectName("editorProductLabel")
+        self.individual_editor_product_label.setWordWrap(True)
+        self.individual_editor_meta_label = QLabel("رقم الصنف: —  •  الوحدة: —")
+        self.individual_editor_meta_label.setObjectName("editorMetaLabel")
+        self.individual_editor_meta_label.setWordWrap(True)
+        heading.addWidget(self.individual_editor_product_label)
+        heading.addWidget(self.individual_editor_meta_label)
+        self.individual_editor_state_label = QLabel("جاهز للتحرير")
+        self.individual_editor_state_label.setObjectName("editorStateBadge")
+        self.individual_editor_state_label.setAlignment(Qt.AlignCenter)
+        self.individual_tools_toggle_button = QPushButton("إخفاء الأدوات")
+        self.individual_tools_toggle_button.setObjectName("secondaryButton")
+        self.individual_tools_toggle_button.setMinimumHeight(30)
+        self.individual_tools_toggle_button.clicked.connect(self._toggle_individual_tools_panel)
+        header_layout.addLayout(heading, 1)
+        header_layout.addWidget(self.individual_editor_state_label)
+        header_layout.addWidget(self.individual_tools_toggle_button)
+        tab_layout.addWidget(header)
+
+        self.individual_editor_splitter = QSplitter(Qt.Horizontal)
+        self.individual_editor_splitter.setObjectName("individualEditorSplitter")
+        self.individual_editor_splitter.setLayoutDirection(Qt.LeftToRight)
+        self.individual_editor_splitter.setChildrenCollapsible(False)
+        self.individual_editor_splitter.setHandleWidth(8)
+        self.individual_editor_preview = ImagePreviewPane(
+            "مساحة الصورة — كبّر وافحص النص والباركود قبل الحفظ"
+        )
+        self.individual_editor_preview.setObjectName("editorPreviewFrame")
+        self.individual_editor_preview.setMinimumWidth(300)
+        self.individual_editor_preview.viewer.setMinimumHeight(280)
+        self.individual_editor_preview.viewer.crop_changed.connect(self._on_individual_crop_changed)
+        self.individual_editor_panel.setVisible(True)
+        self.individual_editor_panel.setMinimumWidth(250)
+        self.individual_editor_panel.setMaximumWidth(340)
+        self.individual_editor_splitter.addWidget(self.individual_editor_preview)
+        self.individual_editor_splitter.addWidget(self.individual_editor_panel)
+        self.individual_editor_splitter.setStretchFactor(0, 7)
+        self.individual_editor_splitter.setStretchFactor(1, 0)
+        self.individual_editor_splitter.setSizes([620, 300])
+        tab_layout.addWidget(self.individual_editor_splitter, 1)
+
+        footer = QFrame()
+        footer.setObjectName("editorFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 6, 8, 6)
+        footer_layout.setSpacing(8)
+        self.individual_cancel_button = QPushButton("إنهاء التحرير")
+        self.individual_cancel_button.setObjectName("secondaryButton")
+        self.individual_cancel_button.setMinimumHeight(34)
+        self.individual_cancel_button.clicked.connect(self._request_close_individual_editor)
+        self.individual_preview_button = QPushButton("إنشاء معاينة")
+        self.individual_preview_button.setObjectName("individualPreviewButton")
+        self.individual_preview_button.setMinimumHeight(34)
+        self.individual_preview_button.setToolTip(
+            "يعرض النتيجة المقترحة من دون تغيير الملف أو التقارير أو حزمة ZIP"
+        )
+        self.individual_preview_button.clicked.connect(self._start_individual_preview)
+        self.individual_apply_button = QPushButton("حفظ واعتماد التعديل")
+        self.individual_apply_button.setObjectName("individualApplyButton")
+        self.individual_apply_button.setMinimumHeight(34)
+        self.individual_apply_button.setToolTip(
+            "يحفظ هذا الصف وحده ويحدّث التقارير وحزمة ZIP من دون تغيير بقية الصور"
+        )
+        self.individual_apply_button.clicked.connect(self._start_individual_edit)
+        footer_layout.addWidget(self.individual_cancel_button)
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(self.individual_preview_button)
+        footer_layout.addWidget(self.individual_apply_button)
+        tab_layout.addWidget(footer)
+        return tab
+
+    def _on_preview_tab_changed(self, _index: int) -> None:
+        """فتح تبويب «تحرير مباشر» مباشرة يجهّز الصورة المحددة للتحرير تلقائيًا."""
+        if not hasattr(self, "edit_tab"):
+            return
+        if self.preview_tabs.currentWidget() is not self.edit_tab:
+            return
+        if self._individual_edit_source_name:
+            return  # جلسة تحرير قائمة بالفعل
+        item = self._individual_editable_item()
+        if item is not None:
+            self._open_individual_editor()
 
     def _build_individual_editor_panel(self) -> QWidget:
         panel = QFrame()
@@ -2434,117 +2570,24 @@ class MainWindow(QMainWindow):
         self.individual_full_editor_button.clicked.connect(self._open_full_editor_for_individual)
         return panel
 
-    def _build_individual_editor_dialog(self) -> QDialog:
-        dialog = ProtectedEditDialog(self)
-        dialog.setObjectName("individualEditorDialog")
-        dialog.setWindowTitle(f"محرر صورة المنتج — {APP_NAME}")
-        dialog.setWindowModality(Qt.WindowModal)
-        dialog.setModal(True)
-        dialog.setMinimumSize(960, 620)
-        dialog.resize(1280, 780)
-        dialog.setSizeGripEnabled(True)
-
-        shell = QVBoxLayout(dialog)
-        shell.setContentsMargins(14, 12, 14, 12)
-        shell.setSpacing(10)
-
-        header = QFrame()
-        header.setObjectName("editorHeader")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 10, 16, 10)
-        header_layout.setSpacing(12)
-        heading = QVBoxLayout()
-        heading.setSpacing(3)
-        self.individual_editor_product_label = QLabel("لم يُحدد منتج")
-        self.individual_editor_product_label.setObjectName("editorProductLabel")
-        self.individual_editor_product_label.setWordWrap(True)
-        self.individual_editor_meta_label = QLabel("رقم الصنف: —  •  الوحدة: —")
-        self.individual_editor_meta_label.setObjectName("editorMetaLabel")
-        self.individual_editor_meta_label.setWordWrap(True)
-        heading.addWidget(self.individual_editor_product_label)
-        heading.addWidget(self.individual_editor_meta_label)
-        self.individual_editor_state_label = QLabel("جاهز للتحرير")
-        self.individual_editor_state_label.setObjectName("editorStateBadge")
-        self.individual_editor_state_label.setAlignment(Qt.AlignCenter)
-        self.individual_tools_toggle_button = QPushButton("الأدوات ظاهرة")
-        self.individual_tools_toggle_button.setObjectName("secondaryButton")
-        self.individual_tools_toggle_button.setVisible(False)
-        header_layout.addLayout(heading, 1)
-        header_layout.addWidget(self.individual_editor_state_label)
-        header_layout.addWidget(self.individual_tools_toggle_button)
-        shell.addWidget(header)
-
-        self.individual_editor_splitter = QSplitter(Qt.Horizontal)
-        self.individual_editor_splitter.setObjectName("individualEditorSplitter")
-        self.individual_editor_splitter.setLayoutDirection(Qt.LeftToRight)
-        self.individual_editor_splitter.setChildrenCollapsible(False)
-        self.individual_editor_splitter.setHandleWidth(8)
-        self.individual_editor_preview = ImagePreviewPane(
-            "مساحة الصورة — كبّر وافحص النص والباركود قبل الحفظ"
-        )
-        self.individual_editor_preview.setObjectName("editorPreviewFrame")
-        self._add_depth_effect(self.individual_editor_preview, color="#020617", blur=24, y_offset=6, alpha=88)
-        self.individual_editor_preview.setMinimumWidth(620)
-        self.individual_editor_preview.viewer.setMinimumHeight(430)
-        self.individual_editor_preview.viewer.crop_changed.connect(self._on_individual_crop_changed)
-        self.individual_editor_panel.setVisible(True)
-        self.individual_editor_panel.setMinimumWidth(330)
-        self.individual_editor_panel.setMaximumWidth(400)
-        self.individual_editor_splitter.addWidget(self.individual_editor_preview)
-        self.individual_editor_splitter.addWidget(self.individual_editor_panel)
-        self.individual_editor_splitter.setStretchFactor(0, 7)
-        self.individual_editor_splitter.setStretchFactor(1, 0)
-        self.individual_editor_splitter.setSizes([880, 370])
-        shell.addWidget(self.individual_editor_splitter, 1)
-
-        footer = QFrame()
-        footer.setObjectName("editorFooter")
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(12, 8, 12, 8)
-        footer_layout.setSpacing(10)
-        self.individual_cancel_button = QPushButton("إلغاء وإغلاق")
-        self.individual_cancel_button.setObjectName("secondaryButton")
-        self.individual_cancel_button.clicked.connect(self._request_close_individual_editor)
-        self.individual_preview_button = QPushButton("إنشاء معاينة")
-        self.individual_preview_button.setObjectName("individualPreviewButton")
-        self.individual_preview_button.setToolTip(
-            "يعرض النتيجة المقترحة من دون تغيير الملف أو التقارير أو حزمة ZIP"
-        )
-        self.individual_preview_button.clicked.connect(self._start_individual_preview)
-        self.individual_apply_button = QPushButton("حفظ واعتماد التعديل")
-        self.individual_apply_button.setObjectName("individualApplyButton")
-        self.individual_apply_button.setToolTip(
-            "يحفظ هذا الصف وحده ويحدّث التقارير وحزمة ZIP من دون تغيير بقية الصور"
-        )
-        self.individual_apply_button.clicked.connect(self._start_individual_edit)
-        footer_layout.addWidget(self.individual_cancel_button)
-        footer_layout.addStretch(1)
-        footer_layout.addWidget(self.individual_preview_button)
-        footer_layout.addWidget(self.individual_apply_button)
-        shell.addWidget(footer)
-
-        dialog.close_requested.connect(self._request_close_individual_editor)
-        dialog.finished.connect(self._on_individual_editor_closed)
-        return dialog
-
     def _toggle_individual_tools_panel(self) -> None:
         visible = not self.individual_editor_panel.isVisible()
         self.individual_editor_panel.setVisible(visible)
         self.individual_tools_toggle_button.setText("إخفاء الأدوات" if visible else "إظهار الأدوات")
         if visible:
             self.individual_editor_splitter.setSizes(
-                [max(580, self.individual_editor_dialog.width() - 430), 380]
+                [max(420, self.edit_tab.width() - 320), 300]
             )
 
     def _individual_editor_image_pane(self) -> ImagePreviewPane:
         return self.individual_editor_preview
 
+    def _is_individual_editor_active(self) -> bool:
+        """2.3: جلسة تحرير مدمجة نشطة في تبويب «تحرير مباشر»."""
+        return bool(self._individual_edit_source_name)
+
     def _invalidate_individual_preview(self, *_args) -> None:
-        editor_open = bool(
-            hasattr(self, "individual_editor_dialog")
-            and self.individual_editor_dialog.isVisible()
-            and self._individual_edit_source_name
-        )
+        editor_open = self._is_individual_editor_active()
         if editor_open:
             self._individual_editor_dirty = True
         had_preview = self._individual_preview_active or self._individual_preview_path is not None
@@ -2649,13 +2692,13 @@ class MainWindow(QMainWindow):
     def _request_close_individual_editor(self) -> None:
         if self.individual_worker is not None and self.individual_worker.isRunning():
             QMessageBox.information(
-                self.individual_editor_dialog,
+                self,
                 APP_NAME,
                 "انتظر حتى تنتهي المعاينة أو عملية الحفظ الحالية؛ لن يُغلق المحرر أثناء المعالجة.",
             )
             return
         if self._individual_editor_dirty or self._individual_preview_active:
-            box = QMessageBox(self.individual_editor_dialog)
+            box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle(APP_NAME)
             box.setText("توجد تعديلات على الصورة لم تُحفظ بعد")
@@ -2675,10 +2718,7 @@ class MainWindow(QMainWindow):
                 return
         self._individual_editor_dirty = False
         self._individual_preview_active = False
-        if isinstance(self.individual_editor_dialog, ProtectedEditDialog):
-            self.individual_editor_dialog.discard_and_close()
-        else:
-            QDialog.reject(self.individual_editor_dialog)
+        self._exit_individual_edit_mode()
 
     def _open_individual_editor(self) -> None:
         item = self._individual_editable_item()
@@ -2727,39 +2767,28 @@ class MainWindow(QMainWindow):
         self.individual_editor_state_label.setText("جاهز للمعاينة")
         self.individual_editor_state_label.setProperty("previewPending", False)
         self.individual_editor_panel.setVisible(True)
-        self.individual_tools_toggle_button.setText("الأدوات ظاهرة")
+        self.individual_tools_toggle_button.setText("إخفاء الأدوات")
         self._update_individual_crop_info()
         self._update_individual_editor_hint()
         self._update_controls()
 
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            if available.width() < 1440:
-                self.individual_editor_dialog.showMaximized()
-            else:
-                width = max(1100, int(available.width() * 0.92))
-                height = max(680, int(available.height() * 0.92))
-                self.individual_editor_dialog.resize(width, height)
-                self.individual_editor_dialog.move(
-                    available.x() + (available.width() - width) // 2,
-                    available.y() + (available.height() - height) // 2,
-                )
-                self.individual_editor_dialog.show()
-        else:
-            self.individual_editor_dialog.show()
+        # 2.3: التحرير مدمج في مكان الصورة — لا نوافذ منفصلة إطلاقًا.
+        self.preview_tabs.blockSignals(True)
+        self.preview_tabs.setCurrentWidget(self.edit_tab)
+        self.preview_tabs.blockSignals(False)
         QTimer.singleShot(
             0,
             lambda: self.individual_editor_splitter.setSizes(
-                [max(580, self.individual_editor_dialog.width() - 430), 380]
+                [max(420, self.edit_tab.width() - 320), 300]
             ),
         )
-        self.individual_editor_dialog.raise_()
-        self.individual_editor_dialog.activateWindow()
+        self.individual_editor_preview.viewer.setFocus(Qt.OtherFocusReason)
 
-    def _on_individual_editor_closed(self, _result: int) -> None:
+    def _exit_individual_edit_mode(self) -> None:
+        """2.3: إنهاء جلسة التحرير المدمج والعودة لتبويب النتيجة."""
         if self.individual_worker is not None and self.individual_worker.isRunning():
             return
+        self._individual_edit_source_name = None
         self._individual_editor_dirty = False
         self._individual_preview_active = False
         self._individual_preview_path = None
@@ -2771,7 +2800,17 @@ class MainWindow(QMainWindow):
         pane = self._individual_editor_image_pane()
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
+        self.individual_editor_state_label.setText("جاهز للتحرير")
+        self.individual_editor_state_label.setProperty("previewPending", False)
+        if self.preview_tabs.currentWidget() is self.edit_tab:
+            self.preview_tabs.blockSignals(True)
+            self.preview_tabs.setCurrentWidget(self.output_preview)
+            self.preview_tabs.blockSignals(False)
         self._render_selected_preview()
+
+    def _on_individual_editor_closed(self, _result: int) -> None:
+        """توافقية مع الملحقات القديمة — المحرر أصبح مدمجًا منذ 2.3."""
+        self._exit_individual_edit_mode()
 
     def _scroll_to_previews(self) -> None:
         self.preview_tabs.setCurrentWidget(self.output_preview)
@@ -3031,7 +3070,7 @@ class MainWindow(QMainWindow):
         self.individual_editor_state_label.setProperty("previewPending", False)
         self._update_individual_editor_hint()
         self._update_controls()
-        self.individual_editor_dialog.accept()
+        self._exit_individual_edit_mode()
 
     def _on_individual_edit_failed(self, traceback_text: str) -> None:
         restore_position = self._pending_individual_position
@@ -3341,7 +3380,23 @@ class MainWindow(QMainWindow):
             self.catalog_edit.setToolTip(f"المسار الكامل:\n{self.catalog_path}")
             self.catalog_status_label.setText("تم اختيار ملف Excel بنجاح")
             self.catalog_status_label.setToolTip(str(self.catalog_path))
+            self._register_catalog_index(self.catalog_path)
             self._update_controls()
+
+    def _register_catalog_index(self, path: Path) -> None:
+        """تحميل فهرس الإكسل وتسجيله لمحرك التسمية (join_all_units)
+        ولواجهات V2 — بالخلفية كي لا تتوقف الواجهة."""
+        def _load() -> None:
+            try:
+                from engine_v2.catalog_index_v2 import CatalogIndex
+                from engine_v2 import integration_v2 as _integ
+                idx = CatalogIndex()
+                idx.load_excel(str(path))
+                self.v2_catalog_index = idx
+                _integ.set_catalog_index(idx)
+            except Exception as exc:
+                print(f"[catalog] index load failed: {exc}", file=sys.stderr)
+        threading.Thread(target=_load, daemon=True).start()
 
     def _select_images(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
@@ -4443,6 +4498,150 @@ class MainWindow(QMainWindow):
             f"جارٍ ربط {len(targets)} صورة بالصنف {reference} من الصورة المختارة…",
         )
 
+    def _link_selected_to_nearest_above(self) -> None:
+        """ربط سريع لصور الصنف الواحد: يربط المحدد بصنف أقرب صورة مرتبطة أعلاه.
+
+        الاستخدام النموذجي: صورة الباركود مرتبطة والجهات الأخرى للمنتج نفسه
+        ملتقطة بعدها مباشرة — حتى لو كانت 4 صور للصنف تُربط دفعة واحدة.
+        """
+        if self.current_result is None:
+            return
+        selected = self._selected_result_items()
+        unresolved = [item for item in selected if not item.item_code]
+        if not unresolved:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "حدد أولًا الصورة (أو عدة صور بـ Ctrl) غير المرتبطة التابعة للصنف،\n"
+                "ثم اضغط (ضم للصنف الأعلى) لتُربط بنفس صنف أقرب صورة مرتبطة فوقها.",
+            )
+            return
+        # أعلى صف محدد غير مرتبط — نبحث منه لأعلى عن أول صف مرتبط.
+        top_row = min(
+            (self._row_for_source_name(item.source_name) for item in unresolved),
+            default=-1,
+        )
+        if top_row < 0:
+            return
+        reference_item = None
+        for row in range(top_row - 1, -1, -1):
+            source_cell = self.results_table.item(row, 0)
+            if source_cell is None:
+                continue
+            candidate = self._result_items_by_name.get(
+                str(source_cell.data(Qt.UserRole) or ""))
+            if candidate is not None and candidate.item_code:
+                reference_item = candidate
+                break
+        if reference_item is None:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "لا توجد صورة مرتبطة أعلى الصور المحددة.\n"
+                "اربط صورة الباركود أولًا (ربط الآن أو مطابق آليًا)، ثم استخدم هذا الزر\n"
+                "لضم بقية صور الصنف إليها دفعة واحدة.",
+            )
+            return
+        display_name = reference_item.product_name or reference_item.item_code
+        confirm = QMessageBox.question(
+            self,
+            APP_NAME,
+            (
+                f"ستُربط {len(unresolved)} صورة بالصنف:\n"
+                f"{display_name}\n"
+                f"رقم الصنف: {reference_item.item_code}"
+                + (f" • الباركود: {reference_item.barcode}" if reference_item.barcode else "")
+                + "\n\nهل تريد المتابعة؟ ستخرج الصور بالتسمية النهائية تلقائيًا (-1، -2…)."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            from engine_v2 import learning_v2 as _lrn
+            for t in unresolved:
+                _lrn.record_link_decision(
+                    source=t.source_name,
+                    item_code=reference_item.item_code,
+                    visual_score=0.0,
+                    accepted=True,
+                )
+        except Exception:
+            pass
+        self._begin_manual_links(
+            unresolved,
+            reference_item.item_code,
+            f"جارٍ ضم {len(unresolved)} صورة للصنف {reference_item.item_code}…",
+        )
+
+    def _set_primary_image(self) -> None:
+        """يجعل الصورة المحددة صورة الواجهة الرئيسية للصنف (بلا رقم)،
+        ويعيد ترقيم بقية صور الصنف -1، -2… على القرص وفي الجدول."""
+        selected = self._selected_result_item()
+        if selected is None or not selected.item_code or self.current_result is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "حدد صورة مرتبطة بصنف أولًا لتعيينها كصورة رئيسية.")
+            return
+        code = selected.item_code
+        # صور الصنف نفسه بترتيب الجدول، والمحددة تتصدرها.
+        group = [item for item in self.current_result.items
+                 if item.item_code == code and item.output_path]
+        if len(group) < 2:
+            QMessageBox.information(
+                self, APP_NAME,
+                "هذه الصورة هي الوحيدة للصنف — هي الرئيسية بالفعل.")
+            return
+        group_sorted = sorted(
+            group,
+            key=lambda it: (it.source_name != selected.source_name,
+                            self._row_for_source_name(it.source_name)),
+        )
+        paths = []
+        for it in group_sorted:
+            p = self._result_path(it.output_path)
+            if p is None or not p.is_file():
+                QMessageBox.warning(
+                    self, APP_NAME,
+                    f"ملف الإخراج غير موجود للصورة: {it.source_name}")
+                return
+            paths.append(p)
+        try:
+            from engine_v2 import integration_v2 as _iv
+            from engine_v2.primary_image_v2 import renumber_item_images
+            units = _iv._units_from_catalog(code) or []
+            settings = _iv._current_naming_settings()
+        except Exception:
+            units, settings = [], None
+            from engine_v2.primary_image_v2 import renumber_item_images
+        res = renumber_item_images(paths[0].parent, code, paths, units, settings)
+        if not res.ok:
+            QMessageBox.warning(self, APP_NAME, res.error)
+            return
+        # حدّث مسارات الإخراج في النتائج ثم أعد بناء الجدول مع ثبات الموضع.
+        for it in group:
+            old = self._result_path(it.output_path)
+            if old is not None and str(old) in res.renames:
+                new_path = Path(res.renames[str(old)])
+                if self.current_workspace is not None:
+                    try:
+                        it.output_path = str(
+                            new_path.relative_to(self.current_workspace))
+                    except ValueError:
+                        it.output_path = str(new_path)
+                else:
+                    it.output_path = str(new_path)
+        position = self._capture_results_position()
+        self._populate_results(restore_position=position)
+        self.status_label.setText(
+            f"تم تعيين الصورة الرئيسية للصنف {code} وإعادة ترقيم "
+            f"{len(group_sorted) - 1} صورة إضافية (-1، -2…).")
+        QMessageBox.information(
+            self, APP_NAME,
+            "تم التعيين بنجاح — الصورة المحددة أصبحت واجهة الصنف بلا رقم،\n"
+            f"وأعيد ترقيم بقية صور الصنف تلقائيًا.\nالملف الرئيسي: {Path(res.primary_path).name}")
+
     def _begin_manual_links(
         self,
         targets: Iterable[BatchItemResult],
@@ -4603,6 +4802,13 @@ class MainWindow(QMainWindow):
         self.individual_cancel_button.setEnabled(not busy)
         self.individual_tools_toggle_button.setEnabled(not busy)
         self.edit_image_button.setEnabled(not busy and can_edit_one)
+        self.set_primary_button.setEnabled(
+            not busy and selected is not None and bool(selected.item_code)
+        )
+        if hasattr(self, "link_same_item_button"):
+            self.link_same_item_button.setEnabled(
+                not busy and bool(self._selected_unresolved_link_targets())
+            )
         self.open_selected_file_button.setEnabled(not busy and selected is not None)
         self.open_link_panel_button.setEnabled(not busy and selected is not None)
         self.open_folder_button.setEnabled(not busy and self.current_workspace is not None)
@@ -4646,6 +4852,13 @@ class MainWindow(QMainWindow):
         self.individual_cancel_button.setEnabled(not busy)
         self.individual_tools_toggle_button.setEnabled(not busy)
         self.edit_image_button.setEnabled(not busy and can_edit_one)
+        self.set_primary_button.setEnabled(
+            not busy and selected is not None and bool(selected.item_code)
+        )
+        if hasattr(self, "link_same_item_button"):
+            self.link_same_item_button.setEnabled(
+                not busy and bool(self._selected_unresolved_link_targets())
+            )
         self.open_selected_file_button.setEnabled(not busy and selected is not None)
         self.open_link_panel_button.setEnabled(not busy and selected is not None)
         self.open_folder_button.setEnabled(not busy and self.current_workspace is not None)
@@ -4655,8 +4868,7 @@ class MainWindow(QMainWindow):
         interactive_close = bool(event.spontaneous())
         if (
             interactive_close
-            and hasattr(self, "individual_editor_dialog")
-            and self.individual_editor_dialog.isVisible()
+            and self._is_individual_editor_active()
             and (self._individual_editor_dirty or self._individual_preview_active)
         ):
             event.ignore()
@@ -5015,7 +5227,8 @@ def _gui_smoke_test(output_path: Path) -> int:
         )
         manual_panel_verified = bool(
             window.manual_group.isVisible()
-            and 110 <= window.manual_group.height() <= 185
+            and window.manual_group.height() >= window.manual_group.sizeHint().height()
+            and window.manual_group.height() <= window.manual_group.sizeHint().height() + 12
             and window.manual_toggle_button.isHidden()
             and window.manual_toggle_button.isChecked()
             and window.results_table.horizontalScrollBar().maximum() == 0
@@ -5034,24 +5247,21 @@ def _gui_smoke_test(output_path: Path) -> int:
 
         window.edit_image_button.click()
         app.processEvents()
-        editor_dialog = window.individual_editor_dialog
-        editor_dialog.showNormal()
-        editor_dialog.resize(1180, 760)
-        app.processEvents()
         if not window.individual_manual_crop_button.isChecked():
             window.individual_manual_crop_button.click()
         editor_viewer = window.individual_editor_preview.viewer
         editor_viewer.set_crop_box((0.16, 0.10, 0.88, 0.18, 0.82, 0.92, 0.10, 0.84), emit=True)
         app.processEvents()
         editor_screenshot_path = output_path.with_name(f"{output_path.stem}_editor_crop.png")
-        editor_screenshot_saved = editor_dialog.grab().save(str(editor_screenshot_path), "PNG")
+        editor_screenshot_saved = window.edit_tab.grab().save(str(editor_screenshot_path), "PNG")
         editor_crop_box = editor_viewer.crop_box
         editor_dirty_before_close = bool(window._individual_editor_dirty)
         editor_verified = bool(
-            editor_dialog.isVisible()
+            window.preview_tabs.currentWidget() is window.edit_tab
+            and window._is_individual_editor_active()
             and window.individual_editor_panel.isVisible()
-            and window.individual_editor_panel.maximumWidth() == 400
-            and window.individual_editor_preview.minimumWidth() >= 620
+            and window.individual_editor_panel.maximumWidth() == 340
+            and window.individual_editor_preview.minimumWidth() >= 300
             and not editor_viewer._pixmap.isNull()
             and editor_crop_box is not None
             and window.individual_manual_crop_button.isChecked()
@@ -5061,11 +5271,14 @@ def _gui_smoke_test(output_path: Path) -> int:
             and window.individual_preview_button.isVisible()
             and window.individual_apply_button.isVisible()
         )
-        if isinstance(editor_dialog, ProtectedEditDialog):
-            editor_dialog.discard_and_close()
-        else:
-            editor_dialog.reject()
+        window._individual_editor_dirty = False
+        window._individual_preview_active = False
+        window._exit_individual_edit_mode()
         app.processEvents()
+        editor_verified = editor_verified and bool(
+            window.preview_tabs.currentWidget() is window.output_preview
+            and not window._is_individual_editor_active()
+        )
 
         arabic_filename_verified = bool(
             window.catalog_edit.text() == catalog_name

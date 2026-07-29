@@ -17,7 +17,7 @@ for p in (str(_SRC), str(_HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-APP_VERSION_V2 = "2.2.0"
+APP_VERSION_V2 = "2.3.0"
 
 _SPLASH = None  # مرجع شاشة البدء الفورية
 

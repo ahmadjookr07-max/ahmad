@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .naming_v2 import (next_sequence, build_name, build_name_dash,
+                        build_name_join_all, UNIT_POLICY_JOIN_ALL,
                         UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
                         load_saved_settings, parse_name)
 
@@ -187,17 +188,65 @@ def _current_naming_settings():
     return None
 
 
+# مرجع فهرس الإكسل الحي (CatalogIndex) — تسجله الواجهة عند تحميل الإكسل
+# لتستطيع سياسة join_all_units جلب كل وحدات الصنف حرفيًا من الإكسل.
+_CATALOG_REF: dict[str, object] = {"index": None}
+
+
+def set_catalog_index(index) -> None:
+    """تسجله الواجهة: فهرس الإكسل المحمّل (لوحدات join_all_units)."""
+    _CATALOG_REF["index"] = index
+
+
+def _units_from_catalog(item: str) -> list[str]:
+    """كل وحدات الصنف كما وردت في الإكسل حرفيًا وبنفس الترتيب
+    (لسياسة join_all_units) — تعيد [] إن لم يتوفر الكتالوج."""
+    idx = _CATALOG_REF.get("index")
+    if idx is not None:
+        try:
+            units = idx.units_for_code(str(item))
+            if units:
+                return [str(u) for u in units if str(u or "").strip()]
+        except Exception:
+            pass
+    return []
+
+
+def _count_item_images(stems: list[str], item: str) -> int:
+    item_s = str(item)
+    count = 0
+    for s in stems:
+        pn = parse_name(s)
+        if pn and pn.item == item_s:
+            count += 1
+            continue
+        # أسماء join_all متعددة الوحدات لا يفهمها parse_name — طابق البادئة
+        if s == item_s or s.startswith(f"{item_s}_"):
+            count += 1
+    return count
+
+
 def build_output_stem(out_dir: str | Path, item: str,
                       unit: str = UNIT_SUFFIX_DEFAULT) -> str:
     """اسم الملف التالي للصنف وفق سياسة التسمية المحفوظة.
 
     النمط الجديد (dash): الصورة الأولى {item}_{unit} ثم عند وصول صورة
     ثانية تُرقّم الجديدة -2 (ويُعاد ترقيم الأولى إلى -1 عبر rename لاحق
-    في طبقة الواجهة إن أمكن). النمط الكلاسيكي: حبه، 2_حبه، 3_حبه..."""
+    في طبقة الواجهة إن أمكن). النمط الكلاسيكي: حبه، 2_حبه، 3_حبه...
+
+    سياسة join_all_units (2.3): الرئيسية {item}_حبة_شدة_كرتون بلا رقم
+    ثم -1/-2/-3 للإضافية — الوحدات من الإكسل حرفيًا وبالترتيب."""
     out_dir = Path(out_dir)
     stems = [p.stem for p in out_dir.glob("*.webp")] if out_dir.is_dir() else []
     seq = next_sequence(stems, item)
     settings = _current_naming_settings()
+    if settings is not None and settings.enabled and \
+            getattr(settings, "unit_policy", "") == UNIT_POLICY_JOIN_ALL:
+        units = _units_from_catalog(item) or ([unit] if unit else [])
+        existing = _count_item_images(stems, item)
+        return build_name_join_all(item, units, existing + 1,
+                                   total=existing + 1,
+                                   default_unit=settings.default_unit)
     if settings is not None and settings.enabled and \
             settings.scheme == SCHEME_DASH:
         # عدد الصور الموجودة للصنف حتى الآن + هذه = total
