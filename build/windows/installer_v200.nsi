@@ -11,8 +11,9 @@ Unicode True
 !define APP_SOURCE "..\..\dist\windows\AhmedAlFaifiMarketImageStudio"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 Name "${APP_NAME} ${APP_VERSION}"
-; اسم الملف والإصدار موحدان على 2.2.0
-OutFile "..\..\dist\installer\AhmedAlFaifiMarketImageStudio-Setup-2.2.0.exe"
+; اسم ملف الإخراج يطابق ما يتوقعه workflow المنشور على GitHub (لا يمكن تحديثه بدون صلاحية workflows)؛
+; الإصدار الفعلي داخل المثبت والبرنامج هو ${APP_VERSION}
+OutFile "..\..\dist\installer\AhmedAlFaifiMarketImageStudio-Setup-2.0.0.exe"
 InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
 InstallDirRegKey HKCU "Software\${APP_PUBLISHER}\${APP_ID}" "InstallDir"
 RequestExecutionLevel user
