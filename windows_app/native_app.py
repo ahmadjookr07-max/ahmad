@@ -1384,7 +1384,7 @@ class MainWindow(QMainWindow):
             card.setFixedHeight(46 if height_mode == "short" else 52)
             card.setMaximumWidth(120)
         if hasattr(self, "manual_group"):
-            self.manual_group.setMaximumHeight(136 if height_mode == "short" else 150)
+            self.manual_group.setMaximumHeight(168 if height_mode == "short" else 182)
         list_width = max(390, int(available * list_share))
         preview_width = max(560, available - list_width)
         self.results_splitter.setSizes([list_width, preview_width])
@@ -1874,7 +1874,7 @@ class MainWindow(QMainWindow):
         self.manual_group = QFrame()
         self.manual_group.setObjectName("alwaysVisibleLinkBar")
         self.manual_group.setMinimumHeight(110)
-        self.manual_group.setMaximumHeight(150)
+        self.manual_group.setMaximumHeight(182)
         manual_layout = QVBoxLayout(self.manual_group)
         manual_layout.setContentsMargins(8, 6, 8, 6)
         manual_layout.setSpacing(4)
@@ -1967,8 +1967,10 @@ class MainWindow(QMainWindow):
         quick_controls.addWidget(self.use_reference_button)
         quick_controls.addWidget(self.suggest_group_button)
         quick_controls.addWidget(self.reference_group_link_button)
-        quick_controls.addWidget(self.link_by_image_button)
-        quick_controls.addWidget(self.jump_to_previews_button)
+        quick_controls2 = QHBoxLayout()
+        quick_controls2.setSpacing(6)
+        quick_controls2.addWidget(self.link_by_image_button)
+        quick_controls2.addWidget(self.jump_to_previews_button)
 
         # وزن الميل اليدوي الخارجي — متاح مباشرة أثناء الربط بلا فتح نوافذ
         tilt_label = QLabel("الميل:")
@@ -2012,13 +2014,22 @@ class MainWindow(QMainWindow):
         self.manual_tilt_reset_button.clicked.connect(
             lambda: self.manual_tilt_spin.setValue(0.0))
         self.manual_tilt_spin.valueChanged.connect(self._on_manual_tilt_changed)
-        quick_controls.addWidget(tilt_label)
-        quick_controls.addWidget(self.manual_tilt_ccw_button)
-        quick_controls.addWidget(self.manual_tilt_spin)
-        quick_controls.addWidget(self.manual_tilt_cw_button)
-        quick_controls.addWidget(self.manual_tilt_reset_button)
-        quick_controls.addWidget(self.manual_reference_badge, 1)
+        quick_controls2.addWidget(self.manual_reference_badge, 1)
         manual_layout.addLayout(quick_controls)
+        manual_layout.addLayout(quick_controls2)
+
+        # صف مستقل لأدوات الميل — يمنع الازدحام والتداخل مع أزرار الربط
+        tilt_row = QHBoxLayout()
+        tilt_row.setSpacing(6)
+        tilt_row.addWidget(tilt_label)
+        tilt_row.addWidget(self.manual_tilt_ccw_button)
+        tilt_row.addWidget(self.manual_tilt_spin)
+        tilt_row.addWidget(self.manual_tilt_cw_button)
+        tilt_row.addWidget(self.manual_tilt_reset_button)
+        self.manual_tilt_hint = QLabel("وزن الصورة من الأمام — يُطبق عند الربط مباشرة")
+        self.manual_tilt_hint.setObjectName("manualTiltHint")
+        tilt_row.addWidget(self.manual_tilt_hint, 1)
+        manual_layout.addLayout(tilt_row)
 
         # تُحفظ هذه الخاصية للتوافق مع ملحقات قديمة، لكن الأدوات لا يمكن طيها في 1.2.
         self.manual_toggle_button = QPushButton()
@@ -5004,7 +5015,7 @@ def _gui_smoke_test(output_path: Path) -> int:
         )
         manual_panel_verified = bool(
             window.manual_group.isVisible()
-            and 110 <= window.manual_group.height() <= 124
+            and 110 <= window.manual_group.height() <= 185
             and window.manual_toggle_button.isHidden()
             and window.manual_toggle_button.isChecked()
             and window.results_table.horizontalScrollBar().maximum() == 0
