@@ -1023,6 +1023,7 @@ class V2PhotoEditorDialog(QDialog):
 
         def ok(rgba):
             self._busy(False)
+            self._worker = None
             if self.region_only_cb.isChecked() and self._region_mask is not None:
                 # قص ذكي على المنطقة فقط: خارج المنطقة يبقى ألفا 255
                 m = self._region_mask.astype(np.float32) / 255.0
@@ -1038,6 +1039,7 @@ class V2PhotoEditorDialog(QDialog):
 
         def fail(msg):
             self._busy(False)
+            self._worker = None
             QMessageBox.warning(self, "إزالة الخلفية", f"فشلت العملية: {msg}")
 
         self._worker.done.connect(ok)

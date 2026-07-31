@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Iterable
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QItemSelectionModel, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -452,6 +453,7 @@ class IndividualEditWorker(QThread):
         blur_dates: bool = False,
         deglare: bool = False,
         manual_rotation: float = 0.0,
+        edited_source_path: "Path | None" = None,
     ) -> None:
         super().__init__()
         self.workspace = workspace
@@ -467,6 +469,8 @@ class IndividualEditWorker(QThread):
         self.blur_dates = bool(blur_dates)
         self.deglare = bool(deglare)
         self.manual_rotation = float(manual_rotation)
+        # 2.6: مسار صورة معدّلة مسبقًا من المحرر الموحد — تحل محل المصدر الأصلي
+        self.edited_source_path = Path(edited_source_path) if edited_source_path else None
 
     def _post_process_file(self, path: "Path | str | None") -> None:
         """تطبيق الميل اليدوي وطمس التواريخ وإزالة الانعكاسات على الملف الناتج."""
@@ -517,31 +521,50 @@ class IndividualEditWorker(QThread):
                 "remove_background": self.remove_background,
                 "final_image_options": self.image_options,
             }
-            if self.preview_only:
-                self.progress_changed.emit(0, 1, "تحليل الصورة وتجهيز المعاينة")
-                result = preview_individual_image_edit(
-                    self.workspace,
-                    self.source_name,
-                    **arguments,
-                )
-                self._post_process_file(getattr(result, "preview_path", None))
-                self.progress_changed.emit(1, 1, "المعاينة جاهزة قبل الحفظ")
-            else:
-                result = apply_individual_image_edit(
-                    self.workspace,
-                    self.source_name,
-                    progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
-                    **arguments,
-                )
-                if self.blur_dates or self.deglare or \
-                        abs(self.manual_rotation) > 0.049:
-                    for it in getattr(result, "items", []) or []:
-                        if getattr(it, "source_name", None) == self.source_name:
-                            self._post_process_file(getattr(it, "output_path", None))
-                            break
-            self.completed.emit(result)
+            # 2.6: إن وُجد مصدر معدّل من المحرر الموحد، نعترض تجهيز المصدر
+            # في الـ pipeline ليستخدم صورة المحرر بدل الملف الأصلي، ثم نعيد
+            # الدالة الأصلية في كل الأحوال (try/finally)
+            _override_active = self.edited_source_path is not None and self.edited_source_path.is_file()
+            if _override_active:
+                _prev_prepare = _vision_pipeline._prepare_individual_source
+                _edited = self.edited_source_path
+
+                def _use_edited_source(source, staging_dir, crop_box, *args, **kwargs):  # noqa: ANN001
+                    return _edited, None
+
+                _vision_pipeline._prepare_individual_source = _use_edited_source
+            try:
+                self._run_pipeline(arguments)
+            finally:
+                if _override_active:
+                    _vision_pipeline._prepare_individual_source = _prev_prepare
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+    def _run_pipeline(self, arguments: dict) -> None:
+        if self.preview_only:
+            self.progress_changed.emit(0, 1, "تحليل الصورة وتجهيز المعاينة")
+            result = preview_individual_image_edit(
+                self.workspace,
+                self.source_name,
+                **arguments,
+            )
+            self._post_process_file(getattr(result, "preview_path", None))
+            self.progress_changed.emit(1, 1, "المعاينة جاهزة قبل الحفظ")
+        else:
+            result = apply_individual_image_edit(
+                self.workspace,
+                self.source_name,
+                progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
+                **arguments,
+            )
+            if self.blur_dates or self.deglare or \
+                    abs(self.manual_rotation) > 0.049:
+                for it in getattr(result, "items", []) or []:
+                    if getattr(it, "source_name", None) == self.source_name:
+                        self._post_process_file(getattr(it, "output_path", None))
+                        break
+        self.completed.emit(result)
 
 
 class StatCard(QFrame):
@@ -1162,6 +1185,8 @@ class ImagePreviewPane(QFrame):
         header = QHBoxLayout()
         label_title = QLabel(title)
         label_title.setObjectName("previewTitle")
+        # 2.6: العنوان ينكمش أولًا عند ضيق العرض — حتى لا تُقص نصوص أزرار التكبير
+        label_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         header.addWidget(label_title, 1)
         zoom_out = QPushButton("−")
         zoom_out.setObjectName("zoomButton")
@@ -1179,6 +1204,9 @@ class ImagePreviewPane(QFrame):
         self.open_button.setObjectName("zoomButton")
         self.open_button.setToolTip("فتح الصورة في عارض Windows بالحجم الكامل")
         for button in (zoom_out, zoom_in, actual, fit, self.open_button):
+            # 2.6: لا قص — عرض أدنى مبني على النص الفعلي + هوامش الـ CSS
+            button.setMinimumWidth(
+                button.fontMetrics().horizontalAdvance(button.text()) + 22)
             header.addWidget(button)
         layout.addLayout(header)
 
@@ -1204,25 +1232,6 @@ class ImagePreviewPane(QFrame):
     def open_image(self) -> None:
         if self.viewer.path is not None and self.viewer.path.is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.viewer.path)))
-
-
-class ProtectedEditDialog(QDialog):
-    """Route every cancel path through the owner's unsaved-work confirmation."""
-
-    close_requested = Signal()
-
-    def reject(self) -> None:
-        self.close_requested.emit()
-
-    def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        if not event.spontaneous():
-            super().closeEvent(event)
-            return
-        event.ignore()
-        self.close_requested.emit()
-
-    def discard_and_close(self) -> None:
-        super().reject()
 
 
 class MainWindow(QMainWindow):
@@ -1368,14 +1377,28 @@ class MainWindow(QMainWindow):
         """Keep the image dominant while preserving a readable three-column review list."""
         if not hasattr(self, "results_splitter") or not hasattr(self, "results_page"):
             return
-        available = max(900, self.results_page.width() - 20)
-        width_mode = "compact" if available < 1180 else "wide"
+        available = max(360, self.results_page.width() - 20)
+        # 2.6: وضع ضيق جدًا — اللوحتان لا تتسعان جنبًا إلى جنب فنرصهما عموديًا
+        # (القائمة فوق والصورة تحت) — هذا يلغي التراكب والقص نهائيًا.
+        if available < (self.results_upper_widget.minimumWidth()
+                        + self.previews_widget.minimumWidth() + 40):
+            width_mode = "narrow"
+        elif available < 1180:
+            width_mode = "compact"
+        else:
+            width_mode = "wide"
         height_mode = "short" if self.height() < 780 else "tall"
         mode = f"{width_mode}-{height_mode}"
+        # 2.7: ارتفاع لوحة الربط يُحدّث مع كل تغيير حجم (خارج شرط الوضع)
+        # لأن التفاف أزرار FlowLayout يعتمد على العرض الدقيق — كان
+        # الخروج المبكر يترك سقفًا قديمًا يقص آخر زر (ملاحظة المستخدم).
+        self._sync_manual_group_height()
+        # ومرة بعد استقرار التخطيط — العرض النهائي للوحة قد يتغير
+        # بعد إعادة توزيع الـ splitter في هذا الاستدعاء نفسه.
+        QTimer.singleShot(0, self._sync_manual_group_height)
         if getattr(self, "_results_splitter_mode", "") == mode:
             return
         self._results_splitter_mode = mode
-        list_share = 0.40 if width_mode == "compact" else 0.36
         self.header_frame.setFixedHeight(52 if height_mode == "short" else 68)
         if hasattr(self, "result_subtitle"):
             self.result_subtitle.setVisible(height_mode != "short")
@@ -1383,20 +1406,44 @@ class MainWindow(QMainWindow):
             # لا نثبت العرض حتى لا تُقص العناوين — ارتفاع ثابت فقط
             card.setFixedHeight(46 if height_mode == "short" else 52)
             card.setMaximumWidth(120)
-        if hasattr(self, "manual_group"):
-            # 2.3: لا سقف ثابت — نمنح اللوحة ارتفاعها الطبيعي الكامل حتى لا
-            # تنضغط الصفوف فوق بعضها (سبب التداخل في 2.2). نكتفي بحد أعلى
-            # مريح يمنع تمددها على حساب الجدول.
-            natural_height = self.manual_group.sizeHint().height()
-            self.manual_group.setMinimumHeight(natural_height)
-            self.manual_group.setMaximumHeight(natural_height + 12)
-        list_width = max(390, int(available * list_share))
-        preview_width = max(560, available - list_width)
-        self.results_splitter.setSizes([list_width, preview_width])
+        if width_mode == "narrow":
+            self.results_splitter.setOrientation(Qt.Vertical)
+            page_h = max(500, self.results_page.height() - 40)
+            self.results_splitter.setSizes(
+                [int(page_h * 0.45), int(page_h * 0.55)])
+        else:
+            self.results_splitter.setOrientation(Qt.Horizontal)
+            list_share = 0.40 if width_mode == "compact" else 0.36
+            list_width = max(self.results_upper_widget.minimumWidth(),
+                             int(available * list_share))
+            preview_width = max(self.previews_widget.minimumWidth(),
+                                available - list_width)
+            self.results_splitter.setSizes([list_width, preview_width])
         if hasattr(self, "output_preview"):
             minimum_preview_height = 260 if height_mode == "short" else 320
             self.output_preview.viewer.setMinimumHeight(minimum_preview_height)
             self.source_preview.viewer.setMinimumHeight(minimum_preview_height)
+
+    def _sync_manual_group_height(self) -> None:
+        """2.7: امنح لوحة الربط ارتفاعها الفعلي بعد التفاف الأزرار.
+
+        صف الأزرار يستخدم FlowLayout فيزداد ارتفاعه كلما ضاق العرض،
+        وsizeHint وحده لا يعكس ذلك — فنحسب heightForWidth عند العرض
+        الحالي حتى لا يُقص آخر زر على الشاشات الضيقة.
+        """
+        if not hasattr(self, "manual_group"):
+            return
+        layout_obj = self.manual_group.layout()
+        natural_height = self.manual_group.sizeHint().height()
+        if layout_obj is not None and layout_obj.hasHeightForWidth():
+            margins = self.manual_group.contentsMargins()
+            inner_width = max(self.manual_group.width()
+                              - margins.left() - margins.right(), 260)
+            hfw = layout_obj.heightForWidth(inner_width)
+            natural_height = max(natural_height,
+                                 hfw + margins.top() + margins.bottom())
+        self.manual_group.setMinimumHeight(natural_height)
+        self.manual_group.setMaximumHeight(natural_height + 12)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -1406,6 +1453,8 @@ class MainWindow(QMainWindow):
             and self.workflow_pages.currentWidget() is self.results_page
         ):
             self._update_results_splitter_for_width()
+        # 2.5: إعادة ترتيب بطاقات أدوات المحرر حسب عرض النافذة — بلا قص ولا تمرير
+        self._relayout_editor_tool_cards()
 
     def _build_inputs_panel(self) -> QWidget:
         panel = QFrame()
@@ -1818,10 +1867,55 @@ class MainWindow(QMainWindow):
         table_header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.results_table.setColumnWidth(0, 168)
         self.results_table.setColumnWidth(1, 148)
+        # 2.6: على الشاشات الضيقة كان عمود «اسم الصنف» يختفي لأن العمودين الثابتين
+        # يستهلكان كامل العرض — نعيد توزيع الأعمدة ديناميكيًا مع ضمان حد أدنى للاسم.
+        self.results_table.viewport().installEventFilter(self)
+        self._adjust_results_table_columns()
         self.results_table.itemSelectionChanged.connect(self._show_selected_preview)
         self.results_table.doubleClicked.connect(self._open_selected_file)
         self.results_table.setMinimumHeight(250)
+        self._continue_build_results_page(layout)
+        return panel
 
+    def _adjust_results_table_columns(self) -> None:
+        """يوزّع أعمدة جدول النتائج بحيث يبقى اسم الصنف مقروءًا دائمًا.
+
+        على العروض الواسعة: الصورة 168 + الباركود 148 والاسم يتمدد.
+        على العروض الضيقة: ينكمش عمودا الصورة والباركود تدريجيًا ليضمنا
+        لـ «اسم الصنف» حدًا أدنى مقروءًا (≥150px) مع التفاف النص على أسطر.
+        """
+        table = getattr(self, "results_table", None)
+        if table is None:
+            return
+        available = table.viewport().width()
+        if available <= 0:
+            return
+        name_min = 150
+        icon_w, code_w = 168, 148
+        if available < icon_w + code_w + name_min:
+            # انكماش متدرج: الباركود حتى 108، ثم الصورة حتى 96
+            deficit = (icon_w + code_w + name_min) - available
+            code_shrink = min(deficit, code_w - 108)
+            deficit -= code_shrink
+            icon_shrink = min(max(0, deficit), icon_w - 96)
+            code_w -= code_shrink
+            icon_w -= icon_shrink
+        table.setColumnWidth(0, icon_w)
+        table.setColumnWidth(1, code_w)
+
+    def eventFilter(self, obj, event):  # noqa: ANN001
+        try:
+            from PySide6.QtCore import QEvent
+            if (getattr(self, "results_table", None) is not None
+                    and obj is self.results_table.viewport()
+                    and event.type() == QEvent.Resize):
+                self._adjust_results_table_columns()
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _continue_build_results_page(self, layout) -> None:  # noqa: ANN001
+        """تكملة بناء صفحة النتائج (فُصلت لتنظيم الكود 2.6)."""
         self.result_search_edit = QLineEdit()
         self.result_search_edit.setObjectName("resultSearchEdit")
         self.result_search_edit.setPlaceholderText("ابحث بالاسم أو الصنف أو الباركود أو الصورة")
@@ -1895,6 +1989,9 @@ class MainWindow(QMainWindow):
         self.selected_count_badge = QLabel("المحدد: 0")
         self.selected_count_badge.setObjectName("selectedCountBadge")
         self.selected_count_badge.setAlignment(Qt.AlignCenter)
+        # 2.6: الشارات لا تُقص — النص السياقي هو ما ينكمش (SizePolicy.Ignored أعلاه)
+        self.selected_count_badge.setMinimumWidth(
+            self.selected_count_badge.fontMetrics().horizontalAdvance("المحدد: 999") + 18)
         link_heading.addWidget(link_title)
         link_heading.addWidget(self.manual_context_label, 1)
         link_heading.addWidget(self.selected_count_badge)
@@ -1919,6 +2016,21 @@ class MainWindow(QMainWindow):
         manual_controls.addWidget(self.manual_item_edit, 1)
         manual_controls.addWidget(self.manual_link_button)
         manual_layout.addLayout(manual_controls)
+
+        # الزر الذكي: عند تحديد صور بلا باركود يعرض مباشرة اسم ورقم صنف
+        # أقرب صورة مرتبطة أعلاها — ضغطة واحدة تربط الكل بلا تأكيد.
+        self.smart_link_button = QPushButton("حدد صورة بلا باركود للربط السريع")
+        self.smart_link_button.setObjectName("smartLinkButton")
+        self.smart_link_button.setMinimumHeight(44)
+        self.smart_link_button.setVisible(False)
+        self.smart_link_button.setToolTip(
+            "يربط الصور المحددة (بلا باركود) بنفس رقم صنف أقرب صورة مرتبطة\n"
+            "أعلاها في القائمة — بضغطة واحدة وبلا رسائل تأكيد.\n"
+            "مثال: صورت المنتج من الأمام بلا باركود؟ حددها واضغط الزر\n"
+            "فتُربط بصنف صورة الباركود التي فوقها مباشرة."
+        )
+        self.smart_link_button.clicked.connect(self._smart_link_clicked)
+        manual_layout.addWidget(self.smart_link_button)
 
         quick_controls = QHBoxLayout()
         quick_controls.setSpacing(6)
@@ -1954,6 +2066,18 @@ class MainWindow(QMainWindow):
             "(صورة الباركود + الجهات الأخرى) ملتقطة متتالية"
         )
         self.link_same_item_button.clicked.connect(self._link_selected_to_nearest_above)
+        # وضع «اربط بالنقر»: أبسط طريقة — نقرة على الصورة بلا باركود
+        # ثم نقرة على صورة الباركود فترتبط فورًا (طلب المستخدم).
+        self.tap_link_button = QPushButton("👆 اربط بالنقر")
+        self.tap_link_button.setObjectName("tapLinkButton")
+        self.tap_link_button.setCheckable(True)
+        self.tap_link_button.setToolTip(
+            "أسهل طريقة للربط:\n"
+            "1) فعّل الوضع ثم انقر الصورة التي بلا باركود\n"
+            "2) انقر صورة الباركود التابعة لنفس المنتج\n"
+            "فترتبط فورًا بنفس رقم الصنف — بلا أزرار ولا قوائم."
+        )
+        self.tap_link_button.toggled.connect(self._toggle_tap_link_mode)
         self.manual_reference_badge = QLabel("لا يوجد مرجع")
         self.manual_reference_badge.setObjectName("manualReferenceBadge")
         self.manual_reference_badge.setAlignment(Qt.AlignCenter)
@@ -1967,90 +2091,55 @@ class MainWindow(QMainWindow):
             self.reference_group_link_button,
             self.link_by_image_button,
             self.link_same_item_button,
+            self.tap_link_button,
             self.jump_to_previews_button,
         ):
             button.setMinimumHeight(32)
             # 2.3: لا تُقص نصوص الأزرار أبدًا — الحد الأدنى للعرض هو عرض النص الفعلي
             # إصلاح قص النصوص: العرض الأدنى يُحسب من عرض النص الفعلي + هوامش
             text_w = button.fontMetrics().horizontalAdvance(button.text())
-            button.setMinimumWidth(text_w + 24)
+            # +32 = padding الـ CSS (9×2) + الحدود + هامش أمان — لا قص مطلقًا
+            button.setMinimumWidth(text_w + 32)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.manual_reference_badge.setMinimumWidth(
             self.manual_reference_badge.fontMetrics().horizontalAdvance(
                 self.manual_reference_badge.text()) + 20)
         self.manual_reference_badge.setMaximumWidth(160)
-        quick_controls.addWidget(self.use_reference_button)
-        quick_controls.addWidget(self.suggest_group_button)
-        quick_controls.addWidget(self.reference_group_link_button)
-        quick_controls2 = QHBoxLayout()
-        quick_controls2.setSpacing(6)
-        quick_controls2.addWidget(self.link_same_item_button)
-        quick_controls2.addWidget(self.link_by_image_button)
-        quick_controls2.addWidget(self.jump_to_previews_button)
+        # 2.6: صف واحد ملتف (FlowLayout) بدل صفّين ثابتين — الأزرار تنزل
+        # لسطر جديد تلقائيًا عند ضيق العرض فلا يُقص أي زر مطلقًا.
+        from unified_editor import _FlowLayout as _LinkFlowLayout
+        quick_flow_host = QWidget()
+        quick_flow = _LinkFlowLayout(quick_flow_host, margin=0, spacing=6)
+        for link_btn in (
+            self.tap_link_button,
+            self.use_reference_button,
+            self.suggest_group_button,
+            self.reference_group_link_button,
+            self.link_same_item_button,
+            self.link_by_image_button,
+            self.jump_to_previews_button,
+        ):
+            link_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            quick_flow.addWidget(link_btn)
 
-        # وزن الميل اليدوي الخارجي — متاح مباشرة أثناء الربط بلا فتح نوافذ
-        tilt_label = QLabel("الميل:")
-        tilt_label.setObjectName("manualTiltLabel")
-        self.manual_tilt_spin = QDoubleSpinBox()
-        self.manual_tilt_spin.setObjectName("manualTiltSpin")
-        self.manual_tilt_spin.setRange(-45.0, 45.0)
-        self.manual_tilt_spin.setDecimals(1)
-        self.manual_tilt_spin.setSingleStep(0.5)
-        self.manual_tilt_spin.setSuffix("°")
-        self.manual_tilt_spin.setValue(0.0)
-        self.manual_tilt_spin.setMinimumHeight(32)
-        self.manual_tilt_spin.setMinimumWidth(84)
-        self.manual_tilt_spin.setLayoutDirection(Qt.LeftToRight)
-        self.manual_tilt_spin.setAlignment(Qt.AlignCenter)
-        self.manual_tilt_spin.setToolTip(
-            "وزن الميل يدويًا من الأمام مباشرة أثناء الربط:\n"
-            "موجب = دوران لليسار (عكس العقارب)، سالب = لليمين.\n"
-            "المعاينة تتحدث فورًا والقيمة تُطبق عند الحفظ أو الربط —\n"
-            "فتخرج الصورة معتدلة بالشكل المناسب مباشرة")
-        self.manual_tilt_ccw_button = QPushButton("↺")
-        self.manual_tilt_ccw_button.setObjectName("manualTiltButton")
-        self.manual_tilt_ccw_button.setToolTip("إمالة لليسار 0.5°")
-        self.manual_tilt_cw_button = QPushButton("↻")
-        self.manual_tilt_cw_button.setObjectName("manualTiltButton")
-        self.manual_tilt_cw_button.setToolTip("إمالة لليمين 0.5°")
-        self.manual_tilt_reset_button = QPushButton("صفر")
-        self.manual_tilt_reset_button.setObjectName("manualTiltButton")
-        self.manual_tilt_reset_button.setToolTip("إرجاع الميل إلى الصفر")
-        for tb in (self.manual_tilt_ccw_button, self.manual_tilt_cw_button,
-                   self.manual_tilt_reset_button):
-            tb.setMinimumHeight(32)
-            tb.setMinimumWidth(34)
-            tb.setMaximumWidth(44)
-        self.manual_tilt_ccw_button.clicked.connect(
-            lambda: self.manual_tilt_spin.setValue(
-                self.manual_tilt_spin.value() + 0.5))
-        self.manual_tilt_cw_button.clicked.connect(
-            lambda: self.manual_tilt_spin.setValue(
-                self.manual_tilt_spin.value() - 0.5))
-        self.manual_tilt_reset_button.clicked.connect(
-            lambda: self.manual_tilt_spin.setValue(0.0))
-        self.manual_tilt_spin.valueChanged.connect(self._on_manual_tilt_changed)
-        # 2.3: شارة المرجع انتقلت إلى صف العنوان — الصف الثالث للأزرار فقط بلا ازدحام
+        # 2.5: أدوات الميل انتقلت إلى صفحة التحرير الموحدة — كل ما يخص الصورة في مكان واحد
+        # 2.3: شارة المرجع انتقلت إلى صف العنوان — وتنكمش عند الضيق بدل تجاوز الحافة
+        self.manual_reference_badge.setMinimumWidth(0)
         link_heading.addWidget(self.manual_reference_badge)
-        quick_controls2.addStretch(1)
-        manual_layout.addLayout(quick_controls)
-        manual_layout.addLayout(quick_controls2)
-
-        # صف مستقل لأدوات الميل — يمنع الازدحام والتداخل مع أزرار الربط
-        tilt_row = QHBoxLayout()
-        tilt_row.setSpacing(6)
-        tilt_row.addWidget(tilt_label)
-        tilt_row.addWidget(self.manual_tilt_ccw_button)
-        tilt_row.addWidget(self.manual_tilt_spin)
-        tilt_row.addWidget(self.manual_tilt_cw_button)
-        tilt_row.addWidget(self.manual_tilt_reset_button)
-        self.manual_tilt_hint = QLabel("وزن الصورة من الأمام — يُطبق عند الربط مباشرة")
-        self.manual_tilt_hint.setObjectName("manualTiltHint")
-        # 2.3: التلميح لا يزاحم أدوات الميل — يتقلص بحرية ولا يفرض عرضًا أدنى
-        self.manual_tilt_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.manual_tilt_hint.setToolTip(self.manual_tilt_hint.text())
-        tilt_row.addWidget(self.manual_tilt_hint, 1)
-        manual_layout.addLayout(tilt_row)
+        # إرشاد وضع «اربط بالنقر» — تلميح عائم منبثق (مثل السوايب) فوق القائمة
+        # لا يأخذ أي مساحة داخل اللوحة فلا تنحشر الأزرار (طلب المستخدم).
+        self.tap_link_hint = QLabel("", self)
+        self.tap_link_hint.setObjectName("tapLinkHint")
+        self.tap_link_hint.setWordWrap(True)
+        self.tap_link_hint.setAlignment(Qt.AlignCenter)
+        self.tap_link_hint.setVisible(False)
+        self.tap_link_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.tap_link_hint.raise_()
+        self._tap_hint_timer = QTimer(self)
+        self._tap_hint_timer.setSingleShot(True)
+        self._tap_hint_timer.timeout.connect(
+            lambda: self.tap_link_hint.setVisible(False))
+        manual_layout.addWidget(quick_flow_host)
 
         # تُحفظ هذه الخاصية للتوافق مع ملحقات قديمة، لكن الأدوات لا يمكن طيها في 1.2.
         self.manual_toggle_button = QPushButton()
@@ -2063,7 +2152,8 @@ class MainWindow(QMainWindow):
 
         self.results_upper_widget = QFrame()
         self.results_upper_widget.setObjectName("resultsListPane")
-        self.results_upper_widget.setMinimumWidth(410)
+        # 2.6: حد أدنى مرن — مع الوضع العمودي التلقائي للشاشات الضيقة لا تراكب أبدًا
+        self.results_upper_widget.setMinimumWidth(330)
         list_layout = QVBoxLayout(self.results_upper_widget)
         list_layout.setContentsMargins(10, 10, 10, 10)
         list_layout.setSpacing(7)
@@ -2083,7 +2173,7 @@ class MainWindow(QMainWindow):
 
         self.previews_widget = QFrame()
         self.previews_widget.setObjectName("reviewStudio")
-        self.previews_widget.setMinimumWidth(560)
+        self.previews_widget.setMinimumWidth(360)
         preview_layout = QVBoxLayout(self.previews_widget)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(8)
@@ -2104,30 +2194,45 @@ class MainWindow(QMainWindow):
         self.selected_status_badge = QLabel("بانتظار الاختيار")
         self.selected_status_badge.setObjectName("selectedStatusBadge")
         self.selected_status_badge.setAlignment(Qt.AlignCenter)
-        self.edit_image_button = QPushButton("تحرير احترافي")
+        # 2.6: أزرار البطاقة أيقونات مضغوطة ثابتة العرض مع تلميح عربي عند
+        # وضع الماوس — لا تُقص نصوصها أبدًا مهما ضاقت النافذة.
+        self.edit_image_button = QPushButton("✎ تحرير")
         self.edit_image_button.setObjectName("editImageButton")
         self.edit_image_button.setMinimumHeight(34)
         self.edit_image_button.setEnabled(False)
+        self.edit_image_button.setToolTip(
+            "تحرير احترافي: يفتح الصورة في تبويب «تحرير مباشر» بكامل الأدوات")
         self.edit_image_button.clicked.connect(self._open_individual_editor)
-        self.open_selected_file_button = QPushButton("فتح الصورة")
+        self.open_selected_file_button = QPushButton("🗁")
         self.open_selected_file_button.setObjectName("openImageButton")
         self.open_selected_file_button.setMinimumHeight(34)
+        self.open_selected_file_button.setToolTip(
+            "فتح الصورة: يفتح ملف الصورة الحالي في عارض النظام")
         self.open_selected_file_button.clicked.connect(self._open_selected_file)
-        self.open_link_panel_button = QPushButton("تغيير الصنف")
+        self.open_link_panel_button = QPushButton("⇄")
         self.open_link_panel_button.setObjectName("focusLinkButton")
         self.open_link_panel_button.setMinimumHeight(34)
+        self.open_link_panel_button.setToolTip(
+            "تغيير الصنف: ينقل التركيز لحقل الربط المباشر لربط الصورة بصنف آخر")
         self.open_link_panel_button.clicked.connect(
             lambda: self.manual_item_edit.setFocus(Qt.OtherFocusReason)
         )
-        self.set_primary_button = QPushButton("تعيين كصورة رئيسية")
+        self.set_primary_button = QPushButton("★")
         self.set_primary_button.setObjectName("focusLinkButton")
         self.set_primary_button.setMinimumHeight(34)
         self.set_primary_button.setEnabled(False)
         self.set_primary_button.setToolTip(
-            "يجعل هذه الصورة صورة الواجهة الأولى للصنف فتخرج بلا رقم\n"
+            "تعيين كصورة رئيسية: يجعل هذه الصورة صورة الواجهة الأولى للصنف فتخرج بلا رقم\n"
             "(رقم الصنف_الوحدة)، وتُرقّم بقية صور الصنف تلقائيًا -1، -2…"
         )
         self.set_primary_button.clicked.connect(self._set_primary_image)
+        for compact_btn in (self.open_selected_file_button,
+                            self.open_link_panel_button,
+                            self.set_primary_button):
+            compact_btn.setFixedWidth(42)
+        self.edit_image_button.setMinimumWidth(
+            self.edit_image_button.fontMetrics().horizontalAdvance(
+                self.edit_image_button.text()) + 24)
         product_heading.addWidget(self.selected_product_label, 1)
         product_heading.addWidget(self.selected_status_badge)
         product_heading.addWidget(self.edit_image_button)
@@ -2180,8 +2285,7 @@ class MainWindow(QMainWindow):
         self.preview_tabs.addTab(self.output_preview, "النتيجة")
         self.preview_tabs.addTab(self.source_preview, "الأصل")
 
-        # 2.3: المحرر الكامل مدمج في مكان الصورة — تبويب «تحرير مباشر» بلا نوافذ منفصلة.
-        self.individual_editor_panel = self._build_individual_editor_panel()
+        # 2.4: المحرر الموحد مدمج في مكان الصورة — تبويب «تحرير مباشر» بلا نوافذ منفصلة.
         self.edit_tab = self._build_embedded_editor_tab()
         self.preview_tabs.addTab(self.edit_tab, "تحرير مباشر")
         self.preview_tabs.setCurrentWidget(self.output_preview)
@@ -2204,6 +2308,8 @@ class MainWindow(QMainWindow):
         result_actions = QFrame()
         result_actions.setObjectName("fixedActionBar")
         result_actions.setMaximumHeight(48)
+        # 2.7: مرجع محفوظ — يُخفى الشريط أثناء وضع التحرير لتوفير مساحة عمودية
+        self.results_action_bar = result_actions
         actions = QHBoxLayout(result_actions)
         actions.setContentsMargins(10, 5, 10, 5)
         actions.setSpacing(8)
@@ -2220,7 +2326,6 @@ class MainWindow(QMainWindow):
         actions.addWidget(delivery_hint, 1)
         actions.addWidget(self.save_zip_button)
         layout.addWidget(result_actions)
-        return panel
 
     def _set_manual_panel_expanded(self, expanded: bool) -> None:
         """Compatibility hook: linking tools are permanently visible from version 1.2 onward."""
@@ -2234,11 +2339,39 @@ class MainWindow(QMainWindow):
     def _preview_box(self, title: str) -> ImagePreviewPane:
         return ImagePreviewPane(title)
 
-    def _build_embedded_editor_tab(self) -> QWidget:
-        """2.3: تبويب التحرير المباشر — المحرر الكامل مدمج مكان الصورة.
+    @staticmethod
+    def _install_label_elide(label: QLabel) -> None:
+        """يجعل الـ QLabel يقتطع نصه بـ … عند ضيق العرض بدل القص الصلب.
 
-        الصورة كبيرة يسارًا والأدوات في عمود مضغوط يمينًا، وأزرار المعاينة/الحفظ
-        ثابتة أسفل التبويب — بلا أي نافذة منفصلة ولا تداخل.
+        النص الكامل يبقى متاحًا كتلميح (tooltip)، وأي تحديث لاحق عبر
+        ``setText`` يمر بنفس المعالجة تلقائيًا.
+        """
+        label._full_text = label.text()  # type: ignore[attr-defined]
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+        def _apply(event=None):  # noqa: ANN001
+            metrics = label.fontMetrics()
+            elided = metrics.elidedText(
+                label._full_text, Qt.ElideLeft, max(0, label.width() - 6))
+            QLabel.setText(label, elided)
+            label.setToolTip(
+                label._full_text if elided != label._full_text else "")
+            if event is not None:
+                QLabel.resizeEvent(label, event)
+
+        def _set_text(text: str) -> None:
+            label._full_text = text  # type: ignore[attr-defined]
+            _apply()
+
+        label.resizeEvent = _apply  # type: ignore[method-assign]
+        label.setText = _set_text  # type: ignore[method-assign]
+
+    def _build_embedded_editor_tab(self) -> QWidget:
+        """2.4: صفحة التحرير الموحدة — كل أدوات الصورة في مكان واحد.
+
+        الصورة كبيرة بكامل العرض في الأعلى، وشريط أدوات أفقي بسيط أسفلها؛
+        كل أداة تفتح لوحة خيارات رفيعة تحتها مباشرة — بلا نوافذ منفصلة
+        ولا تداخلات، ويتوافق التصميم مع جميع أحجام الشاشات.
         """
         tab = QFrame()
         tab.setObjectName("embeddedEditorTab")
@@ -2248,62 +2381,107 @@ class MainWindow(QMainWindow):
 
         header = QFrame()
         header.setObjectName("editorHeader")
+        header.setMaximumHeight(50)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(10, 6, 10, 6)
+        header_layout.setContentsMargins(10, 4, 10, 4)
         header_layout.setSpacing(8)
         heading = QVBoxLayout()
-        heading.setSpacing(2)
+        heading.setSpacing(1)
         self.individual_editor_product_label = QLabel("اختر صفًا مرتبطًا ثم اضغط «تحرير احترافي»")
         self.individual_editor_product_label.setObjectName("editorProductLabel")
-        self.individual_editor_product_label.setWordWrap(True)
+        self.individual_editor_product_label.setWordWrap(False)
         self.individual_editor_meta_label = QLabel("رقم الصنف: —  •  الوحدة: —")
         self.individual_editor_meta_label.setObjectName("editorMetaLabel")
-        self.individual_editor_meta_label.setWordWrap(True)
+        self.individual_editor_meta_label.setWordWrap(False)
+        # 2.7: لا قص صلب للعنوان على الشاشات الضيقة — اقتطاع أنيق بـ …
+        # مع إبقاء النص الكامل متاحًا كتلميح عند وضع الماوس.
+        self._install_label_elide(self.individual_editor_product_label)
+        self._install_label_elide(self.individual_editor_meta_label)
         heading.addWidget(self.individual_editor_product_label)
         heading.addWidget(self.individual_editor_meta_label)
         self.individual_editor_state_label = QLabel("جاهز للتحرير")
         self.individual_editor_state_label.setObjectName("editorStateBadge")
         self.individual_editor_state_label.setAlignment(Qt.AlignCenter)
-        self.individual_tools_toggle_button = QPushButton("إخفاء الأدوات")
-        self.individual_tools_toggle_button.setObjectName("secondaryButton")
-        self.individual_tools_toggle_button.setMinimumHeight(30)
-        self.individual_tools_toggle_button.clicked.connect(self._toggle_individual_tools_panel)
         header_layout.addLayout(heading, 1)
         header_layout.addWidget(self.individual_editor_state_label)
-        header_layout.addWidget(self.individual_tools_toggle_button)
         tab_layout.addWidget(header)
 
-        self.individual_editor_splitter = QSplitter(Qt.Horizontal)
-        self.individual_editor_splitter.setObjectName("individualEditorSplitter")
-        self.individual_editor_splitter.setLayoutDirection(Qt.LeftToRight)
-        self.individual_editor_splitter.setChildrenCollapsible(False)
-        self.individual_editor_splitter.setHandleWidth(8)
+        # 2.6: المحرر الموحد الكامل — كل أدوات المحرر الاحترافي القديم مدمجة
+        # في هذه الصفحة: معالجة ذكية، إزالة خلفية، فرشاة، ظل، منزلقات…
+        from unified_editor import UnifiedEditorWidget
+
+        self.unified_editor = UnifiedEditorWidget()
+        self.unified_editor.setObjectName("unifiedEditor")
+        self.unified_editor.setMinimumWidth(300)
+        tab_layout.addWidget(self.unified_editor, 1)
+
+        # عناصر الجيل السابق تبقى مُنشأة (يشير إليها منطق قديم واختبارات)
+        # لكنها مخفية تمامًا — المحرر الموحد يعوضها كلها.
         self.individual_editor_preview = ImagePreviewPane(
             "مساحة الصورة — كبّر وافحص النص والباركود قبل الحفظ"
         )
         self.individual_editor_preview.setObjectName("editorPreviewFrame")
         self.individual_editor_preview.setMinimumWidth(300)
-        self.individual_editor_preview.viewer.setMinimumHeight(280)
+        self.individual_editor_preview.viewer.setMinimumHeight(260)
         self.individual_editor_preview.viewer.crop_changed.connect(self._on_individual_crop_changed)
-        self.individual_editor_panel.setVisible(True)
-        self.individual_editor_panel.setMinimumWidth(250)
-        self.individual_editor_panel.setMaximumWidth(340)
-        self.individual_editor_splitter.addWidget(self.individual_editor_preview)
-        self.individual_editor_splitter.addWidget(self.individual_editor_panel)
-        self.individual_editor_splitter.setStretchFactor(0, 7)
-        self.individual_editor_splitter.setStretchFactor(1, 0)
-        self.individual_editor_splitter.setSizes([620, 300])
-        tab_layout.addWidget(self.individual_editor_splitter, 1)
+        self.individual_editor_preview.setVisible(False)
+        tab_layout.addWidget(self.individual_editor_preview)
+
+        self.individual_editor_panel = self._build_individual_editor_panel()
+        self.individual_editor_panel.setVisible(False)
+        tab_layout.addWidget(self.individual_editor_panel)
 
         footer = QFrame()
         footer.setObjectName("editorFooter")
+        footer.setMaximumHeight(48)
         footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(8, 6, 8, 6)
+        footer_layout.setContentsMargins(8, 5, 8, 5)
         footer_layout.setSpacing(8)
         self.individual_cancel_button = QPushButton("إنهاء التحرير")
         self.individual_cancel_button.setObjectName("secondaryButton")
         self.individual_cancel_button.setMinimumHeight(34)
         self.individual_cancel_button.clicked.connect(self._request_close_individual_editor)
+        self.individual_reset_button = QPushButton("إعادة ضبط الكل")
+        self.individual_reset_button.setObjectName("secondaryButton")
+        self.individual_reset_button.setMinimumHeight(34)
+        self.individual_reset_button.setToolTip("يلغي حدود القص اليدوي ويعيد الخيارات الموصى بها")
+        self.individual_reset_button.clicked.connect(self._reset_individual_editor)
+        self.individual_editor_hint = QLabel(
+            "كل التعديلات تظهر مباشرة على الصورة — اضغط «حفظ واعتماد» لتحديث الناتج والتقارير."
+        )
+        self.individual_editor_hint.setObjectName("individualEditorHint")
+        self.individual_editor_hint.setWordWrap(False)
+        self.individual_editor_hint.setAlignment(Qt.AlignCenter)
+        # الـ hint هو العنصر الوحيد القابل للانكماش — الأزرار لا تُقص أبدًا على الشاشات الضيقة
+        self.individual_editor_hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        # 2.6: عند الضيق الشديد لا نعرض نصًا مبتورًا — يُقتطع بعلامة … أو يختفي،
+        # والنص الكامل متاح دائمًا كتلميح عند وضع الماوس فوقه.
+        self._hint_full_text = self.individual_editor_hint.text()
+
+        def _elide_hint(event=None):  # noqa: ANN001
+            label = self.individual_editor_hint
+            metrics = label.fontMetrics()
+            elided = metrics.elidedText(
+                self._hint_full_text, Qt.ElideLeft, max(0, label.width() - 8))
+            # إن لم يتسع حتى لجزء مفيد — أخفِ النص والإطار معًا بدل مربع فارغ
+            too_narrow = label.width() < 120
+            if too_narrow:
+                elided = ""
+            label.setStyleSheet("background: transparent; border: none;" if too_narrow else "")
+            QLabel.setText(label, elided)
+            label.setToolTip(self._hint_full_text)
+            if event is not None:
+                QLabel.resizeEvent(label, event)
+
+        self.individual_editor_hint.resizeEvent = _elide_hint  # type: ignore[method-assign]
+
+        _orig_set_text = self.individual_editor_hint.setText
+
+        def _set_hint_text(text: str) -> None:
+            self._hint_full_text = text
+            _elide_hint()
+
+        self.individual_editor_hint.setText = _set_hint_text  # type: ignore[method-assign]
         self.individual_preview_button = QPushButton("إنشاء معاينة")
         self.individual_preview_button.setObjectName("individualPreviewButton")
         self.individual_preview_button.setMinimumHeight(34)
@@ -2311,6 +2489,8 @@ class MainWindow(QMainWindow):
             "يعرض النتيجة المقترحة من دون تغيير الملف أو التقارير أو حزمة ZIP"
         )
         self.individual_preview_button.clicked.connect(self._start_individual_preview)
+        # 2.6: المعاينة أصبحت حية فورية داخل المحرر الموحد (زر قبل/بعد) — الزر مخفي للتوافق
+        self.individual_preview_button.setVisible(False)
         self.individual_apply_button = QPushButton("حفظ واعتماد التعديل")
         self.individual_apply_button.setObjectName("individualApplyButton")
         self.individual_apply_button.setMinimumHeight(34)
@@ -2318,8 +2498,15 @@ class MainWindow(QMainWindow):
             "يحفظ هذا الصف وحده ويحدّث التقارير وحزمة ZIP من دون تغيير بقية الصور"
         )
         self.individual_apply_button.clicked.connect(self._start_individual_edit)
+        # 2.6: لا قص لنصوص الأزرار — عرض أدنى مبني على النص الفعلي لكل زر
+        for footer_btn in (self.individual_cancel_button,
+                           self.individual_reset_button,
+                           self.individual_apply_button):
+            footer_btn.setMinimumWidth(
+                footer_btn.fontMetrics().horizontalAdvance(footer_btn.text()) + 28)
         footer_layout.addWidget(self.individual_cancel_button)
-        footer_layout.addStretch(1)
+        footer_layout.addWidget(self.individual_reset_button)
+        footer_layout.addWidget(self.individual_editor_hint, 1)
         footer_layout.addWidget(self.individual_preview_button)
         footer_layout.addWidget(self.individual_apply_button)
         tab_layout.addWidget(footer)
@@ -2330,80 +2517,123 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "edit_tab"):
             return
         if self.preview_tabs.currentWidget() is not self.edit_tab:
+            # 2.7: مغادرة تبويب التحرير تُعيد بطاقة المنتج وشريط الإجراءات
+            if hasattr(self, "selected_product_card"):
+                self.selected_product_card.setVisible(True)
+            if hasattr(self, "results_action_bar"):
+                self.results_action_bar.setVisible(True)
             return
         if self._individual_edit_source_name:
-            return  # جلسة تحرير قائمة بالفعل
+            # جلسة قائمة — العودة للتبويب تعيد توسيع مساحة التحرير
+            self.selected_product_card.setVisible(False)
+            self.results_action_bar.setVisible(False)
+            return
         item = self._individual_editable_item()
         if item is not None:
             self._open_individual_editor()
 
+    @staticmethod
+    def _make_rotate_icon(clockwise: bool) -> QIcon:
+        """يرسم أيقونة سهم دوران واضحة (لا تعتمد على دعم الخط للرموز)."""
+        size = 40
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#1d4ed8"))
+        pen.setWidth(4)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        rect = QRectF(7, 7, size - 14, size - 14)
+        # قوس دائري مفتوح من الأعلى
+        start_angle = 60 * 16
+        span = 250 * 16
+        painter.drawArc(rect, start_angle, span)
+        # رأس السهم عند نهاية القوس العلوية
+        painter.setBrush(QColor("#1d4ed8"))
+        painter.setPen(Qt.NoPen)
+        arrow = QPolygonF()
+        if clockwise:
+            tip_x, tip_y = size - 6.0, 10.0
+            arrow.append(QPointF(tip_x, tip_y))
+            arrow.append(QPointF(tip_x - 11.0, tip_y - 3.0))
+            arrow.append(QPointF(tip_x - 2.0, tip_y + 9.0))
+        else:
+            tip_x, tip_y = 6.0, 10.0
+            arrow.append(QPointF(tip_x, tip_y))
+            arrow.append(QPointF(tip_x + 11.0, tip_y - 3.0))
+            arrow.append(QPointF(tip_x + 2.0, tip_y + 9.0))
+        painter.drawPolygon(arrow)
+        painter.end()
+        if clockwise:
+            # انعكاس أفقي للحصول على اتجاه عقارب الساعة
+            pm = pm.transformed(QTransform().scale(-1, 1))
+        return QIcon(pm)
+
+    @staticmethod
+    def _make_reset_icon() -> QIcon:
+        """يرسم أيقونة تصفير (دائرة مع نقطة مركزية) واضحة بلا نصوص."""
+        size = 40
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#0f766e"))
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawEllipse(QRectF(8, 8, size - 16, size - 16))
+        painter.setBrush(QColor("#0f766e"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QRectF(size / 2 - 4, size / 2 - 4, 8, 8))
+        painter.end()
+        return QIcon(pm)
+
     def _build_individual_editor_panel(self) -> QWidget:
+        """شريط الأدوات الموحد — صف أفقي واحد أسفل الصورة يجمع كل الأدوات.
+
+        أربع مجموعات أدوات (اقتصاص | تحسين | تنظيف | مقارنة) تظهر في شريط
+        أفقي واحد قابل للتمرير أفقيًا على الشاشات الصغيرة — بلا تبويبات متراكمة
+        ولا نوافذ منفصلة، فتبقى الصورة كبيرة والأدوات كلها مرئية في مكان واحد.
+        """
         panel = QFrame()
         panel.setObjectName("individualEditor")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 9, 10, 9)
-        layout.setSpacing(7)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(0)
 
-        title = QLabel("أدوات التعديل المباشر")
-        title.setObjectName("individualEditorTitle")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-        subtitle = QLabel("اختر تبويبًا واحدًا؛ تبقى الصورة كبيرة ولا تتزاحم الأدوات.")
-        subtitle.setObjectName("editorToolSubtitle")
-        subtitle.setWordWrap(True)
-        subtitle.setAlignment(Qt.AlignCenter)
-        layout.addWidget(subtitle)
+        strip = QWidget()
+        strip.setObjectName("editorToolsStrip")
+        # 2.5: شبكة تلتف تلقائيًا — لا تمرير أفقي ولا قصّ على أي عرض شاشة
+        row = QGridLayout(strip)
+        row.setContentsMargins(4, 4, 4, 4)
+        row.setHorizontalSpacing(8)
+        row.setVerticalSpacing(8)
 
-        enhance_card = QFrame()
-        enhance_card.setObjectName("editorEnhanceCard")
-        enhance_layout = QVBoxLayout(enhance_card)
-        enhance_layout.setContentsMargins(9, 8, 9, 8)
-        enhance_layout.setSpacing(7)
-        enhance_title = QLabel("1  التحسين والإضاءة")
-        enhance_title.setObjectName("editorToolSectionTitle")
-        enhance_layout.addWidget(enhance_title)
-        self.individual_smart_button = QPushButton("تحسين ذكي محافظ")
-        self.individual_smart_button.setObjectName("individualSmartButton")
-        self.individual_smart_button.setCheckable(True)
-        self.individual_smart_button.setChecked(True)
-        self.individual_smart_button.setMinimumHeight(36)
-        self.individual_smart_button.setToolTip(
-            "يحسن الإضاءة والألوان والتفاصيل محليًا مع حماية الشعار والكتابات والباركود"
-        )
-        self.individual_strength_combo = QComboBox()
-        self.individual_strength_combo.setObjectName("individualStrength")
-        self.individual_strength_combo.addItem("متوازن — موصى به", 55)
-        self.individual_strength_combo.addItem("قوي للصورة الباهتة", 78)
-        self.individual_strength_combo.addItem("محافظ للملصقات", 35)
-        self.individual_strength_combo.setMinimumHeight(34)
-        self.individual_strength_combo.setToolTip("قوة تحسين الصورة المحددة فقط")
-        enhance_layout.addWidget(self.individual_smart_button)
-        enhance_layout.addWidget(self.individual_strength_combo)
-        self._add_depth_effect(enhance_card, color="#1d4ed8", blur=14, y_offset=3, alpha=36)
-
+        # ── المجموعة 1: الاقتصاص والميل ──
         crop_card = QFrame()
         crop_card.setObjectName("editorCropCard")
         crop_layout = QVBoxLayout(crop_card)
-        crop_layout.setContentsMargins(9, 8, 9, 8)
-        crop_layout.setSpacing(7)
-        crop_title = QLabel("2  الاقتصاص الدقيق")
+        crop_layout.setContentsMargins(8, 6, 8, 6)
+        crop_layout.setSpacing(5)
+        crop_title = QLabel("الاقتصاص والميل")
         crop_title.setObjectName("editorToolSectionTitle")
+        crop_title.setAlignment(Qt.AlignCenter)
         crop_layout.addWidget(crop_title)
 
         crop_mode_row = QHBoxLayout()
-        crop_mode_row.setSpacing(6)
+        crop_mode_row.setSpacing(5)
         self.individual_auto_crop_button = QPushButton("ذكي تلقائي")
         self.individual_auto_crop_button.setObjectName("individualAutoCropButton")
         self.individual_auto_crop_button.setCheckable(True)
         self.individual_auto_crop_button.setChecked(True)
-        self.individual_auto_crop_button.setMinimumHeight(36)
+        self.individual_auto_crop_button.setMinimumHeight(32)
         self.individual_auto_crop_button.setToolTip(
             "يكتشف حدود المنتج ويوازن المسافات البيضاء تلقائيًا داخل 800×700"
         )
         self.individual_manual_crop_button = QPushButton("يدوي حر")
         self.individual_manual_crop_button.setObjectName("individualManualCropButton")
         self.individual_manual_crop_button.setCheckable(True)
-        self.individual_manual_crop_button.setMinimumHeight(36)
+        self.individual_manual_crop_button.setMinimumHeight(32)
         self.individual_manual_crop_button.setToolTip(
             "اقتصاص منظور: اسحب إطارًا أوليًا ثم حرّك الزوايا الأربع مستقلة حتى تتبع ميل العبوة"
         )
@@ -2411,12 +2641,11 @@ class MainWindow(QMainWindow):
         crop_mode_row.addWidget(self.individual_manual_crop_button, 1)
         crop_layout.addLayout(crop_mode_row)
 
-        ratio_label = QLabel("نسبة إطار القص")
-        ratio_label.setObjectName("editorToolLabel")
-        crop_layout.addWidget(ratio_label)
+        crop_opts_row = QHBoxLayout()
+        crop_opts_row.setSpacing(5)
         self.individual_crop_ratio_combo = QComboBox()
         self.individual_crop_ratio_combo.setObjectName("individualCropRatio")
-        self.individual_crop_ratio_combo.setMinimumHeight(34)
+        self.individual_crop_ratio_combo.setMinimumHeight(30)
         self.individual_crop_ratio_combo.addItem("طبيعي — حسب حدود المنظور", None)
         self.individual_crop_ratio_combo.addItem("نسبة الإخراج 800 × 700", 800.0 / 700.0)
         self.individual_crop_ratio_combo.addItem("مربع 1 : 1", 1.0)
@@ -2425,131 +2654,171 @@ class MainWindow(QMainWindow):
         self.individual_crop_ratio_combo.setToolTip(
             "الوضع الحر هو الافتراضي ولا يفرض مربعًا. اختر نسبة ثابتة فقط عند الحاجة."
         )
-        crop_layout.addWidget(self.individual_crop_ratio_combo)
-
-        crop_action_row = QHBoxLayout()
-        crop_action_row.setSpacing(6)
         self.individual_crop_full_button = QPushButton("كامل الصورة")
         self.individual_crop_full_button.setObjectName("cropUtilityButton")
-        self.individual_crop_full_button.setMinimumHeight(32)
+        self.individual_crop_full_button.setMinimumHeight(30)
         self.individual_crop_full_button.setToolTip("يضع إطار القص على أكبر مساحة ممكنة داخل الصورة")
         self.individual_crop_clear_button = QPushButton("مسح الإطار")
         self.individual_crop_clear_button.setObjectName("cropUtilityButton")
-        self.individual_crop_clear_button.setMinimumHeight(32)
+        self.individual_crop_clear_button.setMinimumHeight(30)
         self.individual_crop_clear_button.setToolTip("يمسح إطار القص لتستطيع رسم إطار جديد")
-        crop_action_row.addWidget(self.individual_crop_full_button, 1)
-        crop_action_row.addWidget(self.individual_crop_clear_button, 1)
-        crop_layout.addLayout(crop_action_row)
+        crop_opts_row.addWidget(self.individual_crop_ratio_combo, 2)
+        crop_opts_row.addWidget(self.individual_crop_full_button, 1)
+        crop_opts_row.addWidget(self.individual_crop_clear_button, 1)
+        crop_layout.addLayout(crop_opts_row)
 
-        self.individual_crop_info_label = QLabel("القص التلقائي نشط")
-        self.individual_crop_info_label.setObjectName("cropInfoLabel")
-        self.individual_crop_info_label.setWordWrap(True)
-        self.individual_crop_info_label.setAlignment(Qt.AlignCenter)
-        crop_layout.addWidget(self.individual_crop_info_label)
-
-        self.individual_straighten_check = QCheckBox("تصحيح الميل البسيط بأمان")
+        crop_extra_row = QHBoxLayout()
+        crop_extra_row.setSpacing(5)
+        self.individual_straighten_check = QCheckBox("تصحيح الميل تلقائيًا")
         self.individual_straighten_check.setObjectName("individualStraighten")
         self.individual_straighten_check.setChecked(True)
         self.individual_straighten_check.setToolTip(
             "يصحح الميل البسيط تلقائيًا من دون تشويه العبوة أو النص"
         )
-        crop_layout.addWidget(self.individual_straighten_check)
-        self._add_depth_effect(crop_card, color="#0891b2", blur=14, y_offset=3, alpha=36)
+        # ملصق معلومات القص — يُعرض في شريط footer السفلي (لا يزاحم البطاقة)
+        self.individual_crop_info_label = QLabel("القص التلقائي نشط")
+        self.individual_crop_info_label.setObjectName("cropInfoLabel")
+        self.individual_crop_info_label.setWordWrap(False)
+        self.individual_crop_info_label.setAlignment(Qt.AlignCenter)
+        self.individual_crop_info_label.setVisible(False)
+        # أدوات الميل اليدوي — انتقلت من لوحة الربط إلى هنا (كل ما يخص الصورة في مكان واحد)
+        tilt_label = QLabel("الميل اليدوي:")
+        tilt_label.setObjectName("manualTiltLabel")
+        self.manual_tilt_spin = QDoubleSpinBox()
+        self.manual_tilt_spin.setObjectName("manualTiltSpin")
+        self.manual_tilt_spin.setRange(-45.0, 45.0)
+        self.manual_tilt_spin.setDecimals(1)
+        self.manual_tilt_spin.setSingleStep(0.5)
+        self.manual_tilt_spin.setSuffix("°")
+        self.manual_tilt_spin.setValue(0.0)
+        self.manual_tilt_spin.setMinimumHeight(32)
+        self.manual_tilt_spin.setMinimumWidth(96)
+        self.manual_tilt_spin.setLayoutDirection(Qt.LeftToRight)
+        self.manual_tilt_spin.setAlignment(Qt.AlignCenter)
+        # إخفاء أسهم الـ spin المتداخلة — التحكم يتم بأزرار الدوران المرسومة حوله
+        self.manual_tilt_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.manual_tilt_spin.setToolTip(
+            "وزن الميل يدويًا من الأمام:\n"
+            "موجب = دوران لليسار (عكس العقارب)، سالب = لليمين.\n"
+            "المعاينة تتحدث فورًا والقيمة تُطبق عند الحفظ أو الربط")
+        self.manual_tilt_ccw_button = QPushButton()
+        self.manual_tilt_ccw_button.setObjectName("manualTiltButton")
+        self.manual_tilt_ccw_button.setIcon(self._make_rotate_icon(clockwise=False))
+        self.manual_tilt_ccw_button.setToolTip("إمالة لليسار 0.5°")
+        self.manual_tilt_cw_button = QPushButton()
+        self.manual_tilt_cw_button.setObjectName("manualTiltButton")
+        self.manual_tilt_cw_button.setIcon(self._make_rotate_icon(clockwise=True))
+        self.manual_tilt_cw_button.setToolTip("إمالة لليمين 0.5°")
+        self.manual_tilt_reset_button = QPushButton()
+        self.manual_tilt_reset_button.setObjectName("manualTiltButton")
+        self.manual_tilt_reset_button.setIcon(self._make_reset_icon())
+        self.manual_tilt_reset_button.setToolTip("إرجاع الميل إلى الصفر")
+        for tb in (self.manual_tilt_ccw_button, self.manual_tilt_cw_button,
+                   self.manual_tilt_reset_button):
+            tb.setMinimumHeight(32)
+            tb.setFixedWidth(40)
+            tb.setIconSize(QSize(20, 20))
+        self.manual_tilt_ccw_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(
+                self.manual_tilt_spin.value() + 0.5))
+        self.manual_tilt_cw_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(
+                self.manual_tilt_spin.value() - 0.5))
+        self.manual_tilt_reset_button.clicked.connect(
+            lambda: self.manual_tilt_spin.setValue(0.0))
+        self.manual_tilt_spin.valueChanged.connect(self._on_manual_tilt_changed)
+        crop_extra_row.addWidget(self.individual_straighten_check)
+        crop_extra_row.addWidget(tilt_label)
+        crop_extra_row.addWidget(self.manual_tilt_ccw_button)
+        crop_extra_row.addWidget(self.manual_tilt_spin)
+        crop_extra_row.addWidget(self.manual_tilt_cw_button)
+        crop_extra_row.addWidget(self.manual_tilt_reset_button)
+        crop_extra_row.addStretch(1)
+        crop_layout.addLayout(crop_extra_row)
+        crop_layout.addStretch(1)
 
-        compare_card = QFrame()
-        compare_card.setObjectName("editorCompareCard")
-        compare_layout = QVBoxLayout(compare_card)
-        compare_layout.setContentsMargins(9, 8, 9, 8)
-        compare_layout.setSpacing(7)
-        compare_title = QLabel("3  المقارنة قبل الحفظ")
-        compare_title.setObjectName("editorToolSectionTitle")
-        compare_layout.addWidget(compare_title)
-        compare_buttons = QHBoxLayout()
-        compare_buttons.setSpacing(6)
-        self.individual_show_source_button = QPushButton("عرض الأصل")
-        self.individual_show_source_button.setObjectName("showSourceButton")
-        self.individual_show_source_button.setMinimumHeight(34)
-        self.individual_show_preview_button = QPushButton("عرض النتيجة")
-        self.individual_show_preview_button.setObjectName("showPreviewButton")
-        self.individual_show_preview_button.setMinimumHeight(34)
-        self.individual_show_preview_button.setEnabled(False)
-        compare_buttons.addWidget(self.individual_show_source_button, 1)
-        compare_buttons.addWidget(self.individual_show_preview_button, 1)
-        compare_layout.addLayout(compare_buttons)
-        self._add_depth_effect(compare_card, color="#7c3aed", blur=14, y_offset=3, alpha=36)
+        # ── المجموعة 2: التحسين والإضاءة ──
+        enhance_card = QFrame()
+        enhance_card.setObjectName("editorEnhanceCard")
+        enhance_layout = QVBoxLayout(enhance_card)
+        enhance_layout.setContentsMargins(8, 6, 8, 6)
+        enhance_layout.setSpacing(5)
+        enhance_title = QLabel("التحسين والإضاءة")
+        enhance_title.setObjectName("editorToolSectionTitle")
+        enhance_title.setAlignment(Qt.AlignCenter)
+        enhance_layout.addWidget(enhance_title)
+        self.individual_smart_button = QPushButton("تحسين ذكي محافظ")
+        self.individual_smart_button.setObjectName("individualSmartButton")
+        self.individual_smart_button.setCheckable(True)
+        self.individual_smart_button.setChecked(True)
+        self.individual_smart_button.setMinimumHeight(32)
+        self.individual_smart_button.setToolTip(
+            "يحسن الإضاءة والألوان والتفاصيل محليًا مع حماية الشعار والكتابات والباركود"
+        )
+        enhance_layout.addWidget(self.individual_smart_button)
+        self.individual_strength_combo = QComboBox()
+        self.individual_strength_combo.setObjectName("individualStrength")
+        self.individual_strength_combo.addItem("متوازن — موصى به", 55)
+        self.individual_strength_combo.addItem("قوي للصورة الباهتة", 78)
+        self.individual_strength_combo.addItem("محافظ للملصقات", 35)
+        self.individual_strength_combo.setMinimumHeight(30)
+        self.individual_strength_combo.setToolTip("قوة تحسين الصورة المحددة فقط")
+        enhance_layout.addWidget(self.individual_strength_combo)
+        enhance_layout.addStretch(1)
 
-        self.individual_editor_tabs = QTabWidget()
-        self.individual_editor_tabs.setObjectName("individualEditorTabs")
-        self.individual_editor_tabs.setDocumentMode(True)
-        self.individual_editor_tabs.setUsesScrollButtons(False)
-
-        def add_tool_tab(card: QFrame, label: str, object_name: str) -> None:
-            scroll = QScrollArea()
-            scroll.setObjectName("editorToolsScroll")
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            host = QWidget()
-            host.setObjectName(object_name)
-            host_layout = QVBoxLayout(host)
-            host_layout.setContentsMargins(7, 8, 7, 8)
-            host_layout.setSpacing(0)
-            host_layout.addWidget(card)
-            host_layout.addStretch(1)
-            scroll.setWidget(host)
-            self.individual_editor_tabs.addTab(scroll, label)
-
-        advanced_card = QFrame()
-        advanced_card.setObjectName("editorAdvancedCard")
-        advanced_layout = QVBoxLayout(advanced_card)
-        advanced_layout.setContentsMargins(9, 8, 9, 8)
-        advanced_layout.setSpacing(7)
-        advanced_title = QLabel("4  أدوات متقدمة")
-        advanced_title.setObjectName("editorToolSectionTitle")
-        advanced_layout.addWidget(advanced_title)
-        self.individual_blur_dates_check = QCheckBox("طمس تواريخ الإنتاج/الانتهاء تلقائيًا")
+        # ── المجموعة 3: التنظيف (طمس التواريخ + إزالة الانعكاسات) ──
+        clean_card = QFrame()
+        clean_card.setObjectName("editorAdvancedCard")
+        clean_layout = QVBoxLayout(clean_card)
+        clean_layout.setContentsMargins(8, 6, 8, 6)
+        clean_layout.setSpacing(5)
+        clean_title = QLabel("تنظيف الصورة")
+        clean_title.setObjectName("editorToolSectionTitle")
+        clean_title.setAlignment(Qt.AlignCenter)
+        clean_layout.addWidget(clean_title)
+        self.individual_blur_dates_check = QCheckBox("طمس التواريخ تلقائيًا")
         self.individual_blur_dates_check.setObjectName("individualBlurDates")
         self.individual_blur_dates_check.setToolTip(
-            "يكتشف مناطق التواريخ ويطمسها بلون المنتج نفسه قبل الحفظ — بنفس محرك المحرر الكامل"
+            "يكتشف مناطق تواريخ الإنتاج/الانتهاء ويطمسها بلون المنتج نفسه قبل الحفظ"
         )
-        advanced_layout.addWidget(self.individual_blur_dates_check)
-        self.individual_deglare_check = QCheckBox("إزالة انعكاسات التصوير (اللمعان)")
+        clean_layout.addWidget(self.individual_blur_dates_check)
+        self.individual_deglare_check = QCheckBox("إزالة الانعكاسات (اللمعان)")
         self.individual_deglare_check.setObjectName("individualDeglare")
         self.individual_deglare_check.setToolTip(
             "يخفف اللمعان والانعكاسات الضوئية على العبوة من دون المساس بالكتابات"
         )
-        advanced_layout.addWidget(self.individual_deglare_check)
-        self.individual_full_editor_button = QPushButton("فتح المحرر الكامل لهذه الصورة")
-        self.individual_full_editor_button.setObjectName("secondaryButton")
-        self.individual_full_editor_button.setMinimumHeight(34)
-        self.individual_full_editor_button.setToolTip(
-            "للحالات المعقدة فقط: يفتح محرر صور المتاجر الاحترافي الكامل على نفس الصورة"
-        )
-        advanced_layout.addWidget(self.individual_full_editor_button)
-        self._add_depth_effect(advanced_card, color="#b45309", blur=14, y_offset=3, alpha=36)
+        clean_layout.addWidget(self.individual_deglare_check)
+        clean_layout.addStretch(1)
 
-        add_tool_tab(crop_card, "الاقتصاص", "editorCropTab")
-        add_tool_tab(enhance_card, "التحسين", "editorEnhanceTab")
-        add_tool_tab(advanced_card, "متقدم", "editorAdvancedTab")
-        add_tool_tab(compare_card, "المقارنة", "editorCompareTab")
-        self.individual_editor_tabs.setCurrentIndex(0)
-        layout.addWidget(self.individual_editor_tabs, 1)
+        # ── المجموعة 4: المقارنة قبل الحفظ ──
+        compare_card = QFrame()
+        compare_card.setObjectName("editorCompareCard")
+        compare_layout = QVBoxLayout(compare_card)
+        compare_layout.setContentsMargins(8, 6, 8, 6)
+        compare_layout.setSpacing(5)
+        compare_title = QLabel("المقارنة قبل الحفظ")
+        compare_title.setObjectName("editorToolSectionTitle")
+        compare_title.setAlignment(Qt.AlignCenter)
+        compare_layout.addWidget(compare_title)
+        self.individual_show_source_button = QPushButton("عرض الأصل")
+        self.individual_show_source_button.setObjectName("showSourceButton")
+        self.individual_show_source_button.setMinimumHeight(32)
+        compare_layout.addWidget(self.individual_show_source_button)
+        self.individual_show_preview_button = QPushButton("عرض النتيجة")
+        self.individual_show_preview_button.setObjectName("showPreviewButton")
+        self.individual_show_preview_button.setMinimumHeight(32)
+        self.individual_show_preview_button.setEnabled(False)
+        compare_layout.addWidget(self.individual_show_preview_button)
+        compare_layout.addStretch(1)
 
-        self.individual_editor_hint = QLabel(
-            "ابدأ بالقص الذكي، أو اختر «منظور يدوي» ثم ضع كل زاوية على ركن العبوة لتصحيح ميلها."
-        )
-        self.individual_editor_hint.setObjectName("individualEditorHint")
-        self.individual_editor_hint.setWordWrap(True)
-        self.individual_editor_hint.setAlignment(Qt.AlignCenter)
-        self.individual_editor_hint.setMaximumHeight(58)
-        layout.addWidget(self.individual_editor_hint)
-
-        self.individual_reset_button = QPushButton("إعادة ضبط جميع الأدوات")
-        self.individual_reset_button.setObjectName("secondaryButton")
-        self.individual_reset_button.setMinimumHeight(34)
-        self.individual_reset_button.setToolTip("يلغي حدود القص اليدوي ويعيد الخيارات الموصى بها")
-        layout.addWidget(self.individual_reset_button)
+        # ترتيب متكيف: صف واحد على الشاشات الواسعة، صفّان على الضيقة — بلا قص ولا تمرير
+        self._editor_tool_cards = (crop_card, enhance_card, clean_card, compare_card)
+        self._editor_tools_grid = row
+        self._editor_tools_columns = 0
+        for card in self._editor_tool_cards:
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._relayout_editor_tool_cards(initial=True)
+        outer.addWidget(strip)
 
         self.individual_smart_button.toggled.connect(self._update_individual_editor_hint)
         self.individual_smart_button.toggled.connect(self._invalidate_individual_preview)
@@ -2564,20 +2833,37 @@ class MainWindow(QMainWindow):
         self.individual_straighten_check.toggled.connect(self._invalidate_individual_preview)
         self.individual_show_source_button.clicked.connect(self._show_individual_source)
         self.individual_show_preview_button.clicked.connect(self._show_individual_preview)
-        self.individual_reset_button.clicked.connect(self._reset_individual_editor)
         self.individual_blur_dates_check.toggled.connect(self._invalidate_individual_preview)
         self.individual_deglare_check.toggled.connect(self._invalidate_individual_preview)
-        self.individual_full_editor_button.clicked.connect(self._open_full_editor_for_individual)
         return panel
 
-    def _toggle_individual_tools_panel(self) -> None:
-        visible = not self.individual_editor_panel.isVisible()
-        self.individual_editor_panel.setVisible(visible)
-        self.individual_tools_toggle_button.setText("إخفاء الأدوات" if visible else "إظهار الأدوات")
-        if visible:
-            self.individual_editor_splitter.setSizes(
-                [max(420, self.edit_tab.width() - 320), 300]
-            )
+    def _relayout_editor_tool_cards(self, initial: bool = False) -> None:
+        """2.5: ترتيب متكيف لبطاقات الأدوات — صف واحد على الشاشات الواسعة،
+        صفّان (2×2) على الشاشات الضيقة — بلا قصّ ولا تمرير أفقي."""
+        cards = getattr(self, "_editor_tool_cards", None)
+        grid = getattr(self, "_editor_tools_grid", None)
+        if not cards or grid is None:
+            return
+        try:
+            available = self.width() if self.width() > 0 else 1280
+        except Exception:
+            available = 1280
+        # أقل عرض مريح للبطاقات الأربع في صف واحد دون قص — أقل من ذلك نلتف إلى 2×2
+        columns = 4 if available >= 1500 else 2
+        if not initial and columns == self._editor_tools_columns:
+            return
+        self._editor_tools_columns = columns
+        for card in cards:
+            grid.removeWidget(card)
+        # بطاقة الاقتصاص أوسع لأنها تحوي أدوات أكثر
+        stretches = (3, 2, 2, 2)
+        for index, card in enumerate(cards):
+            r, c = divmod(index, columns)
+            grid.addWidget(card, r, c)
+        for c in range(columns):
+            grid.setColumnStretch(c, stretches[c] if columns == 4 else 1)
+        for c in range(columns, 4):
+            grid.setColumnStretch(c, 0)
 
     def _individual_editor_image_pane(self) -> ImagePreviewPane:
         return self.individual_editor_preview
@@ -2605,9 +2891,15 @@ class MainWindow(QMainWindow):
             self.individual_editor_state_label.style().unpolish(self.individual_editor_state_label)
             self.individual_editor_state_label.style().polish(self.individual_editor_state_label)
 
+    def _set_crop_info_text(self, text: str) -> None:
+        """يكتب معلومات القص في الملصق المخفي (للتوافق) وفي شريط التلميح السفلي المرئي."""
+        self.individual_crop_info_label.setText(text)
+        if hasattr(self, "individual_editor_hint"):
+            self.individual_editor_hint.setText(text)
+
     def _update_individual_crop_info(self) -> None:
         if not self.individual_manual_crop_button.isChecked():
-            self.individual_crop_info_label.setText("القص الذكي يحدد المنتج تلقائيًا ويوازن الفراغ حوله")
+            self._set_crop_info_text("القص الذكي يحدد المنتج تلقائيًا ويوازن الفراغ حوله")
             self.individual_crop_full_button.setEnabled(False)
             self.individual_crop_clear_button.setEnabled(False)
             self.individual_crop_ratio_combo.setEnabled(False)
@@ -2616,7 +2908,7 @@ class MainWindow(QMainWindow):
         self.individual_crop_clear_button.setEnabled(self._individual_crop_box is not None)
         self.individual_crop_ratio_combo.setEnabled(True)
         if self._individual_crop_box is None:
-            self.individual_crop_info_label.setText(
+            self._set_crop_info_text(
                 "لا يوجد إطار — اسحب إطارًا أوليًا ثم ضع الزوايا الأربع على أركان المنتج"
             )
             return
@@ -2624,10 +2916,10 @@ class MainWindow(QMainWindow):
         size = viewer.crop_pixel_size()
         kept = viewer.crop_area_ratio() * 100.0
         if size is None:
-            self.individual_crop_info_label.setText(f"منظور رباعي جاهز — يحتفظ بنحو {kept:.0f}% من الصورة")
+            self._set_crop_info_text(f"منظور رباعي جاهز — يحتفظ بنحو {kept:.0f}% من الصورة")
         else:
             width, height = size
-            self.individual_crop_info_label.setText(
+            self._set_crop_info_text(
                 f"الناتج المصحح: {width} × {height} بكسل  •  المساحة المحددة: {kept:.0f}%"
             )
 
@@ -2697,7 +2989,14 @@ class MainWindow(QMainWindow):
                 "انتظر حتى تنتهي المعاينة أو عملية الحفظ الحالية؛ لن يُغلق المحرر أثناء المعالجة.",
             )
             return
-        if self._individual_editor_dirty or self._individual_preview_active:
+        unified_dirty = False
+        editor = getattr(self, "unified_editor", None)
+        if editor is not None:
+            try:
+                unified_dirty = editor.has_image() and editor.has_edits()
+            except Exception:
+                unified_dirty = False
+        if self._individual_editor_dirty or self._individual_preview_active or unified_dirty:
             box = QMessageBox(self)
             box.setIcon(QMessageBox.Warning)
             box.setWindowTitle(APP_NAME)
@@ -2759,30 +3058,31 @@ class MainWindow(QMainWindow):
         pane.viewer.set_crop_aspect_ratio(None, emit=False)
         pane.viewer.set_crop_mode(False)
         pane.viewer.fit_image()
+        # 2.6: تحميل الصورة في المحرر الموحد — كل الأدوات تعمل مباشرة على الصورة
+        self.unified_editor.load_image(str(source))
         self.individual_editor_product_label.setText(item.product_name or item.source_name)
         unit = "حبة" if item.item_code else "غير محددة"
         self.individual_editor_meta_label.setText(
             f"رقم الصنف: {item.item_code or 'غير مرتبط'}  •  الوحدة: {unit}  •  الملف: {item.source_name}"
         )
-        self.individual_editor_state_label.setText("جاهز للمعاينة")
+        self.individual_editor_state_label.setText("جاهز للتحرير")
         self.individual_editor_state_label.setProperty("previewPending", False)
-        self.individual_editor_panel.setVisible(True)
-        self.individual_tools_toggle_button.setText("إخفاء الأدوات")
+        # 2.6: اللوحة القديمة تبقى مخفية — المحرر الموحد يعوضها بالكامل
+        self.individual_editor_panel.setVisible(False)
         self._update_individual_crop_info()
         self._update_individual_editor_hint()
         self._update_controls()
 
-        # 2.3: التحرير مدمج في مكان الصورة — لا نوافذ منفصلة إطلاقًا.
+        # 2.4: التحرير مدمج في مكان الصورة — لا نوافذ منفصلة إطلاقًا.
         self.preview_tabs.blockSignals(True)
         self.preview_tabs.setCurrentWidget(self.edit_tab)
         self.preview_tabs.blockSignals(False)
-        QTimer.singleShot(
-            0,
-            lambda: self.individual_editor_splitter.setSizes(
-                [max(420, self.edit_tab.width() - 320), 300]
-            ),
-        )
-        self.individual_editor_preview.viewer.setFocus(Qt.OtherFocusReason)
+        # 2.7: أثناء التحرير تُخفى بطاقة المنتج وشريط الـ ZIP — معلوماتهما
+        # معروضة في ترويسة المحرر، وهذا يمنح الصورة مساحة أكبر
+        # على الشاشات القصيرة من دون أي تداخل أو قص.
+        self.selected_product_card.setVisible(False)
+        self.results_action_bar.setVisible(False)
+        self.unified_editor.canvas.setFocus(Qt.OtherFocusReason)
 
     def _exit_individual_edit_mode(self) -> None:
         """2.3: إنهاء جلسة التحرير المدمج والعودة لتبويب النتيجة."""
@@ -2800,8 +3100,16 @@ class MainWindow(QMainWindow):
         pane = self._individual_editor_image_pane()
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
+        # 2.6: تفريغ المحرر الموحد عند إنهاء الجلسة
+        if hasattr(self, "unified_editor"):
+            self.unified_editor.clear()
         self.individual_editor_state_label.setText("جاهز للتحرير")
         self.individual_editor_state_label.setProperty("previewPending", False)
+        # 2.7: إعادة إظهار بطاقة المنتج وشريط الإجراءات بعد إنهاء التحرير
+        if hasattr(self, "selected_product_card"):
+            self.selected_product_card.setVisible(True)
+        if hasattr(self, "results_action_bar"):
+            self.results_action_bar.setVisible(True)
         if self.preview_tabs.currentWidget() is self.edit_tab:
             self.preview_tabs.blockSignals(True)
             self.preview_tabs.setCurrentWidget(self.output_preview)
@@ -2936,13 +3244,16 @@ class MainWindow(QMainWindow):
         if source is not None and source.is_file():
             pane.set_image(source)
             pane.viewer.fit_image()
+            # 2.6: إعادة تحميل الأصل في المحرر الموحد يلغي كل التعديلات غير المحفوظة
+            if hasattr(self, "unified_editor"):
+                self.unified_editor.load_image(str(source))
         self._individual_preview_active = False
         self._individual_preview_path = None
         self.individual_show_preview_button.setEnabled(False)
-        self.individual_editor_state_label.setText("جاهز للمعاينة")
+        self.individual_editor_state_label.setText("جاهز للتحرير")
         self._update_individual_crop_info()
         self._update_individual_editor_hint()
-        self.status_label.setText("أُعيدت خيارات تعديل الصورة المحددة إلى الإعدادات الذكية الموصى بها.")
+        self.status_label.setText("أُعيدت الصورة والخيارات إلى الحالة الأصلية — كل التعديلات غير المحفوظة أُلغيت.")
 
     def _start_individual_preview(self) -> None:
         self._begin_individual_edit(preview_only=True)
@@ -2981,21 +3292,66 @@ class MainWindow(QMainWindow):
             target_ratio = self.individual_crop_ratio_combo.currentData()
             if target_ratio is not None:
                 manual_crop = (*manual_crop, float(target_ratio))
-        self.individual_worker = IndividualEditWorker(
-            self.current_workspace,
-            item.source_name,
-            preview_only=preview_only,
-            manual_crop=manual_crop,
-            smart_enhance=self.individual_smart_button.isChecked(),
-            enhancement_strength=int(self.individual_strength_combo.currentData() or 55),
-            smart_crop=self.individual_auto_crop_button.isChecked() and not manual_crop_enabled,
-            auto_straighten=self.individual_straighten_check.isChecked(),
-            remove_background=self.remove_background_check.isChecked(),
-            image_options=self._final_image_options(),
-            blur_dates=self.individual_blur_dates_check.isChecked(),
-            deglare=self.individual_deglare_check.isChecked(),
-            manual_rotation=self._current_manual_tilt(),
-        )
+
+        # 2.6: إذا عدّل المستخدم الصورة في المحرر الموحد، نحفظ ناتج المحرر
+        # كمصدر معدّل ونمرره للـ pipeline (التأطير 800×700 + التقارير تبقى كما هي)
+        edited_source_path: Path | None = None
+        editor = getattr(self, "unified_editor", None)
+        if editor is not None and editor.has_image() and editor.has_edits():
+            try:
+                result_bgr = editor.get_result_bgr()
+                if result_bgr is not None:
+                    staging_dir = Path(self.current_workspace) / "staging"
+                    staging_dir.mkdir(parents=True, exist_ok=True)
+                    tmp_path = staging_dir / "unified-edited-source.png"
+                    import cv2 as _cv2
+
+                    ok, buffer = _cv2.imencode(".png", result_bgr)
+                    if ok:
+                        buffer.tofile(str(tmp_path))
+                        edited_source_path = tmp_path
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    f"تعذر تجهيز ناتج المحرر الموحد: {exc}",
+                )
+                return
+
+        if edited_source_path is not None:
+            # التعديلات طُبقت داخل المحرر — نعطل المعالجات المكررة في الـ pipeline
+            self.individual_worker = IndividualEditWorker(
+                self.current_workspace,
+                item.source_name,
+                preview_only=preview_only,
+                manual_crop=None,
+                smart_enhance=False,
+                enhancement_strength=0,
+                smart_crop=False,
+                auto_straighten=False,
+                remove_background=False,
+                image_options=self._final_image_options(),
+                blur_dates=False,
+                deglare=False,
+                manual_rotation=0.0,
+                edited_source_path=edited_source_path,
+            )
+        else:
+            self.individual_worker = IndividualEditWorker(
+                self.current_workspace,
+                item.source_name,
+                preview_only=preview_only,
+                manual_crop=manual_crop,
+                smart_enhance=self.individual_smart_button.isChecked(),
+                enhancement_strength=int(self.individual_strength_combo.currentData() or 55),
+                smart_crop=self.individual_auto_crop_button.isChecked() and not manual_crop_enabled,
+                auto_straighten=self.individual_straighten_check.isChecked(),
+                remove_background=self.remove_background_check.isChecked(),
+                image_options=self._final_image_options(),
+                blur_dates=self.individual_blur_dates_check.isChecked(),
+                deglare=self.individual_deglare_check.isChecked(),
+                manual_rotation=self._current_manual_tilt(),
+            )
         self.individual_worker.progress_changed.connect(self._on_progress)
         self.individual_worker.completed.connect(self._on_individual_edit_completed)
         self.individual_worker.failed.connect(self._on_individual_edit_failed)
@@ -3059,6 +3415,9 @@ class MainWindow(QMainWindow):
         pane = self._individual_editor_image_pane()
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
+        # 2.6: بعد الحفظ الناجح نفرغ المحرر الموحد (التعديلات اعتُمدت)
+        if hasattr(self, "unified_editor"):
+            self.unified_editor.clear()
         self._populate_results(restore_position=restore_position)
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
@@ -3095,26 +3454,6 @@ class MainWindow(QMainWindow):
         )
         self._update_controls()
 
-    def _open_full_editor_for_individual(self) -> None:
-        """فتح محرر صور المتاجر الاحترافي الكامل على الصورة المحددة نفسها."""
-        item = self._individual_editable_item()
-        source: Path | None = None
-        if item is not None and self.current_workspace is not None:
-            cand = Path(self.current_workspace) / "uploads" / str(item.source_name)
-            if cand.is_file():
-                source = cand
-            else:
-                for sub in ("sources", "originals", "input", ""):
-                    cand = Path(self.current_workspace) / sub / str(item.source_name)
-                    if cand.is_file():
-                        source = cand
-                        break
-        try:
-            from photo_editor_v2 import V2PhotoEditorDialog
-            dlg = V2PhotoEditorDialog(str(source) if source else "", parent=self)
-            dlg.exec()
-        except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"تعذر فتح المحرر الكامل: {exc}")
 
     def _on_individual_worker_finished(self) -> None:
         worker = self.sender()
@@ -3141,15 +3480,12 @@ class MainWindow(QMainWindow):
             QScrollArea#resultsListPane, QFrame#previewWorkspace { background: #ffffff; border: 1px solid #d8e2ed; border-radius: 10px; }
             QFrame#resultsListPaneContent { background: #ffffff; border: none; }
             QFrame#fixedActionBar { background: #f7faff; border: 1px solid #d5e1ed; border-radius: 10px; }
-            QDialog#individualEditorDialog { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #e7f1ff, stop:0.52 #f4f7fb, stop:1 #f4ecff); }
             QFrame#editorHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0f2747, stop:0.55 #163d68, stop:1 #3b2575); border: 1px solid #355b83; border-radius: 13px; }
             QFrame#editorFooter { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ffffff, stop:1 #eef4ff); border: 1px solid #bdcde0; border-radius: 12px; }
             QLabel#editorProductLabel { color: #ffffff; font-size: 17px; font-weight: 900; background: transparent; }
             QLabel#editorMetaLabel { color: #d6e7f7; font-size: 10px; background: transparent; }
             QLabel#editorStateBadge { color: #07543c; background: #d9f8ec; border: 1px solid #70cfad; border-radius: 13px; padding: 7px 13px; font-weight: 900; }
             QLabel#editorStateBadge[previewPending="true"] { color: #7a4300; background: #fff0b8; border: 1px solid #e5ad26; }
-            QSplitter#individualEditorSplitter::handle { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #9db5cb, stop:0.5 #d2deea, stop:1 #9db5cb); border-radius: 4px; margin: 5px 1px; }
-            QSplitter#individualEditorSplitter::handle:hover { background: #50a8d6; }
             QFrame#editorPreviewFrame { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17283b, stop:1 #09131f); border: 2px solid #2e526f; border-radius: 14px; }
             QFrame#editorPreviewFrame QLabel#previewTitle { color: #e6f4ff; background: transparent; font-size: 12px; font-weight: 900; }
             QFrame#editorPreviewFrame QScrollArea#previewScroll { background: #08121d; border: 1px solid #365b78; border-radius: 9px; }
@@ -3213,23 +3549,17 @@ class MainWindow(QMainWindow):
             QFrame#statCard { background: #f8fafc; border: 1px solid #dce4ef; border-radius: 9px; }
             QFrame#previewFrame { background: #f8fafc; border: 1px solid #dce4ef; border-radius: 8px; }
             QLabel#previewTitle { color: #49647e; font-weight: 700; }
-            QFrame#individualEditor { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f4f1ff, stop:0.45 #eef8ff, stop:1 #f5fbff); border: 1px solid #a99bdc; border-radius: 14px; }
-            QLabel#individualEditorTitle { color: #33206d; font-weight: 900; font-size: 15px; background: transparent; }
-            QLabel#editorToolSubtitle { color: #64748b; background: transparent; font-size: 9px; }
-            QTabWidget#individualEditorTabs { background: transparent; }
-            QTabWidget#individualEditorTabs::pane { background: rgba(255, 255, 255, 150); border: 1px solid #b7c6da; border-radius: 10px; top: -1px; }
-            QTabWidget#individualEditorTabs QTabBar::tab { background: #e7edf7; color: #53677f; border: 1px solid #b7c6da; padding: 7px 10px; min-width: 72px; font-size: 10px; font-weight: 900; }
-            QTabWidget#individualEditorTabs QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0e7490, stop:1 #2563eb); color: #ffffff; border-color: #0e7490; }
-            QTabWidget#individualEditorTabs QTabBar::tab:hover:!selected { background: #d7e7f6; color: #17324d; }
-            QScrollArea#editorToolsScroll { background: transparent; border: none; }
-            QWidget#editorCropTab, QWidget#editorEnhanceTab, QWidget#editorCompareTab { background: transparent; }
-            QScrollArea#editorToolsScroll QScrollBar:vertical { background: #e8eef7; width: 9px; margin: 3px 1px; border-radius: 4px; }
-            QScrollArea#editorToolsScroll QScrollBar::handle:vertical { background: #7695b7; min-height: 28px; border-radius: 4px; }
-            QScrollArea#editorToolsScroll QScrollBar::add-line:vertical, QScrollArea#editorToolsScroll QScrollBar::sub-line:vertical { height: 0px; }
+            QFrame#individualEditor { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f4f1ff, stop:0.45 #eef8ff, stop:1 #f5fbff); border: 1px solid #a99bdc; border-radius: 12px; }
+            QWidget#editorToolsStrip { background: transparent; }
             QLabel#editorToolSectionTitle { color: #183b56; font-weight: 900; font-size: 11px; background: transparent; }
+            QLabel#manualTiltLabel { color: #0f5c6e; font-weight: 800; background: transparent; }
+            QDoubleSpinBox#manualTiltSpin { background: #ffffff; border: 1px solid #63c5d6; border-radius: 7px; padding: 2px 4px; font-weight: 800; color: #0f5c6e; }
+            QPushButton#manualTiltButton { background: #ffffff; border: 1px solid #63c5d6; border-radius: 7px; color: #0f5c6e; font-weight: 900; }
+            QPushButton#manualTiltButton:hover { background: #e1fbff; }
             QFrame#editorEnhanceCard { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #e9f1ff, stop:1 #ffffff); border: 1px solid #8ab4f8; border-radius: 11px; }
             QFrame#editorCropCard { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #e1fbff, stop:1 #ffffff); border: 1px solid #63c5d6; border-radius: 11px; }
             QFrame#editorCompareCard { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f0e9ff, stop:1 #ffffff); border: 1px solid #b59ae8; border-radius: 11px; }
+            QFrame#editorAdvancedCard { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #fff5e5, stop:1 #ffffff); border: 1px solid #e3b96f; border-radius: 11px; }
             QLabel#cropInfoLabel { color: #075985; background: #e6f7ff; border: 1px solid #8fd3eb; border-radius: 7px; padding: 6px 8px; font-weight: 800; }
             QLabel#individualEditorHint { color: #36506b; background: #ffffff; border: 1px solid #bac9da; border-radius: 8px; padding: 7px; font-size: 9px; }
             QComboBox#individualStrength, QComboBox#individualStrengthCombo { background: #ffffff; color: #1e3a8a; border: 1px solid #93b4ee; font-weight: 800; }
@@ -3351,12 +3681,18 @@ class MainWindow(QMainWindow):
             QLineEdit#manualItemEdit:focus { border: 2px solid #fbbf24; }
             QPushButton#manualLinkPrimaryButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #16a39a, stop:1 #047857); color: #ffffff; border: 1px solid #065f46; padding: 7px 13px; font-weight: 900; }
             QPushButton#manualLinkPrimaryButton:hover { background: #0d9488; }
+            QPushButton#smartLinkButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #22c55e, stop:1 #15803d); color: #ffffff; border: 2px solid #14532d; border-radius: 9px; padding: 9px 14px; font-weight: 900; font-size: 13px; }
+            QPushButton#smartLinkButton:hover { background: #16a34a; border-color: #052e16; }
             QPushButton#linkToolButton { background: #eef2ff; color: #3730a3; border: 1px solid #b8c2f4; padding: 5px 9px; }
             QPushButton#linkToolButton:hover { background: #dfe4ff; }
             QPushButton#suggestNearbyButton { background: #fff3d6; color: #8a5200; border: 1px solid #edbd55; padding: 5px 9px; }
             QPushButton#suggestNearbyButton:hover { background: #ffe5a8; }
             QPushButton#referenceLinkButton { background: #e7f8f2; color: #066a50; border: 1px solid #78cbb0; padding: 5px 9px; }
             QPushButton#referenceLinkButton:hover { background: #cef1e4; }
+            QPushButton#tapLinkButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8b5cf6, stop:1 #6d28d9); color: #ffffff; border: 2px solid #4c1d95; border-radius: 9px; padding: 5px 12px; font-weight: 900; }
+            QPushButton#tapLinkButton:hover { background: #7c3aed; }
+            QPushButton#tapLinkButton:checked { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #d97706); border-color: #92400e; }
+            QLabel#tapLinkHint { background: rgba(76, 29, 149, 0.94); color: #ffffff; border: 1px solid #8b5cf6; border-radius: 10px; padding: 10px 14px; font-weight: 800; font-size: 13px; }
 
             QFrame#fixedActionBar { background: #ffffff; border: 1px solid #cbd8e6; border-radius: 10px; }
             QLabel#deliveryHint { color: #526b82; background: transparent; }
@@ -4177,6 +4513,7 @@ class MainWindow(QMainWindow):
         unresolved_count = len(self._selected_unresolved_link_targets())
         if hasattr(self, "selected_count_badge"):
             self.selected_count_badge.setText(f"المحدد: {selected_count}")
+        self._refresh_smart_link_button()
         if reference is None:
             self.manual_selection_label.setText(
                 f"المحدد: {selected_count} — أدخل اسم الصنف أو رقمه أو الباركود للربط المباشر."
@@ -4193,6 +4530,102 @@ class MainWindow(QMainWindow):
         if hasattr(self, "manual_reference_badge"):
             self.manual_reference_badge.setText(f"المرجع: {reference.item_code}")
             self.manual_reference_badge.setToolTip(reference_name)
+
+    def _visual_suggestion_for(self, unresolved: list) -> tuple["BatchItemResult | None", float]:
+        """يرشح بصريًا أفضل صورة مرتبطة تشبه الصور المحددة (لأن الصور
+        قد تأتي غير متتالية بعد الرفع). يرجع (المرشح، نسبة التشابه)."""
+        if self.current_result is None or not unresolved:
+            return None, 0.0
+        linked_items = [
+            item for item in self.current_result.items
+            if item.item_code
+            and item.source_name not in {t.source_name for t in unresolved}
+        ]
+        if not linked_items:
+            return None, 0.0
+        try:
+            from engine_v2 import visual_match_v2 as _vm
+            tgt_sigs = []
+            for t in unresolved:
+                path = getattr(t, "source_path", "") or ""
+                if not path:
+                    continue
+                sig = self._visual_sig_cached(path)
+                if sig is not None and sig.ok:
+                    tgt_sigs.append(sig)
+            if not tgt_sigs:
+                return None, 0.0
+            best_item, best_score = None, 0.0
+            for item in linked_items:
+                ref_sig = self._visual_sig_cached(item.source_path)
+                if ref_sig is None or not ref_sig.ok:
+                    continue
+                score = max(_vm.pair_similarity(ts, ref_sig) for ts in tgt_sigs)
+                if score > best_score:
+                    best_item, best_score = item, score
+            return best_item, best_score
+        except Exception as exc:
+            print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
+            return None, 0.0
+
+    def _visual_sig_cached(self, path: str):
+        """بصمة بصرية مع ذاكرة مؤقتة — فلا تُحسب لنفس الصورة مرتين
+        أثناء تنقل المستخدم بين الصفوف (استجابة فورية للزر الذكي)."""
+        cache = getattr(self, "_visual_sig_cache", None)
+        if cache is None:
+            cache = {}
+            self._visual_sig_cache = cache
+        if path in cache:
+            return cache[path]
+        try:
+            from engine_v2 import visual_match_v2 as _vm
+            sig = _vm.build_signature(path)
+        except Exception:
+            sig = None
+        # سقف بسيط للذاكرة — دفعات العمل اليومية لا تتجاوز مئات الصور.
+        if len(cache) > 600:
+            cache.clear()
+        cache[path] = sig
+        return sig
+
+    def _refresh_smart_link_button(self) -> None:
+        """يُحدّث الزر الذكي: الترشيح البصري أولًا (الصور قد تكون غير
+        متتالية)، ثم أقرب مرتبطة أعلى القائمة كخيار احتياطي.
+        القرار يبقى يدويًا بالكامل — الزر يقترح ولا يربط إلا بضغطة المستخدم."""
+        if not hasattr(self, "smart_link_button"):
+            return
+        unresolved, nearest_item = self._nearest_link_context()
+        if not unresolved:
+            self.smart_link_button.setVisible(False)
+            self._smart_link_target_code = ""
+            return
+        visual_item, visual_score = self._visual_suggestion_for(unresolved)
+        # الترشيح البصري يتقدم عند تشابه موثوق (≥62%)، وإلا نقترح الأقرب فوقها.
+        if visual_item is not None and visual_score >= 0.62:
+            reference_item, badge = visual_item, f" ★ تشابه {visual_score:.0%}"
+        elif nearest_item is not None:
+            reference_item, badge = nearest_item, ""
+        else:
+            self.smart_link_button.setVisible(False)
+            self._smart_link_target_code = ""
+            return
+        self._smart_link_target_code = reference_item.item_code
+        display_name = reference_item.product_name or reference_item.item_code
+        # اسم مختصر للزر — الاسم الكامل في التلميح وبطاقة الصنف أعلى المعاينة.
+        short = display_name if len(display_name) <= 30 else display_name[:28] + "…"
+        count_txt = "صورة" if len(unresolved) == 1 else f"{len(unresolved)} صور"
+        self.smart_link_button.setText(
+            f"✔ اربط {count_txt} بـ: {short} ({reference_item.item_code}){badge}")
+        self.smart_link_button.setToolTip(
+            f"ضغطة واحدة تربط {count_txt} بالصنف:\n"
+            f"{display_name}\n"
+            f"رقم الصنف: {reference_item.item_code}"
+            + (f" • الباركود: {reference_item.barcode}" if reference_item.barcode else "")
+            + (f"\nالترشيح بصري — نسبة التشابه {visual_score:.0%} (الصور لا يلزم أن تكون متتالية)." if badge else "\nالترشيح حسب أقرب صورة مرتبطة أعلى القائمة.")
+            + "\nالتسمية النهائية (-1، -2…) تُطبّق تلقائيًا — والتراجع متاح من الجدول،\n"
+            "وإن لم يكن هذا هو الصنف الصحيح استخدم (ربط بصورة أخرى) أو اكتب الصنف في (ربط الآن)."
+        )
+        self.smart_link_button.setVisible(True)
 
     def _result_path(self, value: str) -> Path | None:
         if not value:
@@ -4504,10 +4937,7 @@ class MainWindow(QMainWindow):
         الاستخدام النموذجي: صورة الباركود مرتبطة والجهات الأخرى للمنتج نفسه
         ملتقطة بعدها مباشرة — حتى لو كانت 4 صور للصنف تُربط دفعة واحدة.
         """
-        if self.current_result is None:
-            return
-        selected = self._selected_result_items()
-        unresolved = [item for item in selected if not item.item_code]
+        unresolved, reference_item = self._nearest_link_context()
         if not unresolved:
             QMessageBox.information(
                 self,
@@ -4516,23 +4946,6 @@ class MainWindow(QMainWindow):
                 "ثم اضغط (ضم للصنف الأعلى) لتُربط بنفس صنف أقرب صورة مرتبطة فوقها.",
             )
             return
-        # أعلى صف محدد غير مرتبط — نبحث منه لأعلى عن أول صف مرتبط.
-        top_row = min(
-            (self._row_for_source_name(item.source_name) for item in unresolved),
-            default=-1,
-        )
-        if top_row < 0:
-            return
-        reference_item = None
-        for row in range(top_row - 1, -1, -1):
-            source_cell = self.results_table.item(row, 0)
-            if source_cell is None:
-                continue
-            candidate = self._result_items_by_name.get(
-                str(source_cell.data(Qt.UserRole) or ""))
-            if candidate is not None and candidate.item_code:
-                reference_item = candidate
-                break
         if reference_item is None:
             QMessageBox.information(
                 self,
@@ -4542,22 +4955,8 @@ class MainWindow(QMainWindow):
                 "لضم بقية صور الصنف إليها دفعة واحدة.",
             )
             return
-        display_name = reference_item.product_name or reference_item.item_code
-        confirm = QMessageBox.question(
-            self,
-            APP_NAME,
-            (
-                f"ستُربط {len(unresolved)} صورة بالصنف:\n"
-                f"{display_name}\n"
-                f"رقم الصنف: {reference_item.item_code}"
-                + (f" • الباركود: {reference_item.barcode}" if reference_item.barcode else "")
-                + "\n\nهل تريد المتابعة؟ ستخرج الصور بالتسمية النهائية تلقائيًا (-1، -2…)."
-            ),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if confirm != QMessageBox.Yes:
-            return
+        # ربط فوري بضغطة واحدة — لا نافذة تأكيد؛ شريط الحالة يعرض التفاصيل
+        # والتراجع متاح من الجدول (تعديل رقم الصنف) في أي وقت.
         try:
             from engine_v2 import learning_v2 as _lrn
             for t in unresolved:
@@ -4574,6 +4973,191 @@ class MainWindow(QMainWindow):
             reference_item.item_code,
             f"جارٍ ضم {len(unresolved)} صورة للصنف {reference_item.item_code}…",
         )
+
+    def _smart_link_clicked(self) -> None:
+        """تنفيذ اقتراح الزر الذكي — يربط بالصنف المعروض على الزر نفسه
+        (المرشح بصريًا أو الأقرب أعلى القائمة). القرار يدوي: لا ربط إلا بهذه الضغطة."""
+        unresolved, nearest_item = self._nearest_link_context()
+        if not unresolved:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "حدد أولًا الصورة (أو عدة صور بـ Ctrl) غير المرتبطة ثم اضغط زر الربط السريع.",
+            )
+            return
+        target_code = str(getattr(self, "_smart_link_target_code", "") or "")
+        visual_score = 0.0
+        if not target_code:
+            visual_item, visual_score = self._visual_suggestion_for(unresolved)
+            if visual_item is not None and visual_score >= 0.62:
+                target_code = visual_item.item_code
+            elif nearest_item is not None:
+                target_code = nearest_item.item_code
+        if not target_code:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "لا يوجد صنف مرشّح للربط بعد.\n"
+                "اربط صورة الباركود أولًا، أو استخدم (ربط بصورة أخرى) أو اكتب الصنف في (ربط الآن).",
+            )
+            return
+        # تسجيل القرار للتعلم الذاتي — يحسّن ترشيحات المستقبل.
+        try:
+            from engine_v2 import learning_v2 as _lrn
+            for t in unresolved:
+                _lrn.record_link_decision(
+                    source=t.source_name,
+                    item_code=target_code,
+                    visual_score=visual_score,
+                    accepted=True,
+                )
+        except Exception:
+            pass
+        self._begin_manual_links(
+            unresolved,
+            target_code,
+            f"جارٍ ربط {len(unresolved)} صورة بالصنف {target_code}…",
+        )
+
+    def _toggle_tap_link_mode(self, enabled: bool) -> None:
+        """وضع «اربط بالنقر» — أبسط طريقة ربط (طلب المستخدم):
+        نقرة على الصورة بلا باركود ثم نقرة على صورة الباركود فترتبط فورًا."""
+        self._tap_link_pending: list[str] = []
+        if enabled:
+            self.tap_link_button.setText("✖ إنهاء الربط بالنقر")
+            self._show_tap_hint(
+                "الخطوة 1 من 2: انقر الصورة التي بلا باركود 🟠 (يمكن أكثر من واحدة بـ Ctrl)")
+            # نلتقط النقرات بعد تحديث التحديد — cellClicked تصل بعد selectionChanged.
+            try:
+                self.results_table.cellClicked.connect(self._tap_link_cell_clicked)
+            except Exception:
+                pass
+        else:
+            self.tap_link_button.setText("👆 اربط بالنقر")
+            self.tap_link_hint.setVisible(False)
+            try:
+                self._tap_hint_timer.stop()
+            except Exception:
+                pass
+            try:
+                self.results_table.cellClicked.disconnect(self._tap_link_cell_clicked)
+            except Exception:
+                pass
+
+    def _show_tap_hint(self, text: str, msec: int = 6000) -> None:
+        """يعرض إرشاد وضع «اربط بالنقر» كتلميح عائم منبثق (مثل السوايب)
+        فوق قائمة الصور — يختفي تلقائيًا ولا يأخذ مساحة من اللوحة."""
+        try:
+            self.tap_link_hint.setText(text)
+            # الموضع: أسفل منتصف جدول الصور — قريب من مكان النقر ولا يحجب الأزرار.
+            anchor = getattr(self, "results_table", None)
+            if anchor is not None and anchor.isVisible():
+                top_left = anchor.mapTo(self, anchor.rect().topLeft())
+                width = min(max(280, anchor.width() - 16), 560)
+                self.tap_link_hint.setFixedWidth(width)
+                self.tap_link_hint.adjustSize()
+                x = top_left.x() + (anchor.width() - width) // 2
+                y = (top_left.y() + anchor.height()
+                     - self.tap_link_hint.height() - 10)
+                self.tap_link_hint.move(max(4, x), max(4, y))
+            else:
+                self.tap_link_hint.adjustSize()
+                self.tap_link_hint.move(
+                    (self.width() - self.tap_link_hint.width()) // 2, 90)
+            self.tap_link_hint.setVisible(True)
+            self.tap_link_hint.raise_()
+            self._tap_hint_timer.start(msec)
+        except Exception:
+            pass
+
+    def _tap_link_cell_clicked(self, row: int, _column: int) -> None:
+        """معالجة نقرة واحدة في وضع «اربط بالنقر».
+
+        المنطق: نقرة على صف غير مرتبط ← يُضاف للانتظار (الخطوة 1).
+        نقرة على صف مرتبط وهناك صور بالانتظار ← ربط فوري (الخطوة 2)."""
+        if not getattr(self, "tap_link_button", None) or not self.tap_link_button.isChecked():
+            return
+        source_cell = self.results_table.item(row, 0)
+        if source_cell is None:
+            return
+        source_name = str(source_cell.data(Qt.UserRole) or "")
+        item = self._result_items_by_name.get(source_name)
+        if item is None:
+            return
+        pending = getattr(self, "_tap_link_pending", [])
+        if not item.item_code:
+            # الخطوة 1: صورة بلا باركود — خذ كل غير المرتبط من التحديد الحالي
+            # (يدعم Ctrl/Shift لعدة صور) مع المنقورة نفسها.
+            names = {source_name}
+            for sel in self._selected_result_items():
+                if not sel.item_code:
+                    names.add(sel.source_name)
+            self._tap_link_pending = list(names)
+            count = len(self._tap_link_pending)
+            count_txt = "صورة واحدة" if count == 1 else f"{count} صور"
+            self._show_tap_hint(
+                f"الخطوة 2 من 2: اخترت {count_txt} ✅ — الآن انقر صورة الباركود 🟢 ليتم الربط فورًا")
+            return
+        # الخطوة 2: صورة مرتبطة (لها صنف) — نفّذ الربط الفوري.
+        if not pending:
+            self._show_tap_hint(
+                "الخطوة 1 من 2: هذه الصورة مرتبطة أصلًا — انقر أولًا الصورة التي بلا باركود 🟠")
+            return
+        targets = [self._result_items_by_name[n] for n in pending
+                   if n in self._result_items_by_name
+                   and not self._result_items_by_name[n].item_code]
+        if not targets:
+            self._tap_link_pending = []
+            return
+        target_code = item.item_code
+        display = item.product_name or target_code
+        self._tap_link_pending = []
+        count_txt = "صورة" if len(targets) == 1 else f"{len(targets)} صور"
+        self._show_tap_hint(
+            f"✅ تم! رُبطت {count_txt} بـ: {display} ({target_code}) — انقر صورة أخرى بلا باركود لمواصلة الربط")
+        # تسجيل القرار للتعلم الذاتي — نفس مسار الزر الذكي.
+        try:
+            from engine_v2 import learning_v2 as _lrn
+            for t in targets:
+                _lrn.record_link_decision(
+                    source=t.source_name, item_code=target_code,
+                    visual_score=0.0, accepted=True)
+        except Exception:
+            pass
+        self._begin_manual_links(
+            targets,
+            target_code,
+            f"جارٍ ربط {len(targets)} صورة بالصنف {target_code} (ربط بالنقر)…",
+        )
+
+    def _nearest_link_context(self) -> tuple[list, "BatchItemResult | None"]:
+        """يرجع (الصور المحددة غير المرتبطة، أقرب صورة مرتبطة أعلاها في القائمة).
+
+        هذه هي حالة المستخدم اليومية: صورة الباركود تُربط آليًا، وبقية جهات
+        المنتج نفسه (الواجهة الأمامية وغيرها) تُلتقط بعدها بلا باركود —
+        فيكون أقرب صف مرتبط أعلاها هو صنفها الصحيح.
+        """
+        if self.current_result is None:
+            return [], None
+        selected = self._selected_result_items()
+        unresolved = [item for item in selected if not item.item_code]
+        if not unresolved:
+            return [], None
+        top_row = min(
+            (self._row_for_source_name(item.source_name) for item in unresolved),
+            default=-1,
+        )
+        if top_row < 0:
+            return unresolved, None
+        for row in range(top_row - 1, -1, -1):
+            source_cell = self.results_table.item(row, 0)
+            if source_cell is None:
+                continue
+            candidate = self._result_items_by_name.get(
+                str(source_cell.data(Qt.UserRole) or ""))
+            if candidate is not None and candidate.item_code:
+                return unresolved, candidate
+        return unresolved, None
 
     def _set_primary_image(self) -> None:
         """يجعل الصورة المحددة صورة الواجهة الرئيسية للصنف (بلا رقم)،
@@ -4797,10 +5381,12 @@ class MainWindow(QMainWindow):
         )
         can_edit_one = self._individual_editable_item() is not None
         self.individual_editor_panel.setEnabled(not busy and can_edit_one)
+        if hasattr(self, "unified_editor"):
+            self.unified_editor.setEnabled(not busy and can_edit_one)
         self.individual_preview_button.setEnabled(not busy and can_edit_one)
         self.individual_apply_button.setEnabled(not busy and can_edit_one)
         self.individual_cancel_button.setEnabled(not busy)
-        self.individual_tools_toggle_button.setEnabled(not busy)
+        self.individual_reset_button.setEnabled(not busy and can_edit_one)
         self.edit_image_button.setEnabled(not busy and can_edit_one)
         self.set_primary_button.setEnabled(
             not busy and selected is not None and bool(selected.item_code)
@@ -4847,10 +5433,12 @@ class MainWindow(QMainWindow):
         )
         can_edit_one = self._individual_editable_item() is not None
         self.individual_editor_panel.setEnabled(not busy and can_edit_one)
+        if hasattr(self, "unified_editor"):
+            self.unified_editor.setEnabled(not busy and can_edit_one)
         self.individual_preview_button.setEnabled(not busy and can_edit_one)
         self.individual_apply_button.setEnabled(not busy and can_edit_one)
         self.individual_cancel_button.setEnabled(not busy)
-        self.individual_tools_toggle_button.setEnabled(not busy)
+        self.individual_reset_button.setEnabled(not busy and can_edit_one)
         self.edit_image_button.setEnabled(not busy and can_edit_one)
         self.set_primary_button.setEnabled(
             not busy and selected is not None and bool(selected.item_code)
@@ -5247,32 +5835,39 @@ def _gui_smoke_test(output_path: Path) -> int:
 
         window.edit_image_button.click()
         app.processEvents()
-        if not window.individual_manual_crop_button.isChecked():
-            window.individual_manual_crop_button.click()
-        editor_viewer = window.individual_editor_preview.viewer
-        editor_viewer.set_crop_box((0.16, 0.10, 0.88, 0.18, 0.82, 0.92, 0.10, 0.84), emit=True)
+        # 2.6: المحرر الموحد — التحقق من تحميل الصورة والأدوات واللوحة المتقدمة
+        ue = window.unified_editor
+        unified_loaded = bool(ue.has_image())
+        # تعديل حقيقي: ميل 15 درجة من منزلق الدوران ثم إعادة التركيب الفوري
+        ue.rotate_slider.setValue(150)
+        ue._recompose()
         app.processEvents()
+        unified_edits_detected = bool(ue.has_edits())
+        # اللوحة المتقدمة تفتح داخل الصفحة نفسها (ليست نافذة منفصلة)
+        ue.advanced_toggle_btn.setChecked(True)
+        app.processEvents()
+        advanced_panel_visible = bool(ue.advanced_panel.isVisible())
         editor_screenshot_path = output_path.with_name(f"{output_path.stem}_editor_crop.png")
         editor_screenshot_saved = window.edit_tab.grab().save(str(editor_screenshot_path), "PNG")
-        editor_crop_box = editor_viewer.crop_box
-        editor_dirty_before_close = bool(window._individual_editor_dirty)
         editor_verified = bool(
             window.preview_tabs.currentWidget() is window.edit_tab
             and window._is_individual_editor_active()
-            and window.individual_editor_panel.isVisible()
-            and window.individual_editor_panel.maximumWidth() == 340
-            and window.individual_editor_preview.minimumWidth() >= 300
-            and not editor_viewer._pixmap.isNull()
-            and editor_crop_box is not None
-            and window.individual_manual_crop_button.isChecked()
-            and editor_dirty_before_close
-            and window.individual_editor_state_label.property("previewPending") is True
+            and ue.isVisible()
+            and unified_loaded
+            and unified_edits_detected
+            and advanced_panel_visible
+            and ue.auto_all_btn.isVisible()
+            and ue.cutout_btn.isVisible()
+            and ue.canvas.isVisible()
+            and not window.individual_editor_panel.isVisible()
+            and not window.individual_editor_preview.isVisible()
+            and not window.individual_preview_button.isVisible()
             and window.individual_cancel_button.isVisible()
-            and window.individual_preview_button.isVisible()
             and window.individual_apply_button.isVisible()
         )
         window._individual_editor_dirty = False
         window._individual_preview_active = False
+        ue.clear()
         window._exit_individual_edit_mode()
         app.processEvents()
         editor_verified = editor_verified and bool(
@@ -5343,8 +5938,9 @@ def _gui_smoke_test(output_path: Path) -> int:
                     f"manual_search_height={window.manual_item_edit.height()}",
                     f"manual_preview_button_height={window.jump_to_previews_button.height()}",
                     f"manual_panel_verified={str(manual_panel_verified).lower()}",
-                    f"editor_crop_box={editor_crop_box}",
-                    f"editor_dirty_before_close={str(editor_dirty_before_close).lower()}",
+                    f"unified_editor_loaded={str(unified_loaded).lower()}",
+                    f"unified_edits_detected={str(unified_edits_detected).lower()}",
+                    f"unified_advanced_panel_visible={str(advanced_panel_visible).lower()}",
                     f"editor_verified={str(editor_verified).lower()}",
                     f"gui_test_passed={str(gui_test_passed).lower()}",
                     "loaded_image_count=82",

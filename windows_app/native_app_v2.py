@@ -156,11 +156,8 @@ def _patch_ui(native_app) -> None:
             naming_btn.setCursor(native_app.Qt.PointingHandCursor)
             naming_btn.clicked.connect(self.v2_open_unit_naming)
 
-            editor_btn = QPushButton("محرر الصور")
-            editor_btn.setObjectName("v2EditorBtn")
-            editor_btn.setMinimumHeight(40)
-            editor_btn.setCursor(native_app.Qt.PointingHandCursor)
-            editor_btn.clicked.connect(lambda: _open_photo_editor(self))
+            # 2.6: زر «محرر الصور» المنفصل حُذف — كل أدواته مدمجة الآن
+            # في تبويب «تعديل الصورة» داخل النافذة الرئيسية (المحرر الموحد)
 
             refine_btn = QPushButton("ضبط الصور القديمة")
             refine_btn.setObjectName("v2RefineBtn")
@@ -193,7 +190,7 @@ def _patch_ui(native_app) -> None:
             tl = QHBoxLayout(toolbar)
             tl.setContentsMargins(4, 2, 4, 2)
             tl.setSpacing(8)
-            all_btns = (refine_btn, editor_btn, nutrition_btn, naming_btn,
+            all_btns = (refine_btn, nutrition_btn, naming_btn,
                         sessions_btn, save_now_btn, rename_btn, help_btn)
             for b in all_btns:
                 b.setMinimumHeight(36)
@@ -318,18 +315,6 @@ def _attach_nutrition_button(window, native_app, v2_ui) -> None:
 
     btn.clicked.connect(open_nutrition)
     target_layout.insertWidget(target_layout.indexOf(anchor) + 1, btn)
-
-
-def _open_photo_editor(window) -> None:
-    """يفتح محرر الصور الاحترافي على الصورة المحددة أو صورة خارجية."""
-    try:
-        from photo_editor_v2 import V2PhotoEditorDialog
-        source = _current_source_path(window)
-        dlg = V2PhotoEditorDialog(source, parent=window)
-        dlg.exec()
-    except Exception as exc:
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(window, "محرر الصور", f"تعذر فتح المحرر: {exc}")
 
 
 def _open_batch_refine(window) -> None:
