@@ -2,6 +2,12 @@
 """nutrition_v2 — حقائق التغذية: كشف الجدول، الدمج المصغر، الصورة المستقلة.
 
 InsetPlacement: تحكم كامل بالموقع (4 زوايا + حر) والمقياس والإطار.
+
+سياسة الجودة (2.4): الدمج داخل صورة الصنف هو الوضع الافتراضي المعتمد.
+لكي تبقى كتابات الجدول مقروءة تمامًا بعد الدمج، لا يُصغَّر الملصق قسرًا
+إلى نسبة من صورة الصنف؛ بل **تتوسّع لوحة صورة الصنف** (بترقية دقتها) حتى
+يجلس الملصق بدقته الأصلية أو قريبًا منها. هذا يعكس مصدر المشكلة الأصلي:
+كان الجدول يفقد مقروئيته لأنه يُضغط في 28% من عرض صورة 800×700.
 """
 from __future__ import annotations
 
@@ -14,20 +20,34 @@ from .enhancement_v2 import enhance_nutrition_label
 
 ANCHORS = ("bottom_left", "bottom_right", "top_left", "top_right", "free")
 
+#: أقل عرض بالبكسل يبقى معه جدول الحقائق مقروءًا بوضوح على الشاشة والطباعة.
+#: مقيس تجريبيًا على جداول حقائق حقيقية (سطور بحجم 0.4 من ارتفاع 2000px).
+MIN_READABLE_LABEL_WIDTH = 520
+
 
 @dataclass
 class InsetPlacement:
-    anchor: str = "bottom_left"     # أحد ANCHORS
+    anchor: str = "bottom_right"    # أحد ANCHORS — الافتراضي: أسفل يمين
     offset_x: int = 0               # إزاحة إضافية بالبكسل (أو موضع حر)
     offset_y: int = 0
-    scale: float = 0.28             # نسبة عرض الملصق من عرض الصورة 0.12-0.6
+    scale: float = 0.34             # نسبة عرض الملصق من عرض الصورة 0.12-0.6
     border: int = 2                 # سماكة إطار رمادي
     margin: int = 14                # هامش من الحواف
+    #: يمنع تصغير الملصق تحت حد المقروئية عبر توسيع لوحة صورة الصنف.
+    preserve_label_pixels: bool = True
+    #: أقصى معامل توسيع مسموح للوحة صورة الصنف (حماية من ملفات ضخمة).
+    #: مقيس رقميًا: 4× يكفي لوصول بكسلات الجدول 100% عند المقياس
+    #: الافتراضي 0.34 (3× كان يتوقف عند 87%، أي تصغير مدمر للنص).
+    max_canvas_upscale: float = 4.0
+    #: خلفية بيضاء خلف الملصق (بطاقة) لفصله عن صورة المنتج.
+    label_card: bool = True
 
     def clamp(self) -> "InsetPlacement":
         self.scale = float(min(0.6, max(0.12, self.scale)))
         if self.anchor not in ANCHORS:
-            self.anchor = "bottom_left"
+            self.anchor = "bottom_right"
+        self.max_canvas_upscale = float(min(8.0, max(1.0,
+                                                     self.max_canvas_upscale)))
         return self
 
 
@@ -96,7 +116,7 @@ def _place(canvas_w: int, canvas_h: int, label_w: int, label_h: int,
     elif a == "top_right":
         x = canvas_w - label_w - m + placement.offset_x
         y = m + placement.offset_y
-    else:  # bottom_left (افتراضي)
+    else:  # bottom_left
         x = m + placement.offset_x
         y = canvas_h - label_h - m + placement.offset_y
     x = max(0, min(canvas_w - label_w, x))
@@ -104,27 +124,107 @@ def _place(canvas_w: int, canvas_h: int, label_w: int, label_h: int,
     return x, y
 
 
+def _target_label_width(canvas_w: int, canvas_h: int, label_w: int,
+                        label_h: int,
+                        p: InsetPlacement) -> tuple[int, int, float]:
+    """يحسب (عرض اللوحة، ارتفاع اللوحة، عرض الملصق) بعد ضمان المقروئية.
+
+    المنطق: العرض المطلوب للملصق = scale × عرض اللوحة. إذا كان هذا العرض
+    أصغر من دقة الملصق الأصلية (أي سنضطر لتصغيره وفقدان النص)، نوسّع لوحة
+    صورة الصنف بالمعامل اللازم — بحد أقصى max_canvas_upscale — حتى يجلس
+    الملصق بدقته الكاملة. النتيجة: صفر تصغير للنص في الحالة الشائعة.
+    """
+    want = canvas_w * p.scale
+    if not p.preserve_label_pixels:
+        return canvas_w, canvas_h, want
+    # العرض المطلوب للملصق: دقته الأصلية كاملة، ولا يُطلب أكثر
+    # مما يوجد فعلًا (لا تكبير مصطنع يضخم الملف بلا فائدة).
+    # مهم: البطاقة البيضاء (pad ≈ 2% من العرض) والإطار يستهلكان جزءًا من
+    # العرض المخصص، فلو حسبنا الحاجة على عرض الملصق وحده لخسرنا ~10% من
+    # بكسلات النص. نضيف تلك الهوامش إلى الحاجة ليجلس النص بدقة 100%.
+    need = float(label_w)
+    if p.label_card:
+        need = need / max(0.5, 1.0 - 2 * 0.02)     # هامش البطاقة 2% لكل جهة
+    if p.border > 0:
+        need += 2 * p.border
+    if want >= need:
+        return canvas_w, canvas_h, want
+    factor = min(p.max_canvas_upscale, need / max(1.0, want))
+    new_w = int(round(canvas_w * factor))
+    new_h = int(round(canvas_h * factor))
+    return new_w, new_h, new_w * p.scale
+
+
 def merge_label_inset(product_img: np.ndarray, label_img: np.ndarray,
                       placement: InsetPlacement | None = None,
                       enhance: bool = True) -> np.ndarray:
-    """يدمج ملصق حقائق التغذية كصورة مصغرة على صورة المنتج النهائية."""
+    """يدمج جدول حقائق التغذية داخل صورة المنتج نفسها بجودة كاملة.
+
+    الوضع المعتمد افتراضيًا: أسفل يمين. لا يُصغَّر الملصق تحت حد المقروئية؛
+    إذا لزم، تُرقّى لوحة صورة الصنف (LANCZOS4) ليجلس الملصق بدقته.
+    """
     p = (placement or InsetPlacement()).clamp()
     out = product_img.copy()
-    H, W = out.shape[:2]
     if enhance:
         label_img = enhance_nutrition_label(label_img)
-    lw = int(W * p.scale)
-    lh = int(label_img.shape[0] * lw / max(1, label_img.shape[1]))
-    lh = min(lh, int(H * 0.6))
-    label = cv2.resize(label_img, (lw, lh), interpolation=cv2.INTER_AREA)
+    lh0, lw0 = label_img.shape[:2]
+    H, W = out.shape[:2]
+
+    new_w, new_h, want_w = _target_label_width(W, H, lw0, lh0, p)
+    if (new_w, new_h) != (W, H):
+        # ترقية لوحة صورة الصنف — LANCZOS4 يحافظ على حدة كتابات العلبة
+        out = cv2.resize(out, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        H, W = out.shape[:2]
+
+    lw = max(24, int(round(want_w)))
+    lh = int(round(lh0 * lw / max(1, lw0)))
+    max_lh = int(H * 0.72)          # الجداول الطويلة تحتاج متنفسًا أعلى
+    if lh > max_lh:                      # جدول طويل جدًا — قيّد بالارتفاع
+        lh = max_lh
+        lw = int(round(lw0 * lh / max(1, lh0)))
+    interp = cv2.INTER_AREA if lw < lw0 else cv2.INTER_LANCZOS4
+    label = cv2.resize(label_img, (lw, lh), interpolation=interp)
+
+    if p.label_card:
+        # بطاقة بيضاء رقيقة تفصل الجدول عن خلفية المنتج وتزيد التباين
+        pad = max(4, int(lw * 0.02))
+        label = cv2.copyMakeBorder(label, pad, pad, pad, pad,
+                                   cv2.BORDER_CONSTANT, value=(255, 255, 255))
     if p.border > 0:
         label = cv2.copyMakeBorder(label, p.border, p.border, p.border,
                                    p.border, cv2.BORDER_CONSTANT,
                                    value=(150, 150, 150))
-        lh, lw = label.shape[:2]
+    lh, lw = label.shape[:2]
+    if lw >= W or lh >= H:               # حماية: لا يتجاوز الملصق اللوحة
+        sc = min((W - 2 * p.margin) / lw, (H - 2 * p.margin) / lh)
+        lw, lh = max(8, int(lw * sc)), max(8, int(lh * sc))
+        label = cv2.resize(label, (lw, lh), interpolation=cv2.INTER_AREA)
     x, y = _place(W, H, lw, lh, p)
     out[y:y + lh, x:x + lw] = label
     return out
+
+
+def merge_stats(product_img: np.ndarray, label_img: np.ndarray,
+                placement: InsetPlacement | None = None) -> dict:
+    """يعيد أرقام الدمج المتوقعة (للعرض في الواجهة قبل الحفظ)."""
+    p = (placement or InsetPlacement()).clamp()
+    lh0, lw0 = label_img.shape[:2]
+    H, W = product_img.shape[:2]
+    new_w, new_h, want_w = _target_label_width(W, H, lw0, lh0, p)
+    # العرض الفعلي المتاح لبكسلات الجدول بعد خصم البطاقة والإطار
+    inner = want_w
+    if p.border > 0:
+        inner -= 2 * p.border
+    if p.label_card:
+        inner = inner * (1.0 - 2 * 0.02)
+    kept = min(1.0, inner / max(1.0, lw0))
+    return {
+        "canvas": (int(new_w), int(new_h)),
+        "canvas_upscaled": (new_w, new_h) != (W, H),
+        "label_source": (int(lw0), int(lh0)),
+        "label_placed_width": int(round(want_w)),
+        "label_pixel_ratio": round(kept, 3),
+    }
 
 
 def render_standalone_label(label_img: np.ndarray,

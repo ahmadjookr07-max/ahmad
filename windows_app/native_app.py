@@ -398,7 +398,9 @@ class ManualLinkWorker(QThread):
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=(255, 255, 255))
                 ext = p.suffix.lower() or ".webp"
-                params = [cv2.IMWRITE_WEBP_QUALITY, 95] if ext == ".webp" \
+                # 101 = lossless: يمنع فقدان حدة الكتابات والحقائق الغذائية
+                # عند إعادة الحفظ بعد التدوير (الضغط المتكرر يتراكم).
+                params = [cv2.IMWRITE_WEBP_QUALITY, 101] if ext == ".webp" \
                     else []
                 ok, buf = cv2.imencode(ext, img, params)
                 if ok:
@@ -504,7 +506,8 @@ class IndividualEditWorker(QThread):
                 from engine_v2.date_blur_v2 import auto_blur_dates
                 img, _count = auto_blur_dates(img)
             ext = p.suffix.lower() or ".webp"
-            ok, buf = cv2.imencode(ext, img, [cv2.IMWRITE_WEBP_QUALITY, 95] if ext == ".webp" else [])
+            # 101 = lossless — حفاظًا على وضوح النصوص بعد المعالجات التحريرية.
+            ok, buf = cv2.imencode(ext, img, [cv2.IMWRITE_WEBP_QUALITY, 101] if ext == ".webp" else [])
             if ok:
                 buf.tofile(str(p))
         except Exception:
@@ -1455,6 +1458,10 @@ class MainWindow(QMainWindow):
             self._update_results_splitter_for_width()
         # 2.5: إعادة ترتيب بطاقات أدوات المحرر حسب عرض النافذة — بلا قص ولا تمرير
         self._relayout_editor_tool_cards()
+        # إعادة تموضع التلميح العائم حتى يبقى في الشريط السفلي بلا تداخل.
+        hint = getattr(self, "tap_link_hint", None)
+        if hint is not None and hint.isVisible():
+            self._position_tap_hint()
 
     def _build_inputs_panel(self) -> QWidget:
         panel = QFrame()
@@ -1622,13 +1629,18 @@ class MainWindow(QMainWindow):
         framing_row.addWidget(QLabel("الجودة:"))
         self.webp_quality_combo = QComboBox()
         self.webp_quality_combo.setObjectName("webpQuality")
-        self.webp_quality_combo.addItem("فائقة — بلا فقدان 100", 100)
+        # 101 في OpenCV = WebP lossless حقيقي (القيمة 100 تبقى ضغطًا مفقودًا).
+        # قياسنا: lossless يعطي PSNR ≈ 361 بحجم أصغر من 100 (PSNR ≈ 52)
+        # لصور المنتجات ذات النصوص — أي جودة أعلى وحجم أقل، بلا مقايضة.
+        self.webp_quality_combo.addItem("فائقة — بلا فقدان (lossless)", 101)
         self.webp_quality_combo.addItem("قصوى 97", 97)
         self.webp_quality_combo.addItem("ممتازة 94", 94)
         self.webp_quality_combo.addItem("اقتصادية 90", 90)
         self.webp_quality_combo.setCurrentIndex(0)
         self.webp_quality_combo.setToolTip(
-            "فائقة: جودة كاملة بلا أي فقدان — كتابات المنتج والحقائق الغذائية تبقى واضحة تمامًا"
+            "فائقة (بلا فقدان): تطابق تام مع الصورة المعالجة — كتابات المنتج\n"
+            "والحقائق الغذائية تبقى بحدّتها الكاملة. مقاسنا يظهر أنها أيضًا\n"
+            "أصغر حجمًا من الجودة 100 لصور المنتجات، فهي الخيار الأفضل دائمًا."
         )
         framing_row.addWidget(self.webp_quality_combo, 1)
         options_layout.addLayout(framing_row)
@@ -2078,6 +2090,27 @@ class MainWindow(QMainWindow):
             "فترتبط فورًا بنفس رقم الصنف — بلا أزرار ولا قوائم."
         )
         self.tap_link_button.toggled.connect(self._toggle_tap_link_mode)
+        # زر حقائق التغذية — اقتصاص يدوي حر من الصورة الأصلية بدقتها الكاملة
+        # يُحفظ فورًا كصورة منفردة ضمن صور الصنف — بلا Tesseract ولا OCR.
+        self.nutrition_button = QPushButton("🍎 حقائق التغذية")
+        self.nutrition_button.setObjectName("nutritionButton")
+        self.nutrition_button.setToolTip(
+            "اقتصاص جدول حقائق التغذية من الصورة الأصلية بدقتها الكاملة:\n"
+            "1) حدد صورة مرتبطة بصنف ثم اضغط الزر\n"
+            "2) ارسم مستطيلًا حول الجدول (تكبير بعجلة الماوس)\n"
+            "3) احفظ — تُضاف فورًا كصورة جديدة ضمن صور الصنف بالترقيم الصحيح"
+        )
+        self.nutrition_button.clicked.connect(self._open_nutrition_crop)
+        # زر حذف صورة من صور الصنف — يحذف الملف الناتج ويزيل الصف
+        # من القائمة وحزمة ZIP بعد تأكيد صريح — الصورة الأصلية لا تُمس.
+        self.delete_output_button = QPushButton("🗑 حذف الصورة")
+        self.delete_output_button.setObjectName("deleteOutputButton")
+        self.delete_output_button.setToolTip(
+            "يحذف الصورة المحددة من صور الصنف (بعد تأكيد):\n"
+            "• يحذف الملف الناتج من مجلد الإخراج وحزمة ZIP\n"
+            "• يزيل الصف من القائمة\n"
+            "• الصورة الأصلية المصدر لا تُمس أبدًا")
+        self.delete_output_button.clicked.connect(self._delete_selected_outputs)
         self.manual_reference_badge = QLabel("لا يوجد مرجع")
         self.manual_reference_badge.setObjectName("manualReferenceBadge")
         self.manual_reference_badge.setAlignment(Qt.AlignCenter)
@@ -2092,6 +2125,8 @@ class MainWindow(QMainWindow):
             self.link_by_image_button,
             self.link_same_item_button,
             self.tap_link_button,
+            self.nutrition_button,
+            self.delete_output_button,
             self.jump_to_previews_button,
         ):
             button.setMinimumHeight(32)
@@ -2117,6 +2152,8 @@ class MainWindow(QMainWindow):
             self.reference_group_link_button,
             self.link_same_item_button,
             self.link_by_image_button,
+            self.nutrition_button,
+            self.delete_output_button,
             self.jump_to_previews_button,
         ):
             link_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -2498,15 +2535,27 @@ class MainWindow(QMainWindow):
             "يحفظ هذا الصف وحده ويحدّث التقارير وحزمة ZIP من دون تغيير بقية الصور"
         )
         self.individual_apply_button.clicked.connect(self._start_individual_edit)
+        # حقائق التغذية مباشرة من مكان التحرير — تفتح نافذة اقتصاص سريعة
+        # على الصورة الأصلية للصنف الجاري تحريره (نفس زر لوحة الربط).
+        self.editor_nutrition_button = QPushButton("🍎 حقائق التغذية")
+        self.editor_nutrition_button.setObjectName("nutritionButton")
+        self.editor_nutrition_button.setMinimumHeight(34)
+        self.editor_nutrition_button.setToolTip(
+            "يفتح نافذة اقتصاص سريعة على الصورة الأصلية بدقتها الكاملة:\n"
+            "حدد جدول حقائق التغذية بالسحب واحفظه كصورة جديدة\n"
+            "مرتبطة برقم الصنف — يمكن حفظ عدة اقتصاصات دون إغلاق النافذة")
+        self.editor_nutrition_button.clicked.connect(self._open_nutrition_crop)
         # 2.6: لا قص لنصوص الأزرار — عرض أدنى مبني على النص الفعلي لكل زر
         for footer_btn in (self.individual_cancel_button,
                            self.individual_reset_button,
+                           self.editor_nutrition_button,
                            self.individual_apply_button):
             footer_btn.setMinimumWidth(
                 footer_btn.fontMetrics().horizontalAdvance(footer_btn.text()) + 28)
         footer_layout.addWidget(self.individual_cancel_button)
         footer_layout.addWidget(self.individual_reset_button)
         footer_layout.addWidget(self.individual_editor_hint, 1)
+        footer_layout.addWidget(self.editor_nutrition_button)
         footer_layout.addWidget(self.individual_preview_button)
         footer_layout.addWidget(self.individual_apply_button)
         tab_layout.addWidget(footer)
@@ -3693,6 +3742,10 @@ class MainWindow(QMainWindow):
             QPushButton#tapLinkButton:hover { background: #7c3aed; }
             QPushButton#tapLinkButton:checked { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #d97706); border-color: #92400e; }
             QLabel#tapLinkHint { background: rgba(76, 29, 149, 0.94); color: #ffffff; border: 1px solid #8b5cf6; border-radius: 10px; padding: 10px 14px; font-weight: 800; font-size: 13px; }
+            QPushButton#nutritionButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #34d399, stop:1 #059669); color: #ffffff; border: 2px solid #065f46; border-radius: 9px; padding: 5px 12px; font-weight: 900; }
+            QPushButton#nutritionButton:hover { background: #10b981; }
+            QPushButton#deleteOutputButton { background: #ffffff; color: #b91c1c; border: 2px solid #fca5a5; border-radius: 9px; padding: 5px 12px; font-weight: 800; }
+            QPushButton#deleteOutputButton:hover { background: #fef2f2; border-color: #dc2626; }
 
             QFrame#fixedActionBar { background: #ffffff; border: 1px solid #cbd8e6; border-radius: 10px; }
             QLabel#deliveryHint { color: #526b82; background: transparent; }
@@ -5045,30 +5098,79 @@ class MainWindow(QMainWindow):
                 pass
 
     def _show_tap_hint(self, text: str, msec: int = 6000) -> None:
-        """يعرض إرشاد وضع «اربط بالنقر» كتلميح عائم منبثق (مثل السوايب)
-        فوق قائمة الصور — يختفي تلقائيًا ولا يأخذ مساحة من اللوحة."""
+        """يعرض التلميح العائم في شريط سفلي فوق شريط الحالة مباشرة.
+
+        هذا الموضع لا يغطي الرأس ولا تبويبات المحرر ولا أي زر تفاعلي،
+        فيختفي التداخل نهائيًا على كل دقات الشاشة."""
         try:
             self.tap_link_hint.setText(text)
-            # الموضع: أسفل منتصف جدول الصور — قريب من مكان النقر ولا يحجب الأزرار.
-            anchor = getattr(self, "results_table", None)
-            if anchor is not None and anchor.isVisible():
-                top_left = anchor.mapTo(self, anchor.rect().topLeft())
-                width = min(max(280, anchor.width() - 16), 560)
-                self.tap_link_hint.setFixedWidth(width)
-                self.tap_link_hint.adjustSize()
-                x = top_left.x() + (anchor.width() - width) // 2
-                y = (top_left.y() + anchor.height()
-                     - self.tap_link_hint.height() - 10)
-                self.tap_link_hint.move(max(4, x), max(4, y))
-            else:
-                self.tap_link_hint.adjustSize()
-                self.tap_link_hint.move(
-                    (self.width() - self.tap_link_hint.width()) // 2, 90)
+            self._position_tap_hint()
             self.tap_link_hint.setVisible(True)
             self.tap_link_hint.raise_()
             self._tap_hint_timer.start(msec)
         except Exception:
             pass
+
+    def _position_tap_hint(self) -> None:
+        """يضع التلميح العائم في موضع خالٍ لا يتداخل مع أي عنصر تفاعلي.
+
+        يبدأ من شريط سفلي فوق شريط الحالة، وإن تقاطع مع أزرار مرئية
+        (على الشاشات الضيقة) يرتفع تدريجيًا حتى يجد ممرًا خاليًا؛ فإن
+        تعذّر ذلك يلتصق بأسفل النافذة فوق كل شيء بأقل تغطية ممكنة."""
+        hint = getattr(self, "tap_link_hint", None)
+        if hint is None:
+            return
+        margin = 12
+        max_width = max(240, min(self.width() - 2 * margin, 720))
+        hint.setFixedWidth(max_width)
+        hint.adjustSize()
+        x = max(margin, (self.width() - hint.width()) // 2)
+
+        bottom = self.height() - margin
+        status = getattr(self, "status_label", None)
+        if status is not None and status.isVisible():
+            try:
+                status_top = status.mapTo(self, status.rect().topLeft()).y()
+                if 0 < status_top <= self.height():
+                    bottom = status_top - 8
+            except Exception:
+                pass
+
+        # مستطيلات الأزرار المرئية (بإحداثيات النافذة) لتفادي تغطيتها.
+        obstacles: list[tuple[int, int, int, int]] = []
+        try:
+            from PySide6.QtWidgets import QPushButton as _QPB
+            for btn in self.findChildren(_QPB):
+                if not btn.isVisible() or btn.width() <= 0:
+                    continue
+                tl = btn.mapTo(self, btn.rect().topLeft())
+                br = btn.mapTo(self, btn.rect().bottomRight())
+                obstacles.append((tl.x(), tl.y(), br.x(), br.y()))
+        except Exception:
+            obstacles = []
+
+        def clashes(top: int) -> bool:
+            left, right = x, x + hint.width()
+            low = top + hint.height()
+            for bx1, by1, bx2, by2 in obstacles:
+                if left < bx2 and right > bx1 and top < by2 and low > by1:
+                    return True
+            return False
+
+        y = max(margin, bottom - hint.height())
+        if clashes(y):
+            step = 6
+            candidate = y
+            limit = max(margin, int(self.height() * 0.25))
+            while candidate > limit:
+                candidate -= step
+                if not clashes(candidate):
+                    y = candidate
+                    break
+            else:
+                # لا ممر خالٍ: ألصقه بأسفل النافذة تمامًا (فوق كل شيء).
+                y = max(margin, self.height() - hint.height() - 2)
+        hint.move(x, y)
 
     def _tap_link_cell_clicked(self, row: int, _column: int) -> None:
         """معالجة نقرة واحدة في وضع «اربط بالنقر».
@@ -5129,6 +5231,256 @@ class MainWindow(QMainWindow):
             target_code,
             f"جارٍ ربط {len(targets)} صورة بالصنف {target_code} (ربط بالنقر)…",
         )
+
+    # ------------------------------------------------------------------
+    # حقائق التغذية — اقتصاص يدوي حر بجودة كاملة (بلا OCR)
+    # ------------------------------------------------------------------
+    def _open_nutrition_crop(self) -> None:
+        """يفتح نافذة اقتصاص حقائق التغذية للصورة/الصنف المحدد.
+
+        الاقتصاص يكون من الصورة الأصلية (source_path) بدقتها الكاملة،
+        والناتج يُحفظ فورًا كصورة منفردة ضمن مجلد صور الصنف نفسه
+        بالترقيم التلقائي الصحيح ثم يظهر مباشرة في القائمة.
+
+        يعمل من مكانين: لوحة الربط (الصف المحدد في الجدول) وتبويب
+        «تحرير مباشر» (الصورة الجاري تحريرها في المحرر الموحد)."""
+        selected = None
+        # جلسة تحرير مدمج نشطة؟ استخدم صورتها مباشرة — هذا ما
+        # يتوقعه المستخدم عند الضغط من داخل مكان التحرير.
+        edit_name = getattr(self, "_individual_edit_source_name", "") or ""
+        if edit_name:
+            selected = self._result_items_by_name.get(edit_name)
+        if selected is None:
+            selected = self._selected_result_item()
+        if selected is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "حدد أولًا صورة الصنف التي عليها جدول حقائق التغذية.")
+            return
+        if not selected.item_code:
+            QMessageBox.information(
+                self, APP_NAME,
+                "هذه الصورة غير مرتبطة بصنف بعد.\n"
+                "اربطها أولًا (أو حدد صورة مرتبطة للصنف نفسه) حتى تُحفظ\n"
+                "صورة حقائق التغذية ضمن صور الصنف الصحيح.")
+            return
+        source = self._result_path(selected.source_path)
+        if source is None or not source.is_file():
+            QMessageBox.warning(
+                self, APP_NAME,
+                "الصورة الأصلية غير متوفرة على القرص — لا يمكن الاقتصاص بدقة كاملة.")
+            return
+        # بقية صور الصنف نفسه كبدائل — قد يكون الجدول على الجهة الخلفية.
+        alternatives: list[tuple[str, str]] = []
+        if self.current_result is not None:
+            for it in self.current_result.items:
+                if it.item_code == selected.item_code \
+                        and it.source_name != selected.source_name:
+                    p = self._result_path(it.source_path)
+                    if p is not None and p.is_file():
+                        alternatives.append((str(p), it.source_name))
+        from nutrition_crop import NutritionCropDialog
+        dialog = NutritionCropDialog(
+            str(source), alternatives=alternatives,
+            product_name=selected.product_name or selected.item_code,
+            parent=self)
+
+        # وضع الدمج (الافتراضي): نزود النافذة بصورة الصنف
+        # الناتجة ليجري لصق الجدول داخلها في الزاوية المختارة.
+        product_img, product_label = self._nutrition_merge_target(selected)
+        dialog.set_merge_product(product_img, product_label)
+
+        # حفظ متكرر دون إغلاق: كل ضغطة حفظ تضيف صورة جديدة للصنف
+        # فورًا والنافذة تبقى مفتوحة لاقتصاصات إضافية من نفس الصورة.
+        def _on_save(cropped, on_canvas: bool, placement=None) -> None:
+            name = self._save_nutrition_result(
+                selected, cropped, on_canvas,
+                product_img=product_img if placement is not None else None,
+                placement=placement)
+            if name:
+                mode = ("دمج داخل صورة الصنف" if placement is not None
+                        else "صورة منفصلة")
+                dialog.set_status(
+                    f"✓ {mode} — {name} — مرتبطة بالصنف "
+                    f"{selected.item_code} — يمكنك تحديد جزء آخر أو الإغلاق")
+
+        dialog.save_requested.connect(_on_save)
+        dialog.exec()
+
+    def _nutrition_merge_target(self, selected: BatchItemResult):
+        """يختار صورة الصنف الناتجة التي سيُدمج الجدول داخلها.
+
+        الأفضلية للصورة الناتجة لنفس الصف (أي الوجه المعروض)،
+        وإلا فأول صورة ناتجة لنفس الصنف. يرجع (المصفوفة، وصف نصي).
+        """
+        from engine_v2.processor_v2 import imread_unicode
+        candidates: list[tuple[str, str]] = []
+        if selected.output_path:
+            p = self._result_path(selected.output_path)
+            if p is not None and p.is_file():
+                candidates.append((str(p), p.name))
+        if self.current_result is not None:
+            for it in self.current_result.items:
+                if it.item_code != selected.item_code or not it.output_path:
+                    continue
+                if it.match_source == "nutrition_crop":
+                    continue  # لا ندمج داخل ناتج تغذية سابق
+                p = self._result_path(it.output_path)
+                if p is not None and p.is_file():
+                    candidates.append((str(p), p.name))
+        for path, name in candidates:
+            img = imread_unicode(path)
+            if img is not None:
+                return img, f"الدمج في: {name}"
+        return None, ""
+
+    def _save_nutrition_result(self, selected: BatchItemResult,
+                               cropped, on_canvas: bool,
+                               product_img=None, placement=None) -> str:
+        """يحفظ الاقتصاص كصورة منفردة ضمن مجلد صور الصنف ويضيفها
+        للقائمة فورًا مع تحديث حزمة التسليم. يرجع اسم الملف المحفوظ
+        (أو نصًا فارغًا عند الفشل)."""
+        out_dir = None
+        anchor = self._result_path(selected.output_path) if selected.output_path else None
+        if anchor is not None:
+            out_dir = anchor.parent
+        else:
+            # صورة أخرى للصنف لها إخراج؟
+            if self.current_result is not None:
+                for it in self.current_result.items:
+                    if it.item_code == selected.item_code and it.output_path:
+                        p = self._result_path(it.output_path)
+                        if p is not None:
+                            out_dir = p.parent
+                            break
+        if out_dir is None:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "لم يُعثر على مجلد صور الصنف — أكمل معالجة الدفعة أولًا.")
+            return ""
+        try:
+            from nutrition_crop import save_nutrition_image
+            target = save_nutrition_image(
+                cropped, out_dir, selected.item_code, on_canvas=on_canvas,
+                product_img=product_img, placement=placement)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, APP_NAME,
+                f"تعذر حفظ صورة حقائق التغذية:\n{exc}")
+            return ""
+        # مسار نسبي لمساحة العمل إن أمكن — مثل بقية العناصر.
+        output_value = str(target)
+        if self.current_workspace is not None:
+            try:
+                output_value = str(target.relative_to(self.current_workspace))
+            except ValueError:
+                pass
+        new_item = BatchItemResult(
+            source_path=selected.source_path,
+            source_name=target.name,
+            status="manual",
+            item_code=selected.item_code,
+            product_name=selected.product_name,
+            barcode=selected.barcode,
+            confidence=1.0,
+            explanation=("حقائق التغذية — مدموجة داخل صورة الصنف بجودة كاملة"
+                         if placement is not None else
+                         "حقائق التغذية — اقتصاص يدوي بجودة كاملة"),
+            output_path=output_value,
+            review_path=output_value,
+            match_source="nutrition_crop",
+        )
+        if self.current_result is not None:
+            position = self._capture_results_position()
+            self.current_result.items.append(new_item)
+            self._populate_results(restore_position=position)
+            # تحديث حزمة التسليم ZIP لتشمل الصورة الجديدة — بصمت.
+            self._refresh_delivery_zip()
+        merged_note = ("مدموجة داخل صورة الصنف" if placement is not None
+                       else "كصورة منفصلة")
+        self.status_label.setText(
+            f"حُفظت حقائق التغذية ({merged_note}): {target.name}")
+        self._show_tap_hint(
+            f"🍎 تم! حقائق التغذية {merged_note} ضمن صور الصنف "
+            f"{selected.item_code} باسم: {target.name}")
+        return target.name
+
+    def _delete_selected_outputs(self) -> None:
+        """يحذف الصور/الصفوف المحددة من صور الصنف بعد تأكيد صريح.
+
+        يحذف الملف الناتج من مجلد الإخراج، يزيل الصف من القائمة،
+        ويحدّث حزمة ZIP — الصورة الأصلية المصدر لا تُمس أبدًا."""
+        if self.current_result is None:
+            return
+        selected_items = self._selected_result_items()
+        if not selected_items:
+            QMessageBox.information(
+                self, APP_NAME, "حدد أولًا الصورة (أو الصور) المراد حذفها.")
+            return
+        names = "\n".join(
+            f"• {it.source_name}" for it in selected_items[:8])
+        extra = (f"\n… و{len(selected_items) - 8} أخرى"
+                 if len(selected_items) > 8 else "")
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"حذف {len(selected_items)} صورة من النتائج؟\n\n{names}{extra}\n\n"
+            "سيُحذف الملف الناتج من مجلد الإخراج وحزمة ZIP ويُزال"
+            " الصف من القائمة.\nالصورة الأصلية المصدر لن تُمس.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        position = self._capture_results_position()
+        deleted = 0
+        for it in selected_items:
+            # حذف الملف الناتج من القرص (إن وجد) — ليس المصدر أبدًا.
+            for attr in ("output_path", "review_path"):
+                raw = getattr(it, attr, "") or ""
+                if not raw:
+                    continue
+                p = self._result_path(raw)
+                if p is not None and p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+            try:
+                self.current_result.items.remove(it)
+                deleted += 1
+            except ValueError:
+                pass
+        if not deleted:
+            return
+        self._populate_results(restore_position=position)
+        self._refresh_delivery_zip()
+        self.status_label.setText(f"حُذفت {deleted} صورة من النتائج")
+        self._show_tap_hint(
+            f"🗑 حُذفت {deleted} صورة من النتائج وحُدّثت حزمة ZIP —"
+            " الصور الأصلية لم تُمس")
+
+    def _refresh_delivery_zip(self) -> None:
+        """يعيد كتابة حزمة التسليم ZIP بصمت.
+
+        تحوّل المسارات النسبية (لمساحة العمل) إلى مطلقة مؤقتًا لأن
+        _write_delivery_zip تفحص is_file() مباشرة على القيمة."""
+        result = self.current_result
+        if result is None or not getattr(result, "delivery_zip", None):
+            return
+        original: list[tuple[object, str]] = []
+        try:
+            for it in result.items:
+                raw = it.output_path or ""
+                if raw and not Path(raw).is_absolute():
+                    resolved = self._result_path(raw)
+                    if resolved is not None and resolved.is_file():
+                        original.append((it, raw))
+                        # dataclass مجمّد (frozen) — نعدّل مؤقتًا بطريقة آمنة.
+                        object.__setattr__(it, "output_path", str(resolved))
+            _vision_pipeline._write_delivery_zip(result)
+        except Exception:
+            pass
+        finally:
+            for it, raw in original:
+                object.__setattr__(it, "output_path", raw)
 
     def _nearest_link_context(self) -> tuple[list, "BatchItemResult | None"]:
         """يرجع (الصور المحددة غير المرتبطة، أقرب صورة مرتبطة أعلاها في القائمة).

@@ -269,7 +269,13 @@ def _patch_ui(native_app) -> None:
 
 
 def _attach_nutrition_button(window, native_app, v2_ui) -> None:
-    """Add a nutrition-facts button into the results-page manual group."""
+    """Add a nutrition-facts button into the results-page manual group.
+
+    ملغى في 2.7: حل محله زر «🍎 حقائق التغذية» الجديد في لوحة الربط
+    (nutrition_crop.py) — اقتصاص يدوي حر بجودة كاملة يُحفظ فورًا
+    ضمن صور الصنف بدل إعدادات تُطبّق عند الحفظ التالي."""
+    if getattr(window, "nutrition_button", None) is not None:
+        return  # الزر الجديد موجود — لا نضيف القديم
     from PySide6.QtWidgets import QPushButton, QDialog, QMessageBox
 
     from PySide6.QtWidgets import QSizePolicy
