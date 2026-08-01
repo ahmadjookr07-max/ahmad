@@ -2338,7 +2338,10 @@ class MainWindow(QMainWindow):
             "حدد صفًا واحدًا للمعاينة أو عدة صفوف لربط صور الصنف نفسه؛ الاسم والباركود ظاهرَان دون أعمدة مزدحمة"
         )
         table_header = self.results_table.horizontalHeader()
-        table_header.setMinimumSectionSize(82)
+        # 2.9.2: الحد الأدنى للقطاع كان 82px صلبة، فعلى 800×600 منع مجموع
+        # الأعمدة من النزول دون 246px ففاض عن نافذة العرض (259px) رغم
+        # كل الانكماش، فظهر شريط تمرير أفقي ممنوع أو قُطِع المحتوى.
+        table_header.setMinimumSectionSize(36)
         table_header.setSectionResizeMode(0, QHeaderView.Fixed)
         table_header.setSectionResizeMode(1, QHeaderView.Fixed)
         table_header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -2374,14 +2377,29 @@ class MainWindow(QMainWindow):
         table = getattr(self, "results_table", None)
         if table is None:
             return
-        icon_h = table.iconSize().height()
         line_h = table.fontMetrics().height()
-        # سطران لـ«رقم الصنف \n الباركود» ومثلهما لاسم ملتف، والأيقونة
-        # قد تكون أعلى منهما على المقاسات الكبيرة.
-        content = max(icon_h, line_h * 2)
-        padding = max(4, line_h // 3)
-        row_h = content + padding
+        # المحتوى الواجب: سطران لـ«رقم الصنف \n الباركود». هذا هو الأساس
+        # الوظيفي الذي لا يجوز التنازل عنه، والمصغرة تابعة لا قائدة.
+        text_need = line_h * 2 + max(4, line_h // 3)
+
+        # ما يتسع له الجدول فعليًا لصفين كاملين؛ فإن ضاق قلّصنا المصغرة
+        # لا النص — فرقم الصنف والباركود أولى من حجم الصورة.
+        header_h = table.horizontalHeader().height() or (line_h + 12)
+        budget = table.height() - header_h - table.frameWidth() * 2 - 2
+        icon_h = table.iconSize().height()
+        if budget > 0:
+            per_row = budget // 2
+            if per_row < icon_h + max(4, line_h // 3):
+                # المصغرة تنكمش لتسمح بصفين، ولا تنزل تحت حد التمييز البصري.
+                shrunk = max(28, per_row - max(4, line_h // 3))
+                if shrunk < icon_h:
+                    icon_h = shrunk
+                    table.setIconSize(QSize(shrunk, shrunk))
+
+        content = max(icon_h + max(4, line_h // 3), text_need)
+        row_h = int(content)
         header = table.verticalHeader()
+        header.setSectionResizeMode(QHeaderView.Fixed)
         header.setMinimumSectionSize(max(24, line_h + 4))
         header.setDefaultSectionSize(row_h)
         for row in range(table.rowCount()):
@@ -2501,7 +2519,33 @@ class MainWindow(QMainWindow):
             deficit -= code_shrink
             code_w -= code_shrink
             if deficit > 0:
+                # لم يكفِ إسقاط نص الحالة ولا تقليم الباركود: الأولوية الأخيرة
+                # للباركود كاملًا (13 رقمًا) لا للمصغرة — وهو مطلب وظيفي لا
+                # تجميلي: رقم مقصوص يعني مراجعة خاطئة. فنقتطع من المصغرة
+                # حتى تصل إلى حد التمييز (28px) قبل أن نمس الاسم.
+                icon_min = 28 + 8
+                extra = min(deficit, max(0, icon_w - icon_min))
+                icon_w -= extra
+                deficit -= extra
+                if extra > 0:
+                    side = max(28, int(icon_w) - 8)
+                    table.setIconSize(QSize(side, side))
+                    # ما اندفع من المصغرة يردّ للباركود حتى يكتمل، بلا تجاوز
+                    # مجموع الأعمدة للمتاح — وإلا ظهر شريط تمرير أفقي ممنوع.
+                    want = fm.horizontalAdvance("6281006123456") + 10
+                    room = available - int(icon_w) - name_min
+                    code_w = max(code_w, min(want, max(code_floor, room)))
+            if deficit > 0:
                 name_min = max(fm.averageCharWidth() * 6, name_min - deficit)
+        # ضمان أخير: مجموع العمودين الثابتين لا يلتهم المتاح كله.
+        min_name = max(int(fm.averageCharWidth() * 6), 40)
+        overflow = (int(icon_w) + int(code_w) + min_name) - available
+        if overflow > 0:
+            trim = min(overflow, max(0, int(icon_w) - (28 + 8)))
+            icon_w -= trim
+            overflow -= trim
+            if overflow > 0:
+                code_w -= min(overflow, max(0, int(code_w) - code_floor))
         table.setColumnWidth(0, int(icon_w))
         table.setColumnWidth(1, int(code_w))
         # 2.9.2 إصلاح 4: عند الشدة يُسقط نص الحالة وتبقى الأيقونة والتلميح.
