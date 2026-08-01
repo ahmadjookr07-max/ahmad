@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui_scale import ScaleEngine
 from smart_catalog_vision.final_images import FinalImageOptions
 from smart_catalog_vision import pipeline as _vision_pipeline
 from smart_catalog_vision.pipeline import (
@@ -571,23 +572,67 @@ class IndividualEditWorker(QThread):
 
 
 class StatCard(QFrame):
+    """بطاقة عدّاد تتحول من رأسية إلى أفقية حسب الارتفاع المتاح.
+
+    2.9: كانت رأسية دائمًا بارتفاع ثابت 46px. على الشاشات القصيرة يقيس
+    المحرك الارتفاع إلى ~32px فلا يتسع لسطرين، فتختفي التسمية
+    («أخطاء/مراجعة/مطابق/إجمالي») ويبقى الرقم بلا معنى — وهو ما رصده
+    المستخدم بصريًا. الحل: ``set_compact()`` يبدّل الاتجاه إلى أفقي
+    (رقم ثم تسمية جوار بعض) فيكفي سطر واحد ويبقى النص كاملًا مقروءًا.
+    """
+
     def __init__(self, title: str, color: str) -> None:
         super().__init__()
         self.setObjectName("statCard")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(2)
+        self._title = title
+        self._color = color
+        self._compact = False
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 8, 10, 8)
+        self._layout.setSpacing(2)
         self.value = QLabel("0")
         self.value.setAlignment(Qt.AlignCenter)
         self.value.setStyleSheet(f"font-size: 20px; font-weight: 800; color: {color};")
-        label = QLabel(title)
-        label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet("color: #64748b; font-size: 11px;")
-        layout.addWidget(self.value)
-        layout.addWidget(label)
+        self.caption = QLabel(title)
+        self.caption.setAlignment(Qt.AlignCenter)
+        self.caption.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._layout.addWidget(self.value)
+        self._layout.addWidget(self.caption)
         # إصلاح قص النص: العرض الأدنى يراعي عرض العنوان الفعلي
         self.setMinimumWidth(
-            max(64, label.fontMetrics().horizontalAdvance(title) + 22))
+            max(64, self.caption.fontMetrics().horizontalAdvance(title) + 22))
+
+    def set_compact(self, compact: bool) -> None:
+        """يبدّل بين الترتيب الرأسي (واسع) والأفقي (قصير) بلا فقدان نص."""
+        if compact == self._compact:
+            return
+        self._compact = compact
+        old_layout = self._layout
+        old_layout.removeWidget(self.value)
+        old_layout.removeWidget(self.caption)
+        QWidget().setLayout(old_layout)  # يفصل التخطيط القديم بأمان
+        if compact:
+            self._layout = QHBoxLayout(self)
+            self._layout.setContentsMargins(8, 2, 8, 2)
+            self._layout.setSpacing(5)
+            self.value.setStyleSheet(
+                f"font-size: 15px; font-weight: 800; color: {self._color};")
+            self.caption.setStyleSheet("color: #64748b; font-size: 10px;")
+        else:
+            self._layout = QVBoxLayout(self)
+            self._layout.setContentsMargins(10, 8, 10, 8)
+            self._layout.setSpacing(2)
+            self.value.setStyleSheet(
+                f"font-size: 20px; font-weight: 800; color: {self._color};")
+            self.caption.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._layout.addWidget(self.value)
+        self._layout.addWidget(self.caption)
+        needed = (self.caption.fontMetrics().horizontalAdvance(self._title)
+                  + self.value.fontMetrics().horizontalAdvance("9999") + 30
+                  if compact else
+                  max(64, self.caption.fontMetrics().horizontalAdvance(self._title) + 22))
+        self.setMinimumWidth(needed)
+        self.updateGeometry()
 
 
 class ZoomableImageView(QScrollArea):
@@ -622,7 +667,12 @@ class ZoomableImageView(QScrollArea):
         self.image_label = QLabel("لا توجد صورة")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setObjectName("previewImage")
-        self.image_label.setMinimumSize(420, 270)
+        # 2.9: الحد الأدنى 420×270 كان يفرض على لوحة الصورة ارتفاعًا أكبر من
+        # المساحة المتاحة على 800×600، فيتراكب نص «لا توجد صورة» مع تلميح
+        # القراءة أسفله. الآن الحد الأدنى صغير ومرن، والصورة تحتوي نفسها،
+        # فيبقى كل نص في مكانه على أي حجم شاشة.
+        self.image_label.setMinimumSize(160, 110)
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.image_label.setMouseTracking(True)
         self.image_label.setFocusPolicy(Qt.StrongFocus)
         self.image_label.installEventFilter(self)
@@ -1018,8 +1068,16 @@ class ZoomableImageView(QScrollArea):
         return canvas
 
     def _resize_label_to_viewport(self) -> None:
+        """يلائم اللوحة الفارغة منفذ العرض بلا فرض 420×270.
+
+        2.9: الأرضية الصلبة 420×270 كانت تجعل اللوحة أطول من المنفذ على
+        الشاشات القصيرة، فيُزاح نص «لا توجد صورة» إلى أسفل ويتراكب بصريًا
+        مع تلميح القراءة. الآن اللوحة تساوي المنفذ تمامًا (بحدّ أدنى صغير
+        للأمان)، فيبقى النص في مركز المساحة المرئية على أي شاشة.
+        """
         viewport = self.viewport().size()
-        self.image_label.resize(max(420, viewport.width() - 2), max(270, viewport.height() - 2))
+        self.image_label.resize(
+            max(120, viewport.width() - 2), max(90, viewport.height() - 2))
 
     @staticmethod
     def _lerp(first: QPointF, second: QPointF, fraction: float) -> QPointF:
@@ -1186,10 +1244,15 @@ class ImagePreviewPane(QFrame):
         layout.setSpacing(6)
 
         header = QHBoxLayout()
+        # 2.9: كان العنوان يُبتر إلى «الصورة الناتجة — افحص ا…» على الشاشات
+        # الضيقة. الآن نحمل نسختين: كاملة للشاشات الواسعة، ومختصرة تُستخدم
+        # تلقائيًا عند شحّ العرض، فلا تظهر نقاط بتر أبدًا والمعنى يبقى واضحًا.
+        self._title_full = title
+        self._title_short = title.split(" — ", 1)[0].strip() or title
         label_title = QLabel(title)
         label_title.setObjectName("previewTitle")
-        # 2.6: العنوان ينكمش أولًا عند ضيق العرض — حتى لا تُقص نصوص أزرار التكبير
         label_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._title_label = label_title
         header.addWidget(label_title, 1)
         zoom_out = QPushButton("−")
         zoom_out.setObjectName("zoomButton")
@@ -1222,11 +1285,40 @@ class ImagePreviewPane(QFrame):
         self.open_button.setEnabled(False)
         layout.addWidget(self.viewer, 1)
 
-        hint = QLabel("للقراءة الدقيقة: اضغط 100% ثم حرّك أشرطة التمرير، أو استخدم Ctrl + عجلة الفأرة.")
+        self._hint_full = ("للقراءة الدقيقة: اضغط 100% ثم حرّك أشرطة التمرير، "
+                           "أو استخدم Ctrl + عجلة الفأرة.")
+        self._hint_short = "للقراءة الدقيقة: اضغط 100% أو Ctrl + عجلة الفأرة."
+        hint = QLabel(self._hint_full)
         hint.setObjectName("previewHint")
         hint.setAlignment(Qt.AlignCenter)
         hint.setWordWrap(True)
+        self._hint_label = hint
         layout.addWidget(hint)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        """يبدّل بين النص الكامل والمختصر حسب العرض الفعلي المتاح.
+
+        2.9: القياس هنا حقيقي (عرض العنصر بعد التخطيط) لا تقديري، فلا
+        يعتمد على قائمة دقات ثابتة ويعمل على أي حجم شاشة.
+        """
+        super().resizeEvent(event)
+        title = getattr(self, "_title_label", None)
+        if title is not None:
+            available = max(0, title.width())
+            metrics = title.fontMetrics()
+            wanted = (self._title_full
+                      if metrics.horizontalAdvance(self._title_full) <= available
+                      else self._title_short)
+            if title.text() != wanted:
+                title.setText(wanted)
+        hint = getattr(self, "_hint_label", None)
+        if hint is not None:
+            metrics = hint.fontMetrics()
+            # سطران كحدّ أقصى للتلميح: إن لم يكفِ العرض نستخدم النسخة القصيرة
+            fits = metrics.horizontalAdvance(self._hint_full) <= max(1, hint.width()) * 2
+            wanted = self._hint_full if fits else self._hint_short
+            if hint.text() != wanted:
+                hint.setText(wanted)
 
     def set_image(self, path: Path | None) -> None:
         self.viewer.set_image(path)
@@ -1235,6 +1327,195 @@ class ImagePreviewPane(QFrame):
     def open_image(self) -> None:
         if self.viewer.path is not None and self.viewer.path.is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.viewer.path)))
+
+
+class _EditorFlowLayout(QLayout):
+    """2.8: تخطيط ملتف لشريط أزرار أفقي (RTL) — بلا تراكب ولا قص.
+
+    يختلف عن ``unified_editor._FlowLayout`` بأمرين جوهريين:
+
+    1. يمنح العناصر المرنة (``QSizePolicy.Ignored`` أفقيًا — مئل التلميح)
+       ما تبقى من عرض السطر بدل عرض التلميح الطبيعي، فلا يدفع الأزرار.
+    2. يحترم ``minimumSizeHint`` للأزرار فلا يُقص نص زر أبدًا.
+    """
+
+    def __init__(self, parent=None, margin: int = 0, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    # —— واجهة QLayout ——
+    def addItem(self, item):  # noqa: N802
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):  # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):  # noqa: N802
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):  # noqa: N802
+        return True
+
+    def heightForWidth(self, width):  # noqa: N802
+        return self._do_layout(QRect(0, 0, max(width, 0), 0), test_only=True)
+
+    def setGeometry(self, rect):  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self):  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(),
+                      margins.top() + margins.bottom())
+        return size
+
+    # —— التخطيط الفعلي ——
+    @staticmethod
+    def _is_flexible(item) -> bool:
+        widget = item.widget()
+        if widget is None:
+            return False
+        return widget.sizePolicy().horizontalPolicy() in (
+            QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+    def _item_widths(self, item) -> tuple[int, int]:
+        """(العرض المطلوب، الحد الأدنى المقدّس) للعنصر."""
+        widget = item.widget()
+        hint_w = item.sizeHint().width()
+        if widget is None:
+            return hint_w, item.minimumSize().width()
+        floor = max(widget.minimumSizeHint().width(), widget.minimumWidth())
+        if self._is_flexible(item):
+            # التلميح يقبل الانكماش حتى الاختفاء الفعلي
+            floor = 0
+        return max(hint_w, floor), floor
+
+    def _do_layout(self, rect, *, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(margins.left(), margins.top(),
+                                  -margins.right(), -margins.bottom())
+        line_width = max(effective.width(), 0)
+        if line_width <= 0:
+            # قبل استقرار الأب لا نرصّ شيئًا — الرصّ بعرض صفري هو ما يولّد التراكب
+            return sum(item.sizeHint().height() for item in self._items[:1]) \
+                + margins.top() + margins.bottom()
+
+        # 1) تقسيم العناصر إلى أسطر وفق العروض المطلوبة
+        lines: list[list] = []
+        current: list = []
+        used = 0
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            want, floor = self._item_widths(item)
+            need = min(want, line_width)
+            extra = need + (self._spacing if current else 0)
+            if current and used + extra > line_width:
+                lines.append(current)
+                current = [item]
+                used = need
+            else:
+                current.append(item)
+                used += extra
+        if current:
+            lines.append(current)
+
+        # 2) توزيع العروض داخل كل سطر وترتيبها من اليمين
+        y = effective.y()
+        for line in lines:
+            gaps = self._spacing * max(len(line) - 1, 0)
+            wants = [min(self._item_widths(it)[0], line_width) for it in line]
+            budget = line_width - gaps
+            total_want = sum(wants)
+            widths = list(wants)
+            if total_want > budget:
+                # الفارق يُخصم من العناصر المرنة فقط — الأزرار لا تُقص
+                deficit = total_want - budget
+                for index, item in enumerate(line):
+                    if deficit <= 0:
+                        break
+                    if not self._is_flexible(item):
+                        continue
+                    give = min(deficit, widths[index])
+                    widths[index] -= give
+                    deficit -= give
+                if deficit > 0:
+                    for index in range(len(line)):
+                        if deficit <= 0:
+                            break
+                        floor = self._item_widths(line[index])[1]
+                        give = min(deficit, max(widths[index] - floor, 0))
+                        widths[index] -= give
+                        deficit -= give
+            elif any(self._is_flexible(it) for it in line):
+                # فائض المساحة يذهب للعناصر المرنة فيمتلأ السطر بلا فراغ أعمى
+                flexible = [i for i, it in enumerate(line) if self._is_flexible(it)]
+                share = (budget - total_want) // len(flexible)
+                for index in flexible:
+                    widths[index] += share
+            line_height = max(item.sizeHint().height() for item in line)
+            cursor = effective.x()
+            if not test_only:
+                for item, width in zip(line, widths):
+                    px = effective.right() - (cursor - effective.x()) - width + 1
+                    item.setGeometry(QRect(QPoint(px, y),
+                                           QSize(max(width, 0), line_height)))
+                    cursor += width + self._spacing
+            y += line_height + self._spacing
+        total = y - self._spacing if lines else effective.y()
+        return total - rect.y() + margins.bottom()
+
+
+class _FooterFlowFrame(QFrame):
+    """2.8: إطار يطابق ارتفاعه مع التخطيط الملتف داخله.
+
+    ``QFrame`` العادي لا ينقل ``heightForWidth`` للتخطيط الأب، فيبقى بارتفاع
+    سطر واحد ويُقص السطر الثاني من الأزرار.
+    """
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        layout_obj = self.layout()
+        if layout_obj is None:
+            return super().heightForWidth(width)
+        return layout_obj.heightForWidth(width)
+
+    def sizeHint(self):  # noqa: N802
+        layout_obj = self.layout()
+        if layout_obj is None:
+            return super().sizeHint()
+        width = self.width() if self.width() > 0 else super().sizeHint().width()
+        return QSize(width, layout_obj.heightForWidth(width))
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.sizeHint()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        layout_obj = self.layout()
+        if layout_obj is None:
+            return
+        needed = layout_obj.heightForWidth(self.width())
+        if needed > 0 and self.minimumHeight() != needed:
+            self.setMinimumHeight(needed)
+            self.updateGeometry()
 
 
 class MainWindow(QMainWindow):
@@ -1264,16 +1545,27 @@ class MainWindow(QMainWindow):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(90)
         self._preview_timer.timeout.connect(self._render_selected_preview)
+        # 2.9: المقياس التلقائي يُحسب **قبل** بناء الواجهة حتى تُولد كل
+        # الأبعاد مقيسة من البداية بدل تصحيحها لاحقًا.
+        self._scaled_metrics: list = []
+        self._base_stylesheet = ""
+        self.ui_scale = ScaleEngine(1.0)
         self._setup_window()
+        self._refresh_ui_scale(initial=True)
         self._build_ui()
         self._apply_style()
+        self._apply_scaled_metrics()
         self._update_controls()
+        # إعادة قياس بعد استقرار التخطيط الفعلي للنافذة
+        QTimer.singleShot(0, self._refresh_ui_scale)
 
     def _setup_window(self) -> None:
         self.setWindowTitle(f"{APP_NAME} — {APP_VERSION}")
         # الحد المرن يناسب شاشة 1366×768 حتى مع تحجيم Windows بنسبة 150%؛
         # وتبقى الأقسام الطويلة داخل مناطق تمرير مستقلة بدلاً من الانضغاط.
-        self.setMinimumSize(960, 600)
+        # 2.9: الحد الأدنى يتبع المقياس التلقائي. حد صلب 960×600 كان يمنع
+        # النافذة من ملاءمة شاشات 800×600 و 1024×600 فريُقص محتواها قسرًا.
+        self.setMinimumSize(720, 460)
         screen = QApplication.primaryScreen()
         if screen is None:
             self.resize(1380, 860)
@@ -1407,8 +1699,17 @@ class MainWindow(QMainWindow):
             self.result_subtitle.setVisible(height_mode != "short")
         for card in getattr(self, "summary_cards", ()):
             # لا نثبت العرض حتى لا تُقص العناوين — ارتفاع ثابت فقط
-            card.setFixedHeight(46 if height_mode == "short" else 52)
-            card.setMaximumWidth(120)
+            # 2.9: عند شحّ الارتفاع تتحول البطاقة لترتيب أفقي فيكفيها سطر
+            # واحد وتبقى التسمية مقروءة، بدل بترها كما كان يحدث.
+            scale = getattr(self, "ui_scale", None)
+            factor = scale.factor if scale is not None else 1.0
+            card.set_compact(height_mode == "short" or factor < 0.85)
+            base = 46 if height_mode == "short" else 52
+            target = scale.px(base) if scale is not None else base
+            card.setFixedHeight(max(card.sizeHint().height(), target))
+            card.setMinimumWidth(card.minimumWidth())
+            # 2.9: السقف يتسع للترتيب الأفقي (رقم + تسمية) بلا بتر
+            card.setMaximumWidth(160 if card._compact else 120)
         if width_mode == "narrow":
             self.results_splitter.setOrientation(Qt.Vertical)
             page_h = max(500, self.results_page.height() - 40)
@@ -1445,8 +1746,152 @@ class MainWindow(QMainWindow):
             hfw = layout_obj.heightForWidth(inner_width)
             natural_height = max(natural_height,
                                  hfw + margins.top() + margins.bottom())
+        # 2.9: لوحة الربط لها الأولوية على الجدول عند شحّ الارتفاع.
+        # السبب: الجدول قابل للتمرير فلا يفقد المستخدم شيئًا بتقصيره، أما
+        # أزرار الربط («حذف الصورة»، «حقائق التغذية») فتخرج خارج المنطقة
+        # المرئية تمامًا فتصبح غير قابلة للوصول — وهذا ما رصده المستخدم.
         self.manual_group.setMinimumHeight(natural_height)
         self.manual_group.setMaximumHeight(natural_height + 12)
+        self._rebalance_list_pane(natural_height)
+
+    def _set_product_name_text(self, full_text: str) -> None:
+        """2.9.1: يعرض اسم الصنف بلا قطع بصري مهما ضاقت الشاشة.
+
+        المشكلة المقيسة على 800×600: النص الافتراضي يحتاج 84px بالالتفاف
+        (أربعة أسطر) ولا يجد إلا 27px، فيُقطع نصف السطر الأخير بصريًا
+        دون أي مؤشر برمجي — وهو ما رّصده المستخدم في اللقطة.
+
+        الحل: نقيس كم سطرًا يتسع فعليًا في الارتفاع المتاح، ونلائم النص
+        لينتهي بـ«…» عند حدّ السطر المتاح بدل أن يُقطع حرفيًا من الأسفل.
+        النص الكامل يبقى دائمًا في التلميح، فلا تُفقد معلومة.
+        """
+        label = getattr(self, "selected_product_label", None)
+        if label is None:
+            return
+        self._product_name_full = full_text
+        label.setToolTip(full_text)
+        width = label.width()
+        if width <= 10:
+            label.setText(full_text)
+            return
+        metrics = label.fontMetrics()
+        line_h = max(1, metrics.lineSpacing())
+        avail_h = label.height()
+        if avail_h <= 0:
+            parent_card = getattr(self, "selected_product_card", None)
+            avail_h = parent_card.height() if parent_card is not None else line_h * 2
+        max_lines = max(1, int(avail_h // line_h))
+        rect = metrics.boundingRect(
+            0, 0, width, 10000, int(Qt.TextWordWrap), full_text)
+        if rect.height() <= avail_h:
+            label.setText(full_text)
+            return
+        # لا يتسع: نُلائم النص لأكبر عدد أسطر متاح بإنهاء لطيف
+        words = full_text.split()
+        fitted = full_text
+        for drop in range(1, len(words)):
+            candidate = " ".join(words[: len(words) - drop]) + "…"
+            probe = metrics.boundingRect(
+                0, 0, width, 10000, int(Qt.TextWordWrap), candidate)
+            if probe.height() <= max_lines * line_h:
+                fitted = candidate
+                break
+        else:
+            fitted = metrics.elidedText(full_text, Qt.ElideRight, width)
+        label.setText(fitted)
+
+    def _rebalance_list_pane(self, manual_height: int) -> None:
+        """2.9: يوزّع ارتفاع لوحة القائمة بين الجدول ولوحة الربط بلا قص.
+
+        المشكلة المقيسة: على 1024×600 المتاح 369px بينما تطلب العناصر 496px
+        (عنوان 21 + مرشحات 36 + جدول 174 + ربط 265)، فيقص Qt آخر ما في
+        العمود — أي سطر أزرار الربط الأخير — فيختفي كليًا.
+
+        الحل: نحسب ما يتبقى للجدول بعد حجز حاجة لوحة الربط كاملة، ونضبط
+        الحد الأدنى للجدول على هذا الباقي (بأرضية مقروءة). إن لم يكفِ
+        المتاح حتى لذلك، نُفعّل تمريرًا رأسيًا حول لوحة الربط فتبقى كل
+        الأزرار قابلة للوصول بالتمرير بدل أن تُقتطع.
+
+        2.9.1 — تصحيح جذري: الحساب السابق قدّر ارتفاع صف العنوان برقم ثابت
+        (24px)، لكن الصف أصبح ملتفًا فارتفاعه الحقيقي أكبر. فمُنحت لوحة الربط
+        284px بينما المتاح فعليًا 268px، فقُصّ صفها الأخير 16px عند حدّ
+        ``resultsListPane``. الآن نقيس **الهندسة الفعلية** بعد التخطيط:
+        موضع لوحة الربط داخل اللوحة الأم هو المرجع، فلا تقدير ولا تخمين،
+        ويصح الحساب على أي مقياس وأي التفاف للنصوص.
+        """
+        pane = getattr(self, "results_upper_widget", None)
+        table = getattr(self, "results_table", None)
+        holder = getattr(self, "manual_scroll", None)
+        if pane is None or table is None:
+            return
+        available = pane.height()
+        if available <= 0:
+            return
+        layout_obj = pane.layout()
+        margins = layout_obj.contentsMargins() if layout_obj else None
+        chrome = (margins.top() + margins.bottom()) if margins else 20
+        spacing = layout_obj.spacing() if layout_obj else 7
+        scale = getattr(self, "ui_scale", None)
+        floor = scale.px(96) if scale is not None else 96
+
+        # القياس الحقيقي: كم بكسل يفصل أعلى لوحة الربط عن أعلى اللوحة الأم؟
+        # هذا يشمل العنوان الملتف والمرشحات والجدول والفواصل — بلا تقدير.
+        offset = -1
+        if holder is not None and holder.isVisible():
+            try:
+                offset = holder.mapTo(pane, QPoint(0, 0)).y()
+            except Exception:
+                offset = -1
+        if offset >= 0:
+            # ما قبل لوحة الربط مقيس فعليًا؛ نطرح منه ارتفاع الجدول الحالي
+            # لنعرف الثابت (العنوان + المرشحات + الفواصل) ثم نعيد التوزيع.
+            static_above = max(0, offset - table.height() - spacing)
+            bottom_reserve = (margins.bottom() if margins else 10) + spacing
+            room = available - static_above - bottom_reserve - manual_height
+        else:
+            header_h = 0
+            for attribute in ("result_search_edit",):
+                widget = getattr(self, attribute, None)
+                if widget is not None:
+                    header_h += widget.sizeHint().height()
+            header_h += 24
+            static_above = chrome + header_h + (spacing * 3)
+            bottom_reserve = 0
+            room = available - static_above - manual_height
+
+        if room >= floor:
+            table.setMinimumHeight(room)
+            self._set_manual_scroll_enabled(False)
+        else:
+            # حتى بأصغر جدول مقبول لا يتسع العمود: نمرّر لوحة الربط ضمن
+            # المساحة المتبقية الحقيقية بعد حجز الجدول الأدنى.
+            table.setMinimumHeight(floor)
+            usable = available - static_above - bottom_reserve - floor
+            self._set_manual_scroll_enabled(True, usable)
+
+    def _set_manual_scroll_enabled(self, enabled: bool, height: int = 0) -> None:
+        """2.9: يفعّل/يطفئ التمرير الرأسي حول لوحة الربط عند الشدة القصوى."""
+        holder = getattr(self, "manual_scroll", None)
+        if holder is None:
+            return
+        if enabled:
+            holder.setWidgetResizable(True)
+            # 2.9.1: الأرضية تتبع المقياس لا رقمًا صلبًا (80px). والأهم: لا
+            # نجبر الحاوية على ارتفاع أكبر مما تملكه اللوحة الأم فعليًا، لأن
+            # فرض حد أدنى غير متوفر هو ما دفع Qt لقطع أزرار الصف الأخير
+            # بدل إظهار شريط تمرير.
+            scale = getattr(self, "ui_scale", None)
+            base_floor = scale.px(80) if scale is not None else 80
+            target = max(int(height), base_floor)
+            holder.setMinimumHeight(0)
+            holder.setMaximumHeight(target)
+            holder.setMinimumHeight(min(target, base_floor))
+            holder.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        else:
+            holder.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            natural = self.manual_group.minimumHeight()
+            holder.setMinimumHeight(natural)
+            holder.setMaximumHeight(natural + 12)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -1456,6 +1901,9 @@ class MainWindow(QMainWindow):
             and self.workflow_pages.currentWidget() is self.results_page
         ):
             self._update_results_splitter_for_width()
+        # 2.9: المقياس التلقائي أولًا — أي حجم جديد (حتى الانتقال لشاشة
+        # أخرى بدقة مختلفة) يُعيد ضبط الخطوط والحشوات والأبعاد معًا.
+        self._refresh_ui_scale()
         # 2.5: إعادة ترتيب بطاقات أدوات المحرر حسب عرض النافذة — بلا قص ولا تمرير
         self._relayout_editor_tool_cards()
         # إعادة تموضع التلميح العائم حتى يبقى في الشريط السفلي بلا تداخل.
@@ -1525,7 +1973,7 @@ class MainWindow(QMainWindow):
         self.image_list.setTextElideMode(Qt.ElideMiddle)
         self.image_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.image_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.image_list.setMinimumHeight(170)
+        self._register_metric(self.image_list, "min_height", 170)
         self.image_list.setMaximumHeight(250)
         self.image_list.files_dropped.connect(self._add_paths)
         images_layout.addWidget(self.image_list, 1)
@@ -1813,7 +2261,7 @@ class MainWindow(QMainWindow):
 
         review_top_bar = QFrame()
         review_top_bar.setObjectName("reviewTopBar")
-        review_top_bar.setMinimumHeight(58)
+        self._register_metric(review_top_bar, "min_height", 58)
         top_layout = QHBoxLayout(review_top_bar)
         top_layout.setContentsMargins(14, 7, 14, 7)
         top_layout.setSpacing(10)
@@ -1841,7 +2289,9 @@ class MainWindow(QMainWindow):
             self.error_card,
         )
         for card in self.summary_cards:
-            card.setFixedSize(78, 46)
+            # 2.9: بلا عرض ثابت — العرض يتبع النص حتى لا تُبتر التسمية،
+            # والارتفاع يُضبط لاحقًا في _update_results_splitter_for_width.
+            card.setFixedHeight(46)
             compact_cards.addWidget(card)
         top_layout.addLayout(compact_cards)
 
@@ -1885,7 +2335,9 @@ class MainWindow(QMainWindow):
         self._adjust_results_table_columns()
         self.results_table.itemSelectionChanged.connect(self._show_selected_preview)
         self.results_table.doubleClicked.connect(self._open_selected_file)
-        self.results_table.setMinimumHeight(250)
+        # 2.9: الجدول أكبر مستهلك للارتفاع — حدّه الأدنى يتبع المقياس حتى
+        # يبقى متسع للوحة الربط تحته على شاشات 600px ارتفاعًا.
+        self._register_metric(self.results_table, "min_height", 250)
         self._continue_build_results_page(layout)
         return panel
 
@@ -1994,6 +2446,7 @@ class MainWindow(QMainWindow):
         link_heading.setSpacing(6)
         link_title = QLabel("الربط المباشر")
         link_title.setObjectName("linkBarTitle")
+        link_title.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.manual_context_label = QLabel("اختر صورة؛ يظهر رقم الصنف والباركود هنا.")
         self.manual_context_label.setObjectName("manualContext")
         self.manual_context_label.setWordWrap(False)
@@ -2004,6 +2457,9 @@ class MainWindow(QMainWindow):
         # 2.6: الشارات لا تُقص — النص السياقي هو ما ينكمش (SizePolicy.Ignored أعلاه)
         self.selected_count_badge.setMinimumWidth(
             self.selected_count_badge.fontMetrics().horizontalAdvance("المحدد: 999") + 18)
+        # 2.9: الشارة تمتد عموديًا مع الصف فتصبح كتلة بارتفاع 100px تأكل
+        # مساحة أزرار الربط — نثبّتها على ارتفاع نصها الطبيعي فقط.
+        self.selected_count_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         link_heading.addWidget(link_title)
         link_heading.addWidget(self.manual_context_label, 1)
         link_heading.addWidget(self.selected_count_badge)
@@ -2114,6 +2570,7 @@ class MainWindow(QMainWindow):
         self.manual_reference_badge = QLabel("لا يوجد مرجع")
         self.manual_reference_badge.setObjectName("manualReferenceBadge")
         self.manual_reference_badge.setAlignment(Qt.AlignCenter)
+        self.manual_reference_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.jump_to_previews_button = QPushButton("عرض الصورة")
         self.jump_to_previews_button.setObjectName("linkToolButton")
         self.jump_to_previews_button.setToolTip("ينقل التركيز مباشرة إلى الصورة الحالية")
@@ -2129,7 +2586,11 @@ class MainWindow(QMainWindow):
             self.delete_output_button,
             self.jump_to_previews_button,
         ):
-            button.setMinimumHeight(32)
+            # 2.9.1: الارتفاع الأدنى يتبع المقياس. رقم 32px صلبًا لتسعة أزرار
+            # موزّعة على أربعة أسطر = 128px لا تتوفر على 800×600، فيُقصّ السطر
+            # الأخير. مع المقياس (0.62) يصبح 20px فيتوفر المتسع كاملًا، ومع ذلك
+            # يبقى الزر أطول من نصّه لأن sizeHint يفرض الحد الفعلي.
+            self._register_metric(button, "min_height", 32)
             # 2.3: لا تُقص نصوص الأزرار أبدًا — الحد الأدنى للعرض هو عرض النص الفعلي
             # إصلاح قص النصوص: العرض الأدنى يُحسب من عرض النص الفعلي + هوامش
             text_w = button.fontMetrics().horizontalAdvance(button.text())
@@ -2190,20 +2651,40 @@ class MainWindow(QMainWindow):
         self.results_upper_widget = QFrame()
         self.results_upper_widget.setObjectName("resultsListPane")
         # 2.6: حد أدنى مرن — مع الوضع العمودي التلقائي للشاشات الضيقة لا تراكب أبدًا
-        self.results_upper_widget.setMinimumWidth(330)
+        self._register_metric(self.results_upper_widget, "min_width", 330)
         list_layout = QVBoxLayout(self.results_upper_widget)
         list_layout.setContentsMargins(10, 10, 10, 10)
         list_layout.setSpacing(7)
-        list_header = QHBoxLayout()
+        # 2.9: صف العنوان يلتف بدل أن يبتر. القياس أثبت أن «عدد الأصناف: 0»
+        # يحتاج 104px ولا يجد إلا 47px على 800×600، فيظهر «عدد…» فقط.
+        # التخطيط الملتف ينزل بأزرار التنقل لسطر ثانٍ فيُقرأ كل نص كاملًا.
+        list_header_host = _FooterFlowFrame()
+        list_header_host.setObjectName("listHeaderHost")
+        list_header_host.setStyleSheet(
+            "QFrame#listHeaderHost { background: transparent; border: none; }")
+        list_header = _EditorFlowLayout(list_header_host, margin=0, spacing=6)
         list_title = QLabel("قائمة الصور والصنف")
         list_title.setObjectName("sectionTitle")
         list_header.addWidget(list_title)
-        list_header.addStretch(1)
-        list_header.addLayout(table_navigation)
-        list_layout.addLayout(list_header)
+        list_header.addWidget(self.table_position_label)
+        list_header.addWidget(self.first_item_button)
+        list_header.addWidget(self.last_item_button)
+        list_layout.addWidget(list_header_host)
         list_layout.addLayout(result_filter_layout)
         list_layout.addWidget(self.results_table, 1)
-        list_layout.addWidget(self.manual_group)
+        # 2.9: حاوية تمرير حول لوحة الربط — تبقى شفافة تمامًا في الحالة
+        # العادية (بلا شريط ولا إطار)، وتُفعّل التمرير فقط عندما يكون
+        # الارتفاع المتاح أقل من حاجة الأزرار، فلا يختفي زر أبدًا.
+        self.manual_scroll = QScrollArea()
+        self.manual_scroll.setObjectName("manualScroll")
+        self.manual_scroll.setWidget(self.manual_group)
+        self.manual_scroll.setWidgetResizable(True)
+        self.manual_scroll.setFrameShape(QFrame.NoFrame)
+        self.manual_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.manual_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.manual_scroll.setStyleSheet(
+            "QScrollArea#manualScroll { background: transparent; border: none; }")
+        list_layout.addWidget(self.manual_scroll)
         self.results_upper_content = self.results_upper_widget
         self._add_depth_effect(self.results_upper_widget, color="#293b5f", blur=24, y_offset=5, alpha=44)
         self._add_depth_effect(self.manual_group, color="#3730a3", blur=18, y_offset=4, alpha=48)
@@ -2217,8 +2698,10 @@ class MainWindow(QMainWindow):
 
         self.selected_product_card = QFrame()
         self.selected_product_card.setObjectName("selectedProductCard")
-        self.selected_product_card.setMinimumHeight(88)
-        self.selected_product_card.setMaximumHeight(116)
+        self._register_metric(self.selected_product_card, "min_height", 88)
+        # 2.9: السقف يتبع المقياس بدل 116px صلبة. السقف الصلب كان يمنع البطاقة
+        # من استيعاب عنوان الصنف الملتف على أربعة أسطر، فيُقص من الأسفل.
+        self._register_metric(self.selected_product_card, "max_height", 124)
         product_card_layout = QVBoxLayout(self.selected_product_card)
         product_card_layout.setContentsMargins(12, 8, 12, 8)
         product_card_layout.setSpacing(5)
@@ -2228,6 +2711,17 @@ class MainWindow(QMainWindow):
         self.selected_product_label.setObjectName("selectedProductName")
         self.selected_product_label.setWordWrap(True)
         self.selected_product_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 2.9: النص الملتف كان يحتاج 84px ويُمنح 66px داخل بطاقة مسقوفة، فيُقطع
+        # نصف سطره الأخير بصريًا («اسم الصنف» مبتور) بلا أي مؤشر برمجي. الحل:
+        # سياسة رأسية تفضّل الحد الأدنى الحقيقي للنص، وارتفاع أدنى يساوي
+        # سطرين من ميتريات الخط الفعلية، فيبقى النص كاملًا على أي مقياس.
+        self.selected_product_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.selected_product_label.setAlignment(
+            Qt.AlignRight | Qt.AlignVCenter)
+        self._product_name_full = self.selected_product_label.text()
+        self.selected_product_label.setToolTip(self._product_name_full)
+        self._product_name_placeholder = self._product_name_full
         self.selected_status_badge = QLabel("بانتظار الاختيار")
         self.selected_status_badge.setObjectName("selectedStatusBadge")
         self.selected_status_badge.setAlignment(Qt.AlignCenter)
@@ -2318,7 +2812,7 @@ class MainWindow(QMainWindow):
         self.source_preview = self._preview_box("الصورة الأصلية — مناسبة لفحص الباركود")
         for pane in (self.output_preview, self.source_preview):
             pane.setObjectName("studioPreviewFrame")
-            pane.viewer.setMinimumHeight(300)
+            self._register_metric(pane.viewer, "min_height", 300)
         self.preview_tabs.addTab(self.output_preview, "النتيجة")
         self.preview_tabs.addTab(self.source_preview, "الأصل")
 
@@ -2344,7 +2838,12 @@ class MainWindow(QMainWindow):
 
         result_actions = QFrame()
         result_actions.setObjectName("fixedActionBar")
-        result_actions.setMaximumHeight(48)
+        # 2.9: لا سقف رقمي إطلاقًا. سقف 48px صلبًا كان يخنق الأزرار على الشاشات
+        # الكبيرة (الخط ينمو فيحتاج الزر 42px ويُمنح 36)، وسقف مقيس خطيًا كان
+        # يخنقها على الصغيرة لأن الخط يتقلص بالجذر لا خطيًا فتختل النسبة.
+        # الحل: الشريط يأخذ ارتفاعه من محتواه الفعلي عبر sizeHint، فيصح على
+        # أي مقياس بلا تخمين رقمي.
+        result_actions.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         # 2.7: مرجع محفوظ — يُخفى الشريط أثناء وضع التحرير لتوفير مساحة عمودية
         self.results_action_bar = result_actions
         actions = QHBoxLayout(result_actions)
@@ -2357,7 +2856,10 @@ class MainWindow(QMainWindow):
         delivery_hint.setObjectName("deliveryHint")
         self.save_zip_button = QPushButton("حفظ حزمة النتائج ZIP")
         self.save_zip_button.setObjectName("saveDeliveryButton")
-        self.save_zip_button.setMinimumHeight(36)
+        # 2.9: لا حد أدنى رقمي. الزر يحدد ارتفاعه من نصه وخطه الفعليين، فلا
+        # يُقص نصه على شاشة كبيرة ولا يفرض ارتفاعًا زائدًا على شاشة صغيرة.
+        for delivery_btn in (self.save_zip_button, self.open_folder_button):
+            delivery_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.save_zip_button.clicked.connect(self._save_delivery_zip)
         actions.addWidget(self.open_folder_button)
         actions.addWidget(delivery_hint, 1)
@@ -2459,7 +2961,7 @@ class MainWindow(QMainWindow):
         )
         self.individual_editor_preview.setObjectName("editorPreviewFrame")
         self.individual_editor_preview.setMinimumWidth(300)
-        self.individual_editor_preview.viewer.setMinimumHeight(260)
+        self._register_metric(self.individual_editor_preview.viewer, "min_height", 260)
         self.individual_editor_preview.viewer.crop_changed.connect(self._on_individual_crop_changed)
         self.individual_editor_preview.setVisible(False)
         tab_layout.addWidget(self.individual_editor_preview)
@@ -2468,12 +2970,14 @@ class MainWindow(QMainWindow):
         self.individual_editor_panel.setVisible(False)
         tab_layout.addWidget(self.individual_editor_panel)
 
-        footer = QFrame()
+        # 2.8: التذييل يلتف بدل أن يُقص — سقف 48px القديم مع QHBoxLayout لا يلتف
+        # كان يدفع الأزرار فوق بعضها على 800×600 و 1024×600 و 1024×700.
+        footer = _FooterFlowFrame()
         footer.setObjectName("editorFooter")
-        footer.setMaximumHeight(48)
-        footer_layout = QHBoxLayout(footer)
+        footer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        self.editor_footer = footer
+        footer_layout = _EditorFlowLayout(footer, margin=0, spacing=8)
         footer_layout.setContentsMargins(8, 5, 8, 5)
-        footer_layout.setSpacing(8)
         self.individual_cancel_button = QPushButton("إنهاء التحرير")
         self.individual_cancel_button.setObjectName("secondaryButton")
         self.individual_cancel_button.setMinimumHeight(34)
@@ -2552,12 +3056,17 @@ class MainWindow(QMainWindow):
                            self.individual_apply_button):
             footer_btn.setMinimumWidth(
                 footer_btn.fontMetrics().horizontalAdvance(footer_btn.text()) + 28)
-        footer_layout.addWidget(self.individual_cancel_button)
-        footer_layout.addWidget(self.individual_reset_button)
-        footer_layout.addWidget(self.individual_editor_hint, 1)
-        footer_layout.addWidget(self.editor_nutrition_button)
-        footer_layout.addWidget(self.individual_preview_button)
-        footer_layout.addWidget(self.individual_apply_button)
+        # 2.8: الترتيب حسب الأهمية — أزرار القرار أولًا فتبقى في السطر الأول
+        # عند الالتفاف، والتلميح النصي أخيرًا لأنه العنصر القابل للانكماش.
+        for footer_widget in (
+            self.individual_apply_button,
+            self.editor_nutrition_button,
+            self.individual_reset_button,
+            self.individual_cancel_button,
+            self.individual_preview_button,
+            self.individual_editor_hint,
+        ):
+            footer_layout.addWidget(footer_widget)
         tab_layout.addWidget(footer)
         return tab
 
@@ -3513,8 +4022,11 @@ class MainWindow(QMainWindow):
             self._update_controls()
 
     def _apply_style(self) -> None:
-        QApplication.setFont(QFont("Segoe UI", 10))
-        self.setStyleSheet(
+        # 2.9: خط التطبيق نفسه يخضع للمقياس التلقائي — لا رقم ثابت
+        scale = getattr(self, "ui_scale", None)
+        base_pt = 10 if scale is None else max(7, scale.font(10))
+        QApplication.setFont(QFont("Segoe UI", base_pt))
+        self._set_scaled_stylesheet(
             """
             QMainWindow, QWidget { background: #f4f7fb; color: #172033; }
             QFrame#header { background: #0f2747; border-radius: 12px; }
@@ -3705,7 +4217,7 @@ class MainWindow(QMainWindow):
             QLabel#selectedFileName { color: #4b5f74; font-weight: 700; }
             QPushButton#editImageButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8b5cf6, stop:1 #5b21b6); color: #ffffff; border: 1px solid #4c1d95; padding: 8px 13px; font-weight: 900; }
             QPushButton#editImageButton:hover { background: #6d28d9; }
-            QPushButton#openImageButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fb923c, stop:1 #ea580c); color: white; border: 1px solid #c2410c; padding: 8px 11px; }
+            QPushButton#openImageButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fb923c, stop:1 #ea580c); color: white; border: 1px solid #c2410c; padding: 8px 6px; }
             QPushButton#openImageButton:hover { background: #f97316; }
             QPushButton#focusLinkButton { background: #e0ecff; color: #1d4f91; border: 1px solid #8cb1e8; padding: 8px 11px; }
             QPushButton#focusLinkButton:hover { background: #cfe1ff; }
@@ -3753,6 +4265,96 @@ class MainWindow(QMainWindow):
             QPushButton#saveDeliveryButton:hover { background: #0d9488; }
             """
         )
+
+    def _set_scaled_stylesheet(self, sheet: str) -> None:
+        """2.9: يحفظ الورقة الأصلية ثم يطبّقها مقيسة بالمعامل الحالي.
+
+        حفظ الأصل ضروري: لو قسنا الورقة المقيسة مرة أخرى عند تغيير الحجم
+        لتراكم التصغير حتى تختفي الواجهة — فالمقياس يُطبق دائمًا على الأصل.
+        """
+        self._base_stylesheet = sheet
+        scale = getattr(self, "ui_scale", None)
+        self.setStyleSheet(sheet if scale is None else scale.scale_stylesheet(sheet))
+
+    def _refresh_ui_scale(self, *, initial: bool = False) -> bool:
+        """2.9: القلب الذكي — يقيس المساحة الفعلية ويعيد ضبط كل شيء.
+
+        يُنادى عند الإقلاع، وعند كل تغيير حجم، وعند نقل النافذة لشاشة أخرى.
+        يرجع True إن تغير المعامل فعليًا وأُعيد التنسيق.
+        """
+        width = self.width()
+        height = self.height()
+        if width <= 0 or height <= 0:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                geo = screen.availableGeometry()
+                width, height = geo.width(), geo.height()
+        dpi_ratio = 1.0
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            try:
+                dpi_ratio = max(1.0, float(screen.logicalDotsPerInch()) / 96.0)
+            except Exception:
+                dpi_ratio = 1.0
+        engine = ScaleEngine.for_size(width, height, dpi_ratio)
+        current = getattr(self, "ui_scale", None)
+        if current is not None and not initial and not engine.differs_from(current.factor):
+            return False
+        self.ui_scale = engine
+        if initial:
+            return True
+        # إعادة تطبيق الأنماط من الورقة الأصلية بالمعامل الجديد
+        base_sheet = getattr(self, "_base_stylesheet", None)
+        if base_sheet:
+            QApplication.setFont(QFont("Segoe UI", max(7, engine.font(10))))
+            self.setStyleSheet(engine.scale_stylesheet(base_sheet))
+        self._apply_scaled_metrics()
+        return True
+
+    def _apply_scaled_metrics(self) -> None:
+        """2.9: يمرّر الأبعاد المبرمجة (غير CSS) عبر المقياس.
+
+        كل عنصر يُسجّل قيمته المرجعية مرة واحدة في ``_scaled_metrics``، فيُعاد
+        حسابها من المرجع دائمًا لا من القيمة المقيسة — فلا يتراكم التصغير.
+        """
+        scale = getattr(self, "ui_scale", None)
+        if scale is None:
+            return
+        for widget, kind, reference in getattr(self, "_scaled_metrics", []):
+            try:
+                if kind == "min_height":
+                    widget.setMinimumHeight(scale.px(reference))
+                elif kind == "max_height":
+                    widget.setMaximumHeight(scale.px(reference))
+                elif kind == "min_width":
+                    widget.setMinimumWidth(scale.px(reference))
+                elif kind == "fixed_height":
+                    widget.setFixedHeight(scale.px(reference))
+                elif kind == "icon":
+                    widget.setIconSize(QSize(scale.px(reference), scale.px(reference)))
+            except Exception:
+                continue
+        # الحد الأدنى للنافذة نفسها يتبع المقياس حتى لا يمنع التصغير
+        self.setMinimumSize(max(680, scale.px(960)), max(430, scale.px(600)))
+
+    def _register_metric(self, widget, kind: str, reference: int):
+        """2.9: يسجّل بُعدًا مرجعيًا ويطبّقه فورًا مقيسًا."""
+        if not hasattr(self, "_scaled_metrics"):
+            self._scaled_metrics = []
+        self._scaled_metrics.append((widget, kind, reference))
+        scale = getattr(self, "ui_scale", None)
+        value = reference if scale is None else scale.px(reference)
+        if kind == "min_height":
+            widget.setMinimumHeight(value)
+        elif kind == "max_height":
+            widget.setMaximumHeight(value)
+        elif kind == "min_width":
+            widget.setMinimumWidth(value)
+        elif kind == "fixed_height":
+            widget.setFixedHeight(value)
+        elif kind == "icon":
+            widget.setIconSize(QSize(value, value))
+        return widget
 
     def _select_catalog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -4724,7 +5326,9 @@ class MainWindow(QMainWindow):
         if item is None:
             self._set_preview(self.source_preview, None)
             self._set_preview(self.output_preview, None)
-            self.selected_product_label.setText("اختر صورة من القائمة لعرض اسم الصنف كاملًا")
+            self._set_product_name_text(
+                getattr(self, "_product_name_placeholder",
+                        "اختر صورة من القائمة لعرض اسم الصنف كاملًا"))
             self.selected_status_badge.setText("بانتظار الاختيار")
             self.selected_status_badge.setStyleSheet("")
             self.selected_item_code_label.setText("—")
@@ -4743,8 +5347,7 @@ class MainWindow(QMainWindow):
         item_code = item.item_code or "غير مرتبط"
         status_text = STATUS_TEXT.get(item.status, item.status)
         product_name = item.product_name or item.source_name
-        self.selected_product_label.setText(product_name)
-        self.selected_product_label.setToolTip(product_name)
+        self._set_product_name_text(product_name)
         self.selected_status_badge.setText(status_text)
         status_rgb = STATUS_COLORS.get(item.status, (71, 85, 105))
         status_color = QColor(*status_rgb).name()

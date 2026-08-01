@@ -95,10 +95,20 @@ class _FlowLayout(QLayout):
         line_height = 0
         rtl = True  # التطبيق عربي — نرص من اليمين لليسار
         positions: list = []
+        # 2.8: العرض المرجعي للالتفاف يجب أن يكون موجبًا دائمًا. عند أول تخطيط
+        # (قبل استقرار الأب) يأتي rect بعرض صفري أو سالب فيصبح ``effective.right()``
+        # أصغر من ``effective.x()``، فيفشل شرط الالتفاف ويُرصّ كل الأزرار في نقطة
+        # واحدة فتتراكب فوق بعضها — وهو سبب تراكب «حقائق التغذية» مع «حفظ واعتماد».
+        line_limit = max(effective.right(), effective.x())
         for item in self._items:
-            w = item.sizeHint().width()
-            h = item.sizeHint().height()
-            if x + w > effective.right() + 1 and line_height > 0:
+            hint = item.sizeHint()
+            w = hint.width()
+            h = hint.height()
+            # عنصر أوسع من السطر كله يُقلَّص للعرض المتاح بدل أن يتجاوز الحافة
+            max_w = line_limit - effective.x() + 1
+            if max_w > 0 and w > max_w:
+                w = max_w
+            if x > effective.x() and x + w > line_limit + 1:
                 x = effective.x()
                 y += line_height + self._spacing
                 line_height = 0
