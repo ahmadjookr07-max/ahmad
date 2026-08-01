@@ -1747,11 +1747,14 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "manual_group"):
             return
         layout_obj = self.manual_group.layout()
+        margins = self.manual_group.contentsMargins()
+        inner_width = max(self.manual_group.width()
+                          - margins.left() - margins.right(), 200)
+        # ملاحزة 2.9.3: جُرّب الاعتماد على heightForWidth وحده فارتفع
+        # الفشل المقيس من 9 إلى 18: الرقم يأتي أقل من الحاجة الحقيقية
+        # فيختفي شريط التمرير مع بقاء العجز. فالـmax() مع sizeHint لازم.
         natural_height = self.manual_group.sizeHint().height()
         if layout_obj is not None and layout_obj.hasHeightForWidth():
-            margins = self.manual_group.contentsMargins()
-            inner_width = max(self.manual_group.width()
-                              - margins.left() - margins.right(), 260)
             hfw = layout_obj.heightForWidth(inner_width)
             natural_height = max(natural_height,
                                  hfw + margins.top() + margins.bottom())
@@ -2662,10 +2665,13 @@ class MainWindow(QMainWindow):
             "يبحث أولًا عن رقم الصنف والباركود، ويمكن إدخال الاسم لتحديد الصنف الصحيح"
         )
         self.manual_item_edit.returnPressed.connect(self._start_manual_link)
-        self.manual_item_edit.setMinimumHeight(36)
+        # 2.9.3 إصلاح 6: الارتفاع الأدنى يتبع المقياس. القياس أثبت أن
+        # 36px صلبة لم تنكمش أبدًا (من 800×600 إلى 1920×1080)، فبينما تنزل
+        # الأزرار التسعة إلى 20–29px يبقى هذا الصف يأكل 36px كاملة.
+        self._register_metric(self.manual_item_edit, "min_height", 36)
         self.manual_link_button = QPushButton("ربط الآن")
         self.manual_link_button.setObjectName("manualLinkPrimaryButton")
-        self.manual_link_button.setMinimumHeight(36)
+        self._register_metric(self.manual_link_button, "min_height", 36)
         self.manual_link_button.clicked.connect(self._start_manual_link)
         manual_controls.addWidget(self.manual_item_edit, 1)
         manual_controls.addWidget(self.manual_link_button)
@@ -2675,7 +2681,12 @@ class MainWindow(QMainWindow):
         # أقرب صورة مرتبطة أعلاها — ضغطة واحدة تربط الكل بلا تأكيد.
         self.smart_link_button = QPushButton("حدد صورة بلا باركود للربط السريع")
         self.smart_link_button.setObjectName("smartLinkButton")
-        self.smart_link_button.setMinimumHeight(44)
+        # 2.9.3 إصلاح 6: 44px صلبة ← المقياس. ومع سياسة Fixed رأسيًا حتى
+        # لا يتمدد الزر المخفي إلى 480px (رقم قيس فعلًا) فينفجر ارتفاع
+        # اللوحة لحطة إظهاره عند تحديد صورة بلا باركود.
+        self._register_metric(self.smart_link_button, "min_height", 44)
+        self.smart_link_button.setSizePolicy(QSizePolicy.Preferred,
+                                            QSizePolicy.Fixed)
         self.smart_link_button.setVisible(False)
         self.smart_link_button.setToolTip(
             "يربط الصور المحددة (بلا باركود) بنفس رقم صنف أقرب صورة مرتبطة\n"
