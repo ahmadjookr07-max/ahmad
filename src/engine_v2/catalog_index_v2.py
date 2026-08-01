@@ -312,6 +312,37 @@ class CatalogIndex:
                 units.append(u)
         return units
 
+    def primary_unit_for_code(self, code: str) -> str:
+        """وحدة الصورة الأساسية للصنف بإملائها الحرفي كما في الإكسل.
+
+        المشكلة: 40% من الأصناف لها أكثر من وحدة في الإكسل (حبه/باكت/
+        كرتون) وترتيب الصفوف عشوائي، فأخذ `units_for_code()[0]` يعطي
+        `باكت` لصنف صورته صورة حبة.
+
+        القاعدة المعتمدة (قرار المالك: الإكسل مرجع كل شيء): الوحدة
+        التي **عبوتها = 1** هي وحدة الصورة، لأن الصورة تمثل القطعة
+        الواحدة لا الكرتون. قيست على 484 صنفًا من مجلد منجز حقيقي
+        فطابقت 483 (99.8%)، والحالة الشاذة كانت خطأً في اسم الملف
+        لا في القاعدة.
+
+        الإملاء يُحفظ حرفيًا (حبه/حبة/شدة/شده/ربطة) ولا يُطبّع.
+        """
+        rows = self.rows_for_code(code)
+        if not rows:
+            return ""
+        for r in rows:
+            unit = (r.get("unit") or "").strip().strip("_").strip()
+            size = (r.get("size") or "").strip()
+            if not unit or not size:
+                continue
+            try:
+                if abs(float(size.replace(",", ".")) - 1.0) < 1e-9:
+                    return unit
+            except ValueError:
+                continue
+        units = self.units_for_code(code)
+        return units[0] if units else ""
+
     def search_name(self, query: str, limit: int = 30) -> list[dict]:
         qn = normalize_text(query)
         if not qn:

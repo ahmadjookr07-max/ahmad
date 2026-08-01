@@ -1558,6 +1558,12 @@ class _FooterFlowFrame(QFrame):
 
 
 class MainWindow(QMainWindow):
+    # 2.9.4: يُطلق من خيط تحميل الإكسل الخلفي ليُعاد تصحيح
+    # المجلد المنجز على خيط الواجهة. لا يصلح `QTimer.singleShot`
+    # هنا لأن الخيط الخلفي بلا حلقة أحداث فيُهمل النداء صامتًا
+    # (مقيس: الدالة لم تُستدعَ أبدًا فبقيت الوحدة بلا تصحيح).
+    legacy_recheck_requested = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.catalog_path: Path | None = None
@@ -1605,6 +1611,10 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._apply_scaled_metrics()
         self._update_controls()
+        # الإشارة تعبر من خيط تحميل الإكسل إلى خيط الواجهة
+        # (Qt.AutoConnection يجعلها مطابورة تلقائيًا عبر الخيوط).
+        self.legacy_recheck_requested.connect(
+            self._refresh_legacy_after_catalog)
         # إعادة قياس بعد استقرار التخطيط الفعلي للنافذة
         QTimer.singleShot(0, self._refresh_ui_scale)
 
@@ -2031,16 +2041,22 @@ class MainWindow(QMainWindow):
             "والوحدة تُقرأ حرفيًا من الإكسل دون تغيير.")
         self.naming_policy_button.clicked.connect(self._open_naming_policy)
         self._register_metric(self.naming_policy_button, "min_height", 34)
-        self.bulk_rename_button = QPushButton("↺ إعادة تسمية مجلد سابق")
-        self.bulk_rename_button.setObjectName("secondaryButton")
-        self.bulk_rename_button.setToolTip(
-            "أداة مستقلة تعمل على أي مجلد نتائج سابق:\n"
-            "تصلح الأسماء المشوّهة وتُصدّر بتنسيق أي منصة،\n"
-            "مع معاينة كاملة قبل التنفيذ.")
-        self.bulk_rename_button.clicked.connect(self._open_bulk_rename)
-        self._register_metric(self.bulk_rename_button, "min_height", 34)
+        # 2.9.4 (قرار المالك): أُلغي منفذ التعديل القديم (نافذة
+        # BulkRenameDialog المستقلة) وحلّ محلّه فتح المجلد المنجز
+        # **داخل نفس استوديو المراجعة والربط**: «كل شيء يعمل في
+        # واجهة واحدة». تبديل لا إضافة حتى لا ينكسر توازن الأزرار
+        # المُعاير على 800×600.
+        self.open_legacy_button = QPushButton("فتح مجلد منجز")
+        self.open_legacy_button.setObjectName("secondaryButton")
+        self.open_legacy_button.setToolTip(
+            "افتح مجلد صور منجزة سابقًا في نفس استوديو المراجعة:\n"
+            "تُجمّع الصور برقم الصنف، وتُصحّح التسميات من الإكسل فورًا\n"
+            "(الواجهة بلا رقم، والبقية -1 ،-2 ،-3)، ثم تضغط ★ على أي صورة\n"
+            "لتجعلها صورة الواجهة. حمّل الإكسل أولاً لتصحيح الوحدات.")
+        self.open_legacy_button.clicked.connect(self._open_legacy_folder)
+        self._register_metric(self.open_legacy_button, "min_height", 34)
         naming_row.addWidget(self.naming_policy_button)
-        naming_row.addWidget(self.bulk_rename_button)
+        naming_row.addWidget(self.open_legacy_button)
         naming_row.addStretch(1)
         catalog_layout.addLayout(naming_row)
         layout.addWidget(catalog_group)
@@ -4825,8 +4841,162 @@ class MainWindow(QMainWindow):
             print(f"[naming] reload after save failed: {exc}",
                   file=sys.stderr)
 
+    # ------------------------------------------------ المجلدات المنجزة
+    def _open_legacy_folder(self) -> None:
+        """يفتح مجلد صور منجزة سابقًا داخل نفس استوديو المراجعة.
+
+        قرار المالك (2.9.4): «حتى في ملف الصور الجاهزة سابقًا تتعدل
+        هنا لأنها جاهزة أساسًا ومربوطة بالمسمّى» و«كل شيء يعمل في
+        واجهة واحدة»، و«الإكسل مرجع كل شيء»، و«بمجرد إضافة الملف
+        للصور والتسميات أن تتعدل مباشرة» — فلا زر تطبيق ولا نافذة
+        منفصلة: التصحيح يجري فور الفتح، ثم تبقى ★ لاختيار الواجهة.
+        """
+        start_dir = str(Path.home())
+        ws = getattr(self, "current_workspace", None)
+        if ws is not None:
+            try:
+                if Path(ws).is_dir():
+                    start_dir = str(ws)
+            except Exception:
+                pass
+        folder = QFileDialog.getExistingDirectory(
+            self, "اختر مجلد الصور المنجزة سابقًا", start_dir)
+        if not folder:
+            return
+        self._load_legacy_folder(Path(folder), announce=True)
+
+    def _load_legacy_folder(self, folder: Path, announce: bool = False,
+                            keep_position: bool = False) -> None:
+        """يمسح المجلد، يصحّح التسميات من الإكسل فورًا، ويعرضها
+        في جدول الاستوديو نفسه."""
+        try:
+            from engine_v2.legacy_folder_v2 import (apply_legacy_plan,
+                                                    plan_legacy_renames,
+                                                    scan_legacy_folder)
+        except Exception as exc:
+            QMessageBox.warning(self, APP_NAME,
+                                f"تعذّر تحميل محرك المجلدات المنجزة.\n{exc}")
+            return
+
+        groups, unparsed = scan_legacy_folder(folder)
+        if not groups:
+            QMessageBox.information(
+                self, APP_NAME,
+                "لم أجد صورًا بأسماء تبدأ برقم الصنف في هذا المجلد.\n"
+                "الأسماء المدعومة: رقم_الوحدة أو رقم_الوحدة-1 أو رقم_الوحدة_2.")
+            return
+
+        index = getattr(self, "v2_catalog_index", None)
+        plan = plan_legacy_renames(groups, index, unparsed)
+        applied = {"renames": {}, "errors": [], "items_done": 0}
+        if plan.changed_rows:
+            applied = apply_legacy_plan(plan)
+
+        self._legacy_folder = folder
+        self.current_workspace = folder
+        self.current_result = self._legacy_result(plan, folder)
+        position = self._capture_results_position() if keep_position else None
+        self._populate_results(restore_position=position)
+        self._show_results_page()
+        self._update_controls()
+
+        st = plan.stats
+        parts = [f"المجلد المنجز: {st['items']} صنفًا و{st['images']} صورة"]
+        if applied["items_done"]:
+            parts.append(f"صُحّحت تسمية {len(applied['renames'])} ملف")
+        elif index is None:
+            parts.append("حمّل ملف الإكسل لتصحيح الوحدات تلقائيًا")
+        else:
+            parts.append("التسميات مطابقة للقاعدة أصلاً")
+        parts.append("اضغط ★ على أي صورة لتجعلها صورة الواجهة")
+        self.status_label.setText(" — ".join(parts))
+
+        if announce:
+            lines = [f"فُتح المجلد: {st['items']} صنفًا، {st['images']} صورة."]
+            if applied["items_done"]:
+                lines.append(f"صُحّحت تسمية {len(applied['renames'])} ملف في "
+                             f"{applied['items_done']} صنفًا وفق الإكسل.")
+            if index is None:
+                lines.append("لم يُحمّل إكسل بعد، فاستُخدمت الوحدة من اسم الملف. "
+                             "اختر الإكسل في صفحة الإعداد وستُصحّح الوحدات تلقائيًا.")
+            if plan.unit_conflicts:
+                sample = "، ".join(
+                    f"{c} ({nm}→{xl})" for c, nm, xl in plan.unit_conflicts[:3])
+                lines.append(f"وحدات خالفت الإكسل فاعتُمد الإكسل: "
+                             f"{len(plan.unit_conflicts)} — {sample}")
+            if plan.missing_in_excel:
+                lines.append(f"أصناف غير موجودة في الإكسل: "
+                             f"{len(plan.missing_in_excel)} (أُبقيت أسماءها).")
+            if unparsed:
+                lines.append(f"ملفات تُجاوزت (لا تبدأ برقم صنف): {len(unparsed)}.")
+            if applied["errors"]:
+                lines.append(f"أخطاء: {len(applied['errors'])} — "
+                             f"{applied['errors'][0]}")
+            lines.append("\nاضغط ★ على أي صورة لتجعلها صورة الواجهة للصنف.")
+            QMessageBox.information(self, APP_NAME, "\n".join(lines))
+
+    def _legacy_result(self, plan, folder: Path) -> BatchRunResult:
+        """يبني نتيجة صناعية من خطة المجلد المنجز.
+
+        حزمة المعالجة مُصرّفة (pipeline.pyc بلا مصدر) فلا يمكن تعديل
+        أصنافها؛ لكنها dataclasses عادية فيمكن بناء نتيجة مطابقة
+        يتعامل معها الجدول والمعاينة والنجمة بلا أي تغيير فيها.
+        """
+        index = getattr(self, "v2_catalog_index", None)
+        items: list[BatchItemResult] = []
+        # يُقرأ القرص لا الخطة: الخطة تحمل الأسماء قبل التصحيح،
+        # وبعد التنفيذ تصبح 508 منها مسارات ميتة فتفشل المعاينة
+        # والنجمة بـ«ملف الإخراج غير موجود» (مقيس على 991 صورة).
+        for row in plan.rows:
+            path = row.old_path          # حُدِّث بعد التنفيذ في apply
+            target = path.with_name(row.new_name)
+            if target.is_file():
+                path = target
+            elif not path.is_file():
+                continue
+            name = ""
+            barcode = ""
+            if index is not None:
+                try:
+                    rec = index.lookup_code(row.item) or {}
+                    name = str(rec.get("name") or "")
+                    barcode = str(rec.get("barcode") or "")
+                except Exception:
+                    pass
+            unit_txt = f" — الوحدة: {row.unit}" if row.unit else ""
+            star = "★ صورة الواجهة" if row.is_primary else "صورة إضافية"
+            items.append(BatchItemResult(
+                source_path=str(path),
+                source_name=path.name,
+                status="manual",
+                item_code=row.item,
+                product_name=name or f"الصنف {row.item}",
+                barcode=barcode,
+                confidence=1.0,
+                explanation=f"مجلد منجز — {star}{unit_txt}"
+                            + (f"\n{row.note}" if row.note else ""),
+                output_path=path.name,
+                match_source="legacy_folder",
+            ))
+        return BatchRunResult(
+            workspace=str(folder),
+            database_path="",
+            catalog_summary={"source": "legacy_folder",
+                             "items": len(plan.groups)},
+            items=items,
+            elapsed_ms=0.0,
+            delivery_zip="",
+            report_json="",
+            report_csv="",
+        )
+
     def _open_bulk_rename(self) -> None:
-        """يفتح أداة إعادة تسمية وتنظيف مجلد نتائج سابق."""
+        """يفتح أداة إعادة تسمية وتنطيف مجلد نتائج سابق.
+
+        2.9.4: لم يبق لها زر في الواجهة (قرار المالك: إلغاء مكان
+        التعديل القديم وتوحيد العمل في واجهة واحدة)، وتُبقى الدالة
+        لتوافق الاختبارات القائمة وللاستدعاء البرمجي إن لزم.
+        """
         try:
             from v2_ui import BulkRenameDialog
         except Exception:
@@ -4891,9 +5061,29 @@ class MainWindow(QMainWindow):
                 # NAMING_DATA_ROOT فارغًا فترجع _current_naming_settings()
                 # None دائمًا، فلا تُقرأ سياسة التسمية التي حفظها المستخدم.
                 _integ.set_naming_data_root(str(DATA_ROOT))
+                # قرار المالك: «بمجرد إضافة الملف للصور والتسميات
+                # أن تتعدل مباشرة» — فإن كان مجلد منجز مفتوحًا قبل
+                # الإكسل، يُعاد التصحيح فورًا بلا زر ولا إعادة فتح.
+                # يُستدعى على خيط الواجهة لأن `_load` خلفي.
+                if getattr(self, "_legacy_folder", None) is not None:
+                    self.legacy_recheck_requested.emit()
             except Exception as exc:
                 print(f"[catalog] index load failed: {exc}", file=sys.stderr)
         threading.Thread(target=_load, daemon=True).start()
+
+    def _refresh_legacy_after_catalog(self) -> None:
+        """يعيد تصحيح المجلد المنجز المفتوح بعد وصول الإكسل."""
+        folder = getattr(self, "_legacy_folder", None)
+        if folder is None or not Path(folder).is_dir():
+            return
+        try:
+            self._load_legacy_folder(Path(folder), announce=False,
+                                     keep_position=True)
+            self.status_label.setText(
+                "وصل ملف الإكسل فصُحّحت تسميات المجلد المنجز تلقائيًا — "
+                "اضغط ★ على أي صورة لتجعلها صورة الواجهة.")
+        except Exception as exc:
+            print(f"[legacy] refresh failed: {exc}", file=sys.stderr)
 
     def _select_images(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
@@ -6665,18 +6855,44 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, res.error)
             return
         # حدّث مسارات الإخراج في النتائج ثم أعد بناء الجدول مع ثبات الموضع.
+        # BatchItemResult وBatchRunResult مجمّدان (frozen dataclass)
+        # فالإسناد المباشر يرفع FrozenInstanceError ويترك القرص
+        # مُعاد التسمية والجدول قديمًا — ولذلك يُستبدل العنصر
+        # بنسخة معدّلة عبر dataclasses.replace داخل قائمة جديدة.
+        import dataclasses as _dc
+        updated: dict[int, BatchItemResult] = {}
         for it in group:
             old = self._result_path(it.output_path)
-            if old is not None and str(old) in res.renames:
-                new_path = Path(res.renames[str(old)])
-                if self.current_workspace is not None:
-                    try:
-                        it.output_path = str(
-                            new_path.relative_to(self.current_workspace))
-                    except ValueError:
-                        it.output_path = str(new_path)
-                else:
-                    it.output_path = str(new_path)
+            if old is None or str(old) not in res.renames:
+                continue
+            new_path = Path(res.renames[str(old)])
+            rel = str(new_path)
+            if self.current_workspace is not None:
+                try:
+                    rel = str(new_path.relative_to(self.current_workspace))
+                except ValueError:
+                    rel = str(new_path)
+            fields = {"output_path": rel}
+            # في المجلدات المنجزة الملف نفسه هو المصدر، فيجب أن
+            # يتبعه المسار والاسم حتى لا ينكسر الجدول والمعاينة.
+            if it.match_source == "legacy_folder":
+                fields["source_path"] = str(new_path)
+                fields["source_name"] = new_path.name
+                is_primary = str(new_path) == str(res.primary_path)
+                star = "★ صورة الواجهة" if is_primary else "صورة إضافية"
+                base = (it.explanation or "").split("\n", 1)
+                tail = f"\n{base[1]}" if len(base) > 1 else ""
+                unit_txt = ""
+                if " — الوحدة: " in base[0]:
+                    unit_txt = " — الوحدة: " + base[0].split(
+                        " — الوحدة: ", 1)[1]
+                fields["explanation"] = f"مجلد منجز — {star}{unit_txt}{tail}"
+            updated[id(it)] = _dc.replace(it, **fields)
+        if updated:
+            new_items = [updated.get(id(it), it)
+                         for it in self.current_result.items]
+            self.current_result = _dc.replace(self.current_result,
+                                              items=new_items)
         position = self._capture_results_position()
         self._populate_results(restore_position=position)
         self.status_label.setText(

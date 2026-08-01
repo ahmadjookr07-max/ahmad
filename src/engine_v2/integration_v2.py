@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING
 from .naming_v2 import (next_sequence, build_name, build_name_dash,
                         build_name_join_all, UNIT_POLICY_JOIN_ALL,
                         UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
-                        load_saved_settings, parse_name, dedupe_units)
+                        load_saved_settings, parse_name, dedupe_units,
+                        unit_key)
 
 if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
     from .processor_v2 import ProcessorV2, ProcessOptionsV2
@@ -204,14 +205,29 @@ def _units_from_catalog(item: str) -> list[str]:
 
     2.9.3: تُحذف الوحدات المكررة إملائيًا (حبه/حبة) من المصدر
     مع الاحتفاط بأول إملاء ورد في الإكسل حرفيًا.
+
+    2.9.4: **الوحدة ذات العبوة=1 تتصدر القائمة**. سياسة الوحدة
+    الواحدة تأخذ `units[0]`، وترتيب صفوف الإكسل عشوائي، فكان صنفٌ
+    صورته صورة حبة يُسمّى `باكت` لأن صف الباكت ورد أولًا. الصورة
+    تمثل القطعة الواحدة، فوحدتها هي ذات العبوة=1 (مقيسة على 484
+    صنفًا: 99.8% تطابق).
     """
     idx = _CATALOG_REF.get("index")
     if idx is not None:
         try:
-            units = idx.units_for_code(str(item))
+            units = [str(u) for u in idx.units_for_code(str(item))
+                     if str(u or "").strip()]
             if units:
-                return dedupe_units([str(u) for u in units
-                                     if str(u or "").strip()])
+                primary = ""
+                try:
+                    primary = str(idx.primary_unit_for_code(str(item)) or "")
+                except Exception:
+                    primary = ""
+                if primary:
+                    key = unit_key(primary)
+                    units = [primary] + [u for u in units
+                                         if unit_key(u) != key]
+                return dedupe_units(units)
         except Exception:
             pass
     return []
