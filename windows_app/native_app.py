@@ -1902,7 +1902,11 @@ class MainWindow(QMainWindow):
             holder.setMinimumHeight(min(target, base_floor))
             holder.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         else:
-            holder.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            # 2.9.3 إصلاح 8: الإطفاء القاطع (AlwaysOff) يخفي الشريط حتى
+            # حين يبقى عجز صغير (قيس: 4px على 1920×1080) فيتعذر الوصول
+            # لأسفل اللوحة بلا أي مؤشر. AsNeeded لا يظهر شريطًا متى
+            # اتسع المحتوى، فهو أأمن من الإخفاء القاطع في كل الأحوال.
+            holder.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             natural = self.manual_group.minimumHeight()
             holder.setMinimumHeight(natural)
             holder.setMaximumHeight(natural + 12)
@@ -2934,20 +2938,23 @@ class MainWindow(QMainWindow):
         # وضع الماوس — لا تُقص نصوصها أبدًا مهما ضاقت النافذة.
         self.edit_image_button = QPushButton("✎ تحرير")
         self.edit_image_button.setObjectName("editImageButton")
-        self.edit_image_button.setMinimumHeight(34)
+        # 2.9.3 إصلاح 9: أربعة أزرار بـ34px صلبة داخل بطاقة مسقوفة
+        # بالمقياس — فعلى 800×600 تطلب البطاقة 82px وتجد 77px فيُقص
+        # السطر الأخير من اسم الصنف. الأرقام الصلبة ← نظام المقياس.
+        self._register_metric(self.edit_image_button, "min_height", 34)
         self.edit_image_button.setEnabled(False)
         self.edit_image_button.setToolTip(
             "تحرير احترافي: يفتح الصورة في تبويب «تحرير مباشر» بكامل الأدوات")
         self.edit_image_button.clicked.connect(self._open_individual_editor)
         self.open_selected_file_button = QPushButton("🗁")
         self.open_selected_file_button.setObjectName("openImageButton")
-        self.open_selected_file_button.setMinimumHeight(34)
+        self._register_metric(self.open_selected_file_button, "min_height", 34)
         self.open_selected_file_button.setToolTip(
             "فتح الصورة: يفتح ملف الصورة الحالي في عارض النظام")
         self.open_selected_file_button.clicked.connect(self._open_selected_file)
         self.open_link_panel_button = QPushButton("⇄")
         self.open_link_panel_button.setObjectName("focusLinkButton")
-        self.open_link_panel_button.setMinimumHeight(34)
+        self._register_metric(self.open_link_panel_button, "min_height", 34)
         self.open_link_panel_button.setToolTip(
             "تغيير الصنف: ينقل التركيز لحقل الربط المباشر لربط الصورة بصنف آخر")
         self.open_link_panel_button.clicked.connect(
@@ -2955,7 +2962,7 @@ class MainWindow(QMainWindow):
         )
         self.set_primary_button = QPushButton("★")
         self.set_primary_button.setObjectName("focusLinkButton")
-        self.set_primary_button.setMinimumHeight(34)
+        self._register_metric(self.set_primary_button, "min_height", 34)
         self.set_primary_button.setEnabled(False)
         self.set_primary_button.setToolTip(
             "تعيين كصورة رئيسية: يجعل هذه الصورة صورة الواجهة الأولى للصنف فتخرج بلا رقم\n"
