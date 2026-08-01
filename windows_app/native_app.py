@@ -226,12 +226,21 @@ STATUS_TEXT = {
     "manual": "مرتبط يدويًا",
     "review": "يحتاج مراجعة",
     "error": "خطأ",
+    # 2.9.2: مفاتيح كانت تظهر بالإنجليزية الخام في واجهة عربية.
+    "unmatched": "غير مرتبط",
+    "pending": "قيد المعالجة",
+    "skipped": "متجاوز",
+    "duplicate": "مكرر",
 }
 STATUS_COLORS = {
     "matched": (16, 135, 92),
     "manual": (37, 99, 235),
     "review": (202, 138, 4),
     "error": (203, 45, 62),
+    "unmatched": (120, 113, 108),
+    "pending": (100, 116, 139),
+    "skipped": (148, 163, 184),
+    "duplicate": (147, 51, 234),
 }
 
 
@@ -1832,7 +1841,9 @@ class MainWindow(QMainWindow):
         chrome = (margins.top() + margins.bottom()) if margins else 20
         spacing = layout_obj.spacing() if layout_obj else 7
         scale = getattr(self, "ui_scale", None)
-        floor = scale.px(96) if scale is not None else 96
+        # 2.9.2 إصلاح 2: الأرضية من المحتوى (صنفان كاملان) لا من 96 مقيسة،
+        # لأن 96 × 0.620 = 60px وهو أقل من صف واحد فيقبل Qt قصّ الجدول.
+        floor = self._useful_table_floor()
 
         # القياس الحقيقي: كم بكسل يفصل أعلى لوحة الربط عن أعلى اللوحة الأم؟
         # هذا يشمل العنوان الملتف والمرشحات والجدول والفواصل — بلا تقدير.
@@ -2306,7 +2317,10 @@ class MainWindow(QMainWindow):
         self.results_table = QTableWidget(0, 3)
         self.results_table.setObjectName("resultsTable")
         self.results_table.setHorizontalHeaderLabels(["الصورة / الحالة", "الصنف / الباركود", "اسم الصنف"])
-        self.results_table.setIconSize(QSize(80, 80))
+        # 2.9.2 إصلاح 1: المصغرة تتبع المقياس لا رقمًا صلبًا. المقيس أن 80px الثابتة
+        # تفرض ارتفاع صف 124px على كل المقاسات، فيصبح ارتفاع الجدول
+        # المتاح 26px على 800×600 ‹ صف واحد ‹ فلا يظهر رقم الصنف ولا الباركود.
+        self._register_metric(self.results_table, "icon", 80)
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.results_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -2314,8 +2328,9 @@ class MainWindow(QMainWindow):
         self.results_table.setWordWrap(True)
         self.results_table.setTextElideMode(Qt.ElideNone)
         self.results_table.verticalHeader().setVisible(False)
-        self.results_table.verticalHeader().setMinimumSectionSize(88)
-        self.results_table.verticalHeader().setDefaultSectionSize(96)
+        # 2.9.2 إصلاح 1: ارتفاع الصف يُشتق من المحتوى (المصغرة + سطري نص)
+        # لا من 88/96 الصلبتين — يضبطه ``_sync_table_row_height`` بعد كل مقياس.
+        self._sync_table_row_height()
         self.results_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.results_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.results_table.verticalScrollBar().setSingleStep(28)
@@ -2335,11 +2350,116 @@ class MainWindow(QMainWindow):
         self._adjust_results_table_columns()
         self.results_table.itemSelectionChanged.connect(self._show_selected_preview)
         self.results_table.doubleClicked.connect(self._open_selected_file)
-        # 2.9: الجدول أكبر مستهلك للارتفاع — حدّه الأدنى يتبع المقياس حتى
-        # يبقى متسع للوحة الربط تحته على شاشات 600px ارتفاعًا.
-        self._register_metric(self.results_table, "min_height", 250)
+        # 2.9.2 إصلاح 2: الحد الأدنى يُشتق من المحتوى (ترويسة + صفان) لا
+        # من 250 المرجعية، فيُضمن رؤية صنفين كاملين على أي شاشة.
+        self.results_table.setMinimumHeight(self._useful_table_floor())
         self._continue_build_results_page(layout)
         return panel
+
+    # ------------------------------------------------------------------
+    # 2.9.2 — جدول المراجعة: أربع دوال تشتق الأبعاد من المحتوى
+    # ------------------------------------------------------------------
+    def _sync_table_row_height(self) -> None:
+        """يشتق ارتفاع صف الجدول من المصغرة وارتفاع سطر الخط.
+
+        المشكلة المقيسة: ``setMinimumSectionSize(88)`` و``setDefaultSectionSize(96)``
+        رقمان صلبان أنتجا ارتفاع صف 124px على كل المقاسات دون استثناء،
+        فعلى 800×600 لم يتسع الجدول (26px) لأي صف، واختفى رقم الصنف
+        والباركود كليًا — وهي الوظيفة الأساسية للشاشة.
+
+        الحل: الصف = ما يلزم لإظهار المصغرة أو سطري نص (رقم الصنف فوق
+        الباركود)، أيّهما أكبر، مع هامش تنفّس. فيتبع المقياس تلقائيًا
+        لأن المصغرة مسجلة في ``_scaled_metrics`` والخط يتقلص مع المعامل.
+        """
+        table = getattr(self, "results_table", None)
+        if table is None:
+            return
+        icon_h = table.iconSize().height()
+        line_h = table.fontMetrics().height()
+        # سطران لـ«رقم الصنف \n الباركود» ومثلهما لاسم ملتف، والأيقونة
+        # قد تكون أعلى منهما على المقاسات الكبيرة.
+        content = max(icon_h, line_h * 2)
+        padding = max(4, line_h // 3)
+        row_h = content + padding
+        header = table.verticalHeader()
+        header.setMinimumSectionSize(max(24, line_h + 4))
+        header.setDefaultSectionSize(row_h)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, row_h)
+
+    def _useful_table_floor(self) -> int:
+        """أقل ارتفاع يُرى فيه **صنفان كاملان**، مشتقًا من المحتوى.
+
+        يستبدل الرقمين المرجعيين 250 (حد الجدول) و 96 (أرضية التوزيع).
+        مع معامل 0.620 كان 250 يصير 155px و 96 يصير 60px، وكلاهما أقل من
+        صف واحد، فيقبل Qt أن يقص الجدول إلى شريحة عمياء.
+        """
+        table = getattr(self, "results_table", None)
+        if table is None:
+            return 96
+        row_h = table.verticalHeader().defaultSectionSize()
+        if row_h <= 0:
+            row_h = max(table.iconSize().height(), table.fontMetrics().height() * 2)
+        header_h = table.horizontalHeader().height()
+        if header_h <= 0:
+            header_h = table.fontMetrics().height() + 12
+        frame = table.frameWidth() * 2
+        return int(header_h + row_h * 2 + frame + 2)
+
+    def _apply_status_text_mode(self, show_text: bool) -> None:
+        """يُسقط نص الحالة عند الشدة ويترك الأيقونة والتلميح.
+
+        الحسم البنيوي: على 800×600 المتاح 259px والأرضيات الثلاث تلزم 312px
+        ، أي عجز 53px لا يُخفى بأي ترتيب انكماش. فيُستغنى عن النص لمصلحة
+        مؤشر بصري ملوّن مع ``toolTip`` كامل — وهو المفضّل المسجل للمالك.
+        النص الأصلي يُحفظ في ``Qt.UserRole + 1`` فيعود تلقائيًا عند التوسّع.
+        """
+        table = getattr(self, "results_table", None)
+        if table is None:
+            return
+        if getattr(self, "_status_text_visible", None) == show_text:
+            return
+        self._status_text_visible = show_text
+        for row in range(table.rowCount()):
+            cell = table.item(row, 0)
+            if cell is None:
+                continue
+            if show_text:
+                saved = cell.data(Qt.UserRole + 1)
+                if saved:
+                    cell.setText(str(saved))
+            else:
+                if cell.text():
+                    cell.setData(Qt.UserRole + 1, cell.text())
+                cell.setText("")
+
+    def _fit_table_headers(self) -> None:
+        """يلائم عناوين الترويسة للعروض الفعلية ببدائل متدرّجة.
+
+        الميزانية ``width - 24`` لا ``width - 10``: الخصم المتفائل أبقى «الصنف /
+        الباركود» مبتورة رغم اتساعها حسابيًا، لأن الترويسة تحجز لمؤشر
+        الترتيب والهامش الداخلي.
+        """
+        table = getattr(self, "results_table", None)
+        if table is None:
+            return
+        alternatives = (
+            ("الصورة / الحالة", "الصورة", "صورة"),
+            ("الصنف / الباركود", "الصنف والباركود", "الصنف", "صنف"),
+            ("اسم الصنف", "الاسم", "اسم"),
+        )
+        fm = table.horizontalHeader().fontMetrics()
+        for col, options in enumerate(alternatives):
+            budget = table.columnWidth(col) - 24
+            chosen = options[-1]
+            for option in options:
+                if fm.horizontalAdvance(option) <= budget:
+                    chosen = option
+                    break
+            header_item = table.horizontalHeaderItem(col)
+            if header_item is not None:
+                header_item.setText(chosen)
+                header_item.setToolTip(options[0])
 
     def _adjust_results_table_columns(self) -> None:
         """يوزّع أعمدة جدول النتائج بحيث يبقى اسم الصنف مقروءًا دائمًا.
@@ -2354,18 +2474,40 @@ class MainWindow(QMainWindow):
         available = table.viewport().width()
         if available <= 0:
             return
-        name_min = 150
-        icon_w, code_w = 168, 148
+        # 2.9.2 إصلاح 3: العروض تُشتق من ``fontMetrics`` لا من أرقام صلبة.
+        # الرقم الصلب 168/148/150 تختل نسبته عند طرفي المدى، لأن الخط
+        # يتقلص بالجذر والمسافات خطيًا.
+        fm = table.fontMetrics()
+        icon_side = table.iconSize().width()
+        # عمود الباركود: أطول محتوى حقيقي هو باركود 13 رقمًا.
+        code_w = fm.horizontalAdvance("6281006123456") + 10
+        # عمود الاسم: عينة اسم متوسط تلتف على سطرين.
+        name_min = fm.horizontalAdvance("منتج غذائي متوسط") + 16
+        # عمود الصورة/الحالة: المصغرة + أطول نص حالة + هوامش.
+        status_w = max(fm.horizontalAdvance(text) for text in STATUS_TEXT.values())
+        icon_w = icon_side + status_w + 14
+        icon_floor = icon_side + 8          # المصغرة وحدها بلا نص
+        code_floor = fm.horizontalAdvance("6281006123456") + 6
+
         if available < icon_w + code_w + name_min:
-            # انكماش متدرج: الباركود حتى 108، ثم الصورة حتى 96
+            # انكماش متدرج: عمود الاسم يُقلّص **أخيرًا لا أولًا** — أثبت
+            # القياس البصري أن تقليصه أولًا بحجة أنه «يلتف» يسحقه إلى 62px
+            # فينتهي بـ«…». فنبدأ بإسقاط نص الحالة ثم الباركود.
             deficit = (icon_w + code_w + name_min) - available
-            code_shrink = min(deficit, code_w - 108)
-            deficit -= code_shrink
-            icon_shrink = min(max(0, deficit), icon_w - 96)
-            code_w -= code_shrink
+            icon_shrink = min(deficit, max(0, icon_w - icon_floor))
+            deficit -= icon_shrink
             icon_w -= icon_shrink
-        table.setColumnWidth(0, icon_w)
-        table.setColumnWidth(1, code_w)
+            code_shrink = min(max(0, deficit), max(0, code_w - code_floor))
+            deficit -= code_shrink
+            code_w -= code_shrink
+            if deficit > 0:
+                name_min = max(fm.averageCharWidth() * 6, name_min - deficit)
+        table.setColumnWidth(0, int(icon_w))
+        table.setColumnWidth(1, int(code_w))
+        # 2.9.2 إصلاح 4: عند الشدة يُسقط نص الحالة وتبقى الأيقونة والتلميح.
+        self._apply_status_text_mode(int(icon_w) >= icon_side + status_w + 10)
+        # 2.9.2 إصلاح 5: ملاءمة عناوين الترويسة للعروض الفعلية.
+        self._fit_table_headers()
 
     def eventFilter(self, obj, event):  # noqa: ANN001
         try:
@@ -4334,6 +4476,13 @@ class MainWindow(QMainWindow):
                     widget.setIconSize(QSize(scale.px(reference), scale.px(reference)))
             except Exception:
                 continue
+        # 2.9.2: بعد تحديث المصغرة يُعاد اشتقاق ارتفاع الصف وأرضية الجدول
+        # وتوزيع الأعمدة — والترتيب ملزم: الصف قبل الأرضية لأنها تقرأه.
+        table = getattr(self, "results_table", None)
+        if table is not None:
+            self._sync_table_row_height()
+            table.setMinimumHeight(self._useful_table_floor())
+            self._adjust_results_table_columns()
         # الحد الأدنى للنافذة نفسها يتبع المقياس حتى لا يمنع التصغير
         self.setMinimumSize(max(680, scale.px(960)), max(430, scale.px(600)))
 
