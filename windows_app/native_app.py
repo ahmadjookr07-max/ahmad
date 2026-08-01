@@ -2536,6 +2536,56 @@ class MainWindow(QMainWindow):
                     cell.setData(Qt.UserRole + 1, cell.text())
                 cell.setText("")
 
+    def _apply_link_button_text_mode(self, show_text: bool) -> None:
+        """2.9.4 إصلاح 17: يُسقط نصوص أزرار الربط عند الشدة القصوى.
+
+        الحسم البنيوي المقيس: على 800×600 تحتاج لوحة الربط 205px ولا
+        تجد إلا 115px، وفائض الجدول كله 48px — فحتى الاستيلاء عليه
+        كاملًا يبلغ 163px لا 205px. لذلك فشلت كل محاولات تقليص الجدول.
+
+        العيب الحقيقي أفقي: عرض الحاوية 255px وأضيق زر يحتاج 93px
+        بنصه العربي الكامل، فلا يسع السطر إلا زرين ⊇ تسعة أزرار
+        تلتف على خمسة أسطر = 139px. وعلى 1920×1080 العرض 623px فيسع
+        أربعة أزرار/سطر ⊇ ثلاثة أسطر فقط.
+
+        فالحل تقليل العروض لا الارتفاعات: رمز بدل النص مع ``toolTip``
+        يبدأ بالاسم الكامل — وهو المفضل المسجل للمالك صراحة:
+        «مؤشر بصري مع تلميح بدل النص المباشر عند ضيق المساحة».
+        يُطبّق على الشدة القصوى وحدها فتبقى النصوص كاملة في كل
+        الدقات الأخرى، وتعود حرفيًا عند توسيع النافدة.
+        """
+        pairs = getattr(self, "_link_button_glyphs", None)
+        if not pairs:
+            return
+        if getattr(self, "_link_text_visible", None) == show_text:
+            return
+        self._link_text_visible = show_text
+        for button, glyph in pairs:
+            try:
+                full = getattr(button, "_full_label", button.text())
+                if show_text:
+                    button.setText(full)
+                    button.setMinimumWidth(
+                        getattr(button, "_full_min_width", 0))
+                else:
+                    button.setText(glyph)
+                    # العرض الأدنى من الرمز نفسه لا من النص المُسقط
+                    glyph_w = button.fontMetrics().horizontalAdvance(glyph)
+                    button.setMinimumWidth(glyph_w + 18)
+            except Exception:
+                continue
+        # التخطيط الملتف يُعيد الحساب من العروض الجديدة، واللوحة
+        # تُعيد مزامنة ارتفاعها من الارتفاع-للعرض الناتج.
+        host = getattr(self, "_link_flow_host", None)
+        if host is not None:
+            try:
+                lay = host.layout()
+                if lay is not None:
+                    lay.invalidate()
+                host.updateGeometry()
+            except Exception:
+                pass
+
     def _fit_table_headers(self) -> None:
         """يلائم عناوين الترويسة للعروض الفعلية ببدائل متدرّجة.
 
@@ -2857,6 +2907,29 @@ class MainWindow(QMainWindow):
         self.jump_to_previews_button.setObjectName("linkToolButton")
         self.jump_to_previews_button.setToolTip("ينقل التركيز مباشرة إلى الصورة الحالية")
         self.jump_to_previews_button.clicked.connect(self._scroll_to_previews)
+        # 2.9.4 إصلاح 17: رمز مختصر لكل زر يُستخدم بدل النص عند
+        # الشدة القصوى وحدها. النص الأصلي يُحفظ في ``_full_label``
+        # فيعود حرفيًا عند التوسّع، ويُضمّ للتلميح دائمًا.
+        self._link_button_glyphs = [
+            (self.tap_link_button, "👆"),
+            (self.use_reference_button, "⚑"),
+            (self.suggest_group_button, "◎"),
+            (self.reference_group_link_button, "⚓"),
+            (self.link_same_item_button, "↑⊕"),
+            (self.link_by_image_button, "⇄"),
+            (self.nutrition_button, "🍎"),
+            (self.delete_output_button, "🗑"),
+            (self.jump_to_previews_button, "🔍"),
+        ]
+        for _btn, _glyph in self._link_button_glyphs:
+            _btn._full_label = _btn.text()
+            _btn._compact_glyph = _glyph
+            _tip = _btn.toolTip()
+            # التلميح يبدأ دائمًا بالاسم الكامل لأنه وحده الدليل في الوضع المختصر
+            if not _tip.startswith(_btn._full_label):
+                _btn.setToolTip(f"{_btn._full_label}\n{_tip}" if _tip
+                                else _btn._full_label)
+
         for button in (
             self.use_reference_button,
             self.suggest_group_button,
@@ -2877,6 +2950,8 @@ class MainWindow(QMainWindow):
             # إصلاح قص النصوص: العرض الأدنى يُحسب من عرض النص الفعلي + هوامش
             text_w = button.fontMetrics().horizontalAdvance(button.text())
             # +32 = padding الـ CSS (9×2) + الحدود + هامش أمان — لا قص مطلقًا
+            # 2.9.4 إصلاح 17: يُحفط مرجعًا ليُستعاد عند الرجوع للنص الكامل
+            button._full_min_width = text_w + 32
             button.setMinimumWidth(text_w + 32)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.manual_reference_badge.setMinimumWidth(
@@ -2893,6 +2968,8 @@ class MainWindow(QMainWindow):
         # _FooterFlowFrame يعيد تعريف sizeHint ليقيس بالعرض الحقيقي.
         quick_flow_host = _FooterFlowFrame()
         quick_flow_host.setObjectName("linkFlowHost")
+        # 2.9.4 إصلاح 17: مرجع محفوظ لإبطال التخطيط عند تبديل الوضع
+        self._link_flow_host = quick_flow_host
         quick_flow_host.setStyleSheet(
             "QFrame#linkFlowHost { background: transparent; border: none; }")
         quick_flow = _LinkFlowLayout(quick_flow_host, margin=0, spacing=6)
@@ -4648,6 +4725,13 @@ class MainWindow(QMainWindow):
                 title_label.setVisible(scale.factor > 0.70)
             except Exception:
                 pass
+        # 2.9.4 إصلاح 17: أزرار الربط تصير رموزًا مع تلميح عند
+        # الشدة القصوى وحدها (نفس عتبة إسقاط عنوان القسم)، لأن
+        # العجز أفقي: تسعة أزرار بنصوصها لا تلتف إلا على خمسة أسطر.
+        try:
+            self._apply_link_button_text_mode(scale.factor > 0.70)
+        except Exception:
+            pass
         # 2.9.3 إصلاح 11: هوامش لوحة القائمة وتباعدها يُعاد حسابهما من
         # المرجع لا من القيمة الحالية، فلا يتراكم التصغير.
         pane_metrics = getattr(self, "_pane_layout_metrics", None)
