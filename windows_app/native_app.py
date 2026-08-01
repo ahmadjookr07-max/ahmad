@@ -2578,12 +2578,15 @@ class MainWindow(QMainWindow):
         self.result_search_edit.setPlaceholderText("ابحث بالاسم أو الصنف أو الباركود أو الصورة")
         self.result_search_edit.setClearButtonEnabled(True)
         self.result_search_edit.setToolTip("بحث فوري محلي يدعم الأرقام العربية والإنجليزية")
-        self.result_search_edit.setMinimumHeight(36)
+        # 2.9.3 إصلاح 10: ثلاثة عناصر بـ36px صلبة في صف المرشحات لا تتبع
+        # المقياس، فتفرض 36px على 800×600 حيث ينبغي ≈22px — وهي جزء من
+        # عجز 54px في resultsListPane الذي يقص أسفل اللوحة.
+        self._register_metric(self.result_search_edit, "min_height", 36)
         self.result_search_edit.textChanged.connect(self._apply_result_filters)
 
         self.result_status_filter = QComboBox()
         self.result_status_filter.setObjectName("resultStatusFilter")
-        self.result_status_filter.setMinimumHeight(36)
+        self._register_metric(self.result_status_filter, "min_height", 36)
         self.result_status_filter.setToolTip("تصفية النتائج حسب الحالة")
         self.result_status_filter.addItem("كل الحالات", "all")
         self.result_status_filter.addItem("مطابق آليًا", "matched")
@@ -2595,7 +2598,7 @@ class MainWindow(QMainWindow):
 
         self.clear_result_filter_button = QPushButton("مسح")
         self.clear_result_filter_button.setObjectName("tableNavButton")
-        self.clear_result_filter_button.setMinimumHeight(36)
+        self._register_metric(self.clear_result_filter_button, "min_height", 36)
         self.clear_result_filter_button.setToolTip("إظهار كل النتائج")
         self.clear_result_filter_button.setEnabled(False)
         self.clear_result_filter_button.clicked.connect(self._clear_result_filters)
@@ -2862,8 +2865,15 @@ class MainWindow(QMainWindow):
         # 2.6: حد أدنى مرن — مع الوضع العمودي التلقائي للشاشات الضيقة لا تراكب أبدًا
         self._register_metric(self.results_upper_widget, "min_width", 330)
         list_layout = QVBoxLayout(self.results_upper_widget)
-        list_layout.setContentsMargins(10, 10, 10, 10)
-        list_layout.setSpacing(7)
+        # 2.9.3 إصلاح 11: الهوامش والتباعد تتبع المقياس. على 800×600
+        # تستهلك (10×2 + 7×3) = 41px من 378px متاحة — أكثر من عشر اللوحة
+        # لمجرد فراغ، وهي من أسباب عجز 40px المتبقي.
+        _pane_pad = self.ui_scale.px(10) if hasattr(self, "ui_scale") else 10
+        _pane_gap = self.ui_scale.px(7) if hasattr(self, "ui_scale") else 7
+        list_layout.setContentsMargins(
+            _pane_pad, _pane_pad, _pane_pad, _pane_pad)
+        list_layout.setSpacing(_pane_gap)
+        self._pane_layout_metrics = (list_layout, 10, 7)
         # 2.9: صف العنوان يلتف بدل أن يبتر. القياس أثبت أن «عدد الأصناف: 0»
         # يحتاج 104px ولا يجد إلا 47px على 800×600، فيظهر «عدد…» فقط.
         # التخطيط الملتف ينزل بأزرار التنقل لسطر ثانٍ فيُقرأ كل نص كاملًا.
@@ -4546,6 +4556,17 @@ class MainWindow(QMainWindow):
                     widget.setIconSize(QSize(scale.px(reference), scale.px(reference)))
             except Exception:
                 continue
+        # 2.9.3 إصلاح 11: هوامش لوحة القائمة وتباعدها يُعاد حسابهما من
+        # المرجع لا من القيمة الحالية، فلا يتراكم التصغير.
+        pane_metrics = getattr(self, "_pane_layout_metrics", None)
+        if pane_metrics is not None:
+            pane_layout, pad_ref, gap_ref = pane_metrics
+            try:
+                pad = scale.px(pad_ref)
+                pane_layout.setContentsMargins(pad, pad, pad, pad)
+                pane_layout.setSpacing(scale.px(gap_ref))
+            except Exception:
+                pass
         # 2.9.2: بعد تحديث المصغرة يُعاد اشتقاق ارتفاع الصف وأرضية الجدول
         # وتوزيع الأعمدة — والترتيب ملزم: الصف قبل الأرضية لأنها تقرأه.
         table = getattr(self, "results_table", None)
