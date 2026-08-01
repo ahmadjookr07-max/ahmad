@@ -1514,7 +1514,37 @@ class _FooterFlowFrame(QFrame):
         return QSize(width, layout_obj.heightForWidth(width))
 
     def minimumSizeHint(self):  # noqa: N802
-        return self.sizeHint()
+        """2.9.4 إصلاح 16: الحد الأدنى للعرض = أوسع زر منفرد، لا عرض الصف.
+
+        العيب المقيس: إعادة ``sizeHint()`` كما هي تُعلن حدًا أدنى للعرض
+        يساوي العرض الحالي كاملًا (640px)، فيصير ``layout minSize`` للوحة
+        الربط 656px بينما viewport منطقة التمرير 640px. QScrollArea مع
+        ``widgetResizable`` لا يقدر على تصغير المحتوى تحت حدّه الأدنى،
+        والشريط الأفقي مطفأ (AlwaysOff)، فيُقص الفائض 31px بصمت.
+        وفي واجهة يمين-لليسار يقع القص على أطراف الأزرار اليسرى، فقيس
+        «ربط الآن» مرئيًا 78% حتى على 1920×1080، و«ضم للصنف الأعلى»
+        و«عرض الصورة» 0% على 800×600.
+
+        الحد الأدنى الحقيقي لتخطيط ملتف هو عرض أوسع عنصر فيه: أقل من ذلك
+        يُقص العنصر، وما بينه وبين العرض الكامل يُعالج بالالتفاف لأسطر
+        إضافية — وهو السلوك المطلوب.
+        """
+        layout_obj = self.layout()
+        if layout_obj is None:
+            return super().minimumSizeHint()
+        widest = 0
+        for index in range(layout_obj.count()):
+            item = layout_obj.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            hint = (widget.sizeHint() if widget is not None
+                    else item.sizeHint())
+            widest = max(widest, hint.width())
+        margins = self.contentsMargins()
+        widest += margins.left() + margins.right()
+        # الارتفاع يبقى محسوبًا بالعرض الفعلي حتى لا يُقص سطر رأسيًا
+        return QSize(widest, self.sizeHint().height())
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -1887,8 +1917,16 @@ class MainWindow(QMainWindow):
             table.setMinimumHeight(room)
             self._set_manual_scroll_enabled(False)
         else:
-            # حتى بأصغر جدول مقبول لا يتسع العمود: نمرّر لوحة الربط ضمن
+            # حتى بأصغر جدول مقبول لا يتسع العمود: نمرر لوحة الربط ضمن
             # المساحة المتبقية الحقيقية بعد حجز الجدول الأدنى.
+            #
+            # 2.9.4 محاولتان مرفوضتان موّثقتان (لمنع تكرارهما):
+            # 1) إنزال أرضية الجدول لصنف واحد عند الشدة — يُصفّر القص
+            #    لكنه ينقل الجدول من 4 صفوف إلى صف واحد.
+            # 2) فرض ``setMaximumHeight`` على الجدول لتحرير الفائض — أفسد
+            #    التوزيع على كل الدقات (القص 0 ← 12، وشمل 1920×1080)
+            #    لأن تقييد الحد الأقصى يمنع QSplitter من التوزيع الطبيعي.
+            # المعتمد: حجز الأرضية فقط وترك الباقي للوحة الربط.
             table.setMinimumHeight(floor)
             usable = available - static_above - bottom_reserve - floor
             self._set_manual_scroll_enabled(True, usable)
@@ -2453,6 +2491,11 @@ class MainWindow(QMainWindow):
         يستبدل الرقمين المرجعيين 250 (حد الجدول) و 96 (أرضية التوزيع).
         مع معامل 0.620 كان 250 يصير 155px و 96 يصير 60px، وكلاهما أقل من
         صف واحد، فيقبل Qt أن يقص الجدول إلى شريحة عمياء.
+
+        2.9.4: الأرضية تبقى صنفين على كل المقاييس. جُرّب إنزالها لصنف
+        واحد عند الشدة لتحرير مساحة لأزرار الربط، فأنقص الجدول من
+        4 صفوف إلى صف واحد — ثمن باهظ. الحل المعتمد بدله: تقاسم الفائض
+        عن الأرضية في ``_rebalance_list_pane`` بدل استحواذ الجدول عليه.
         """
         table = getattr(self, "results_table", None)
         if table is None:
