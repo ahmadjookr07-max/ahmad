@@ -2801,7 +2801,15 @@ class MainWindow(QMainWindow):
         # 2.6: صف واحد ملتف (FlowLayout) بدل صفّين ثابتين — الأزرار تنزل
         # لسطر جديد تلقائيًا عند ضيق العرض فلا يُقص أي زر مطلقًا.
         from unified_editor import _FlowLayout as _LinkFlowLayout
-        quick_flow_host = QWidget()
+        # 2.9.3 إصلاح 7: QWidget العادي يبني sizeHint من heightForWidth
+        # محسوبًا على عرض sizeHint الضيق (≈عرض أوسع زر) لا على عرضه
+        # الفعلي، فيعلن 388px (ستة أسطر) بدل 130px (سطرين) على
+        # 1920×1080 — وهو ما أعجز resultsListPane على كل الدقات.
+        # _FooterFlowFrame يعيد تعريف sizeHint ليقيس بالعرض الحقيقي.
+        quick_flow_host = _FooterFlowFrame()
+        quick_flow_host.setObjectName("linkFlowHost")
+        quick_flow_host.setStyleSheet(
+            "QFrame#linkFlowHost { background: transparent; border: none; }")
         quick_flow = _LinkFlowLayout(quick_flow_host, margin=0, spacing=6)
         for link_btn in (
             self.tap_link_button,
