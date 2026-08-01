@@ -1559,6 +1559,16 @@ class MainWindow(QMainWindow):
         self._scaled_metrics: list = []
         self._base_stylesheet = ""
         self.ui_scale = ScaleEngine(1.0)
+        # 2.9.3: جذر بيانات التسمية يُوصل مرة واحدة عند البدء حتى تُقرأ
+        # السياسة المحفوظة حتى لو لم يُحمّل ملف إكسل في هذه الجلسة.
+        self.v2_data_root = DATA_ROOT
+        self.v2_naming_policy: dict | None = None
+        self.v2_bulk_plan: dict | None = None
+        try:
+            from engine_v2 import integration_v2 as _integ_boot
+            _integ_boot.set_naming_data_root(str(DATA_ROOT))
+        except Exception as exc:
+            print(f"[naming] data root wiring failed: {exc}", file=sys.stderr)
         self._setup_window()
         self._refresh_ui_scale(initial=True)
         self._build_ui()
@@ -1970,6 +1980,31 @@ class MainWindow(QMainWindow):
         catalog_layout.addWidget(self.catalog_edit)
         catalog_layout.addWidget(self.catalog_status_label)
         catalog_layout.addWidget(catalog_button)
+        # 2.9.3: وصول مباشر لسياسة التسمية وأداة إعادة التسمية.
+        # النافثتان موجودتان في v2_ui منذ البداية لكن لم يكن لهما
+        # أي زر يفتحهما، فكان المستخدم يقرأ عن «قوالب المتاجر» بلا منفذ.
+        naming_row = QHBoxLayout()
+        naming_row.setSpacing(8)
+        self.naming_policy_button = QPushButton("⚙ سياسة الوحدات والتسمية")
+        self.naming_policy_button.setObjectName("secondaryButton")
+        self.naming_policy_button.setToolTip(
+            "اختر مرة واحدة كيف تُبنى أسماء الملفات لكل الأصناف:\n"
+            "سياسة الوحدات، نمط الترقيم، وقوالب المتاجر الجاهزة —\n"
+            "والوحدة تُقرأ حرفيًا من الإكسل دون تغيير.")
+        self.naming_policy_button.clicked.connect(self._open_naming_policy)
+        self._register_metric(self.naming_policy_button, "min_height", 34)
+        self.bulk_rename_button = QPushButton("↺ إعادة تسمية مجلد سابق")
+        self.bulk_rename_button.setObjectName("secondaryButton")
+        self.bulk_rename_button.setToolTip(
+            "أداة مستقلة تعمل على أي مجلد نتائج سابق:\n"
+            "تصلح الأسماء المشوّهة وتُصدّر بتنسيق أي منصة،\n"
+            "مع معاينة كاملة قبل التنفيذ.")
+        self.bulk_rename_button.clicked.connect(self._open_bulk_rename)
+        self._register_metric(self.bulk_rename_button, "min_height", 34)
+        naming_row.addWidget(self.naming_policy_button)
+        naming_row.addWidget(self.bulk_rename_button)
+        naming_row.addStretch(1)
+        catalog_layout.addLayout(naming_row)
         layout.addWidget(catalog_group)
 
         images_group = QGroupBox("2. صور المنتجات")
@@ -4610,6 +4645,92 @@ class MainWindow(QMainWindow):
             widget.setIconSize(QSize(value, value))
         return widget
 
+    # ------------------------------------------------ 2.9.3: منافذ التسمية
+    def _open_naming_policy(self) -> None:
+        """يفتح نافذة سياسة الوحدات والتسمية الموحدة.
+
+        الأولوية للدالة التي يثبّتها v2_ui على النافذة (v2_open_unit_naming)
+        لأنها تحمّل السياسة المحفوظة مسبقًا؛ وإن لم تكن مثبّتة (تشغيل بلا
+        تكامل v2_ui) يُستورد الديالوج مباشرة حتى يعمل الزر في كل الحالات.
+        """
+        opener = getattr(self, "v2_open_unit_naming", None)
+        if callable(opener):
+            try:
+                opener()
+                self._after_naming_policy_changed()
+                return
+            except Exception as exc:
+                print(f"[naming] installed opener failed: {exc}",
+                      file=sys.stderr)
+        try:
+            from v2_ui import UnitNamingDialog
+        except Exception:
+            try:
+                from windows_app.v2_ui import UnitNamingDialog
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "سياسة التسمية",
+                    "تعذّر فتح نافذة سياسة التسمية.\n"
+                    f"السبب: {exc}")
+                return
+        try:
+            UnitNamingDialog(self, self).exec()
+            self._after_naming_policy_changed()
+        except Exception as exc:
+            QMessageBox.warning(self, "سياسة التسمية",
+                                f"تعذّر فتح النافذة.\nالسبب: {exc}")
+
+    def _after_naming_policy_changed(self) -> None:
+        """يعيد توصيل جذر التسمية بعد أي حفظ حتى تُقرأ السياسة الجديدة
+        في مسار المعالجة فورًا بلا إعادة تشغيل التطبيق."""
+        try:
+            from engine_v2 import integration_v2 as _iv
+            _iv.set_naming_data_root(str(self.v2_data_root))
+            settings = _iv._current_naming_settings()
+            if settings is not None:
+                scheme = getattr(settings, "scheme", "")
+                policy = getattr(settings, "unit_policy", "")
+                if hasattr(self, "status_label"):
+                    self.status_label.setText(
+                        f"تم اعتماد سياسة التسمية — النمط: {scheme}"
+                        f"{'، الوحدات: ' + policy if policy else ''}")
+        except Exception as exc:
+            print(f"[naming] reload after save failed: {exc}",
+                  file=sys.stderr)
+
+    def _open_bulk_rename(self) -> None:
+        """يفتح أداة إعادة تسمية وتنظيف مجلد نتائج سابق."""
+        try:
+            from v2_ui import BulkRenameDialog
+        except Exception:
+            try:
+                from windows_app.v2_ui import BulkRenameDialog
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "إعادة التسمية",
+                    "تعذّر فتح أداة إعادة التسمية.\n"
+                    f"السبب: {exc}")
+                return
+        try:
+            dlg = BulkRenameDialog(self)
+            # تهيئة مسبقة بمجلد النتائج الحالي إن توفر — يوفر خطوة استعراض
+            out = ""
+            ws = getattr(self, "current_workspace", None)
+            if ws is not None:
+                try:
+                    out = str(ws) if Path(ws).is_dir() else ""
+                except Exception:
+                    out = ""
+            if out and hasattr(dlg, "folder_edit"):
+                try:
+                    dlg.folder_edit.setText(str(out))
+                except Exception:
+                    pass
+            dlg.exec()
+        except Exception as exc:
+            QMessageBox.warning(self, "إعادة التسمية",
+                                f"تعذّر فتح الأداة.\nالسبب: {exc}")
+
     def _select_catalog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -4639,6 +4760,10 @@ class MainWindow(QMainWindow):
                 idx.load_excel(str(path))
                 self.v2_catalog_index = idx
                 _integ.set_catalog_index(idx)
+                # 2.9.3: توصيل جذر بيانات التسمية — بدونه يبقى
+                # NAMING_DATA_ROOT فارغًا فترجع _current_naming_settings()
+                # None دائمًا، فلا تُقرأ سياسة التسمية التي حفظها المستخدم.
+                _integ.set_naming_data_root(str(DATA_ROOT))
             except Exception as exc:
                 print(f"[catalog] index load failed: {exc}", file=sys.stderr)
         threading.Thread(target=_load, daemon=True).start()

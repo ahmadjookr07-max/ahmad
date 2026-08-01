@@ -91,8 +91,67 @@ def normalize_stem(stem: str) -> str:
 
 def clean_unit(unit: str) -> str:
     """تعقيم قيمة الوحدة القادمة من الإكسل أو الإدخال اليدوي:
-    إزالة الشرطات السفلية والمسافات الطرفية التي كانت تولّد `__حبه`."""
+    إزالة الشرطات السفلية والمسافات الطرفية التي كانت تولّد `__حبه`.
+
+    ملاحظة: تحفظ الإملاء كما ورد في الإكسل حرفيًا (قرار المالك).
+    للمقارنة بين إملاءين لنفس الوحدة استخدم `unit_key`.
+    """
     return str(unit or "").strip().strip("_").strip()
+
+
+# ------------------------------------------------- مفتاح المقارنة للوحدات
+# الإكسل يكتب الوحدة بإملاءات مختلفة (حبه/حبة، شده/شدة،
+# علبه/علبة) وهي **وحدة واحدة** فعليًا. اسم الملف يحفظ الإملاء
+# الأصلي كما في الإكسل، لكن المقارنة والتجميع ومنع التكرار تعتمد
+# هذا المفتاح حتى لا يُعامل `حبه` و`حبة` كوحدتين منفصلتين.
+_UNIT_KEY_TRANS = str.maketrans({
+    "ة": "ه",   # تاء مربوطة -> هاء   (حبة = حبه)
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",
+    "ى": "ي",   # ألف مقصورة -> ياء
+    "ـ": "",    # تطويل
+})
+_TASHKEEL_RE = re.compile(r"[\u064B-\u0652\u0670\u0640]")
+_UNIT_SPACE_RE = re.compile(r"[\s_\-]+")
+
+
+def unit_key(unit: str) -> str:
+    """مفتاح موحّد للمقارنة بين إملاءات الوحدة المختلفة.
+
+    لا يُستخدم في اسم الملف إطلاقًا — اسم الملف يحفظ إملاء الإكسل.
+    مثال: unit_key("حبة") == unit_key("حبه") == "حبه"
+    """
+    text = clean_unit(unit)
+    if not text:
+        return ""
+    text = _TASHKEEL_RE.sub("", text)
+    text = text.translate(_UNIT_KEY_TRANS)
+    text = _UNIT_SPACE_RE.sub("", text)
+    return text.casefold()
+
+
+def same_unit(first: str, second: str) -> bool:
+    """هل الوحدتان واحدة فعليًا مع اختلاف الإملاء؟ (حبه وحبة)"""
+    return unit_key(first) == unit_key(second)
+
+
+def dedupe_units(units: list[str] | tuple[str, ...]) -> list[str]:
+    """يحذف الوحدات المكررة إملائيًا مع الاحتفاظ بأول إملاء ورد
+    في الإكسل حرفيًا وبنفس الترتيب.
+
+    مثال: ["حبه", "حبة", "كرتون"] -> ["حبه", "كرتون"]
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in units or []:
+        cu = clean_unit(u)
+        if not cu:
+            continue
+        key = unit_key(cu)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(cu)
+    return out
 
 
 def sanitize_item(item: str) -> str:
@@ -305,12 +364,14 @@ VALID_POLICIES = (UNIT_POLICY_PER_IMAGE, UNIT_POLICY_REPLICATE,
 def join_units(units: list[str] | tuple[str, ...],
                default_unit: str = UNIT_SUFFIX_DEFAULT) -> str:
     """يجمع وحدات الصنف كما وردت في الإكسل حرفيًا وبنفس الترتيب
-    (مع إزالة التكرار فقط) في مقطع واحد: حبة_شدة_كرتون."""
-    seen: list[str] = []
-    for u in units or []:
-        cu = clean_unit(sanitize_item(str(u)))
-        if cu and cu not in seen:
-            seen.append(cu)
+    (مع إزالة التكرار فقط) في مقطع واحد: حبة_شدة_كرتون.
+
+    2.9.3: إزالة التكرار تعتمد `unit_key` لا النص الخام، لأن الإكسل
+    قد يكتب الوحدة الواحدة بإملاءين (حبه/حبة) فيخرج الاسم
+    `10001102_حبه_حبة_كرتون` وفيه الوحدة نفسها مرتين. الإملاء
+    المحفوظ في الاسم هو **أول إملاء ورد في الإكسل** حرفيًا.
+    """
+    seen = dedupe_units([clean_unit(sanitize_item(str(u))) for u in (units or [])])
     if not seen:
         seen = [clean_unit(default_unit) or UNIT_SUFFIX_DEFAULT]
     return "_".join(seen)

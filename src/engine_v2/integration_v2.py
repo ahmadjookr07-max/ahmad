@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from .naming_v2 import (next_sequence, build_name, build_name_dash,
                         build_name_join_all, UNIT_POLICY_JOIN_ALL,
                         UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
-                        load_saved_settings, parse_name)
+                        load_saved_settings, parse_name, dedupe_units)
 
 if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
     from .processor_v2 import ProcessorV2, ProcessOptionsV2
@@ -200,13 +200,18 @@ def set_catalog_index(index) -> None:
 
 def _units_from_catalog(item: str) -> list[str]:
     """كل وحدات الصنف كما وردت في الإكسل حرفيًا وبنفس الترتيب
-    (لسياسة join_all_units) — تعيد [] إن لم يتوفر الكتالوج."""
+    (لسياسة join_all_units) — تعيد [] إن لم يتوفر الكتالوج.
+
+    2.9.3: تُحذف الوحدات المكررة إملائيًا (حبه/حبة) من المصدر
+    مع الاحتفاط بأول إملاء ورد في الإكسل حرفيًا.
+    """
     idx = _CATALOG_REF.get("index")
     if idx is not None:
         try:
             units = idx.units_for_code(str(item))
             if units:
-                return [str(u) for u in units if str(u or "").strip()]
+                return dedupe_units([str(u) for u in units
+                                     if str(u or "").strip()])
         except Exception:
             pass
     return []
