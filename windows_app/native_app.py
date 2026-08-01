@@ -2884,6 +2884,12 @@ class MainWindow(QMainWindow):
         list_header = _EditorFlowLayout(list_header_host, margin=0, spacing=6)
         list_title = QLabel("قائمة الصور والصنف")
         list_title.setObjectName("sectionTitle")
+        list_title.setToolTip("قائمة الصور والصنف")
+        # 2.9.3 إصلاح 12: على 800×600 يلتف صف الترويسة لسطرين فيأخذ
+        # 48px — أكبر بند بعد الجدول في عجز اللوحة. العنوان تزييني
+        # والأزرار وعدّاد الأصناف وظيفيان، فيُسقط العنوان عند الشدة
+        # القصوى وحدها فيعود الصف لسطر واحد بلا فقد أي وظيفة.
+        self.list_title_label = list_title
         list_header.addWidget(list_title)
         list_header.addWidget(self.table_position_label)
         list_header.addWidget(self.first_item_button)
@@ -4556,6 +4562,14 @@ class MainWindow(QMainWindow):
                     widget.setIconSize(QSize(scale.px(reference), scale.px(reference)))
             except Exception:
                 continue
+        # 2.9.3 إصلاح 12: عنوان قسم القائمة يُسقط عند الشدة القصوى
+        # فقط (معامل ≤ 0.70) لمنع التفاف الترويسة لسطرين.
+        title_label = getattr(self, "list_title_label", None)
+        if title_label is not None:
+            try:
+                title_label.setVisible(scale.factor > 0.70)
+            except Exception:
+                pass
         # 2.9.3 إصلاح 11: هوامش لوحة القائمة وتباعدها يُعاد حسابهما من
         # المرجع لا من القيمة الحالية، فلا يتراكم التصغير.
         pane_metrics = getattr(self, "_pane_layout_metrics", None)
