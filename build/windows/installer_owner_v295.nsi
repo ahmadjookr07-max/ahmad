@@ -44,7 +44,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright"  "Copyright (c) 2026 ${APP_PUBLISHER
 !insertmacro MUI_PAGE_INSTFILES
 
 !define MUI_FINISHPAGE_TITLE "تم التثبيت بنجاح"
-!define MUI_FINISHPAGE_TEXT  "ثُبّت ${APP_NAME_AR} ${APP_VERSION}.$\r$\n$\r$\nمهم جدًا: عند أول تشغيل ستُولَّد شفرة المالك في مجلد (${SECRETS_DIR}) داخل مجلد التثبيت. خذ نسخة احتياطية منها فورًا واحفظها في مكان آمن — فقدانها يعني عدم قدرتك على إصدار مفاتيح جديدة لنسختك الموزعة."
+!define MUI_FINISHPAGE_TEXT  "ثُبّت ${APP_NAME_AR} ${APP_VERSION}.$\r$\n$\r$\nمهم جدًا: عند أول تشغيل تُولَّد شفرة المالك في مجلد (${SECRETS_DIR}). افتح تبويب (الإعدادات) داخل البرنامج واضغط (فتح مجلد البيانات) لترى موقعها الدقيق، وخذ نسخة احتياطية فورًا في مكان آمن — فقدانها يعني عدم قدرتك على إصدار مفاتيح جديدة لنسختك الموزعة على العملاء."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "تشغيل ${APP_NAME_AR} الآن"
 !insertmacro MUI_PAGE_FINISH
@@ -77,8 +77,18 @@ Section "البرنامج الرئيسي" SecMain
   SetOverwrite ifnewer
   File /r "..\..\dist\windows\${APP_ID}\*.*"
 
-  ; مجلد شفرة المالك (يُنشأ فارغًا؛ البرنامج يولد الأسرار عند أول تشغيل)
+  ; مجلد شفرة المالك. يُنشأ هنا وتُمنح مجموعة (Users) صلاحية الكتابة عليه
+  ; حتى تبقى البيانات بجانب البرنامج (أسهل للنسخ الاحتياطي).
+  ; إن تعذّر منح الصلاحية فالبرنامج ينتقل تلقائيًا إلى %LOCALAPPDATA%
+  ; وينقل أي بيانات قديمة معه — لا فقدان للشفرة ولا لسجل العملاء.
   CreateDirectory "$INSTDIR\${SECRETS_DIR}"
+  ; icacls مدمج في ويندوز — لا يحتاج إضافة NSIS خارجية.
+  ; *S-1-5-32-545 هو SID مجموعة Users، مستقل عن لغة النظام.
+  nsExec::ExecToLog 'cmd /c icacls "$INSTDIR\${SECRETS_DIR}" /grant *S-1-5-32-545:(OI)(CI)M /T /C'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "تنبيه: لم تُمنح صلاحية الكتابة على مجلد البيانات — سيستخدم البرنامج %LOCALAPPDATA% تلقائيًا"
+  ${EndIf}
 
   WriteRegStr HKLM "Software\${APP_ID}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\${APP_ID}" "Version"    "${APP_VERSION}"

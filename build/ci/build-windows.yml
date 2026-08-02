@@ -35,8 +35,24 @@ jobs:
           pip install PySide6==6.8.1 opencv-python-headless numpy onnxruntime openpyxl pillow pytesseract arabic-reshaper python-bidi dilithium-py cryptography zxing-cpp pyinstaller
 
       # ---------------------------------------------------------------- الترخيص
-      # شفرة المالك تبقى ثابتة افتراضيًا حتى لا تبطل مفاتيح العملاء الحالية.
-      # التوليد الجديد يدويّ فقط عبر workflow_dispatch.
+      # شفرة المالك (owner_secrets.json) سرية ولا تُرفع للمستودع أبدًا.
+      # هي مخزّنة كـ GitHub Secret باسم OWNER_SECRETS_JSON (محتوى الملف كما هو).
+      # لإضافتها: Settings > Secrets and variables > Actions > New repository secret
+      - name: Restore owner secrets from GitHub Secret
+        shell: pwsh
+        env:
+          OWNER_SECRETS_JSON: ${{ secrets.OWNER_SECRETS_JSON }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OWNER_SECRETS_JSON)) {
+            Write-Host "::warning::لا يوجد OWNER_SECRETS_JSON — سيُتجاوز التحقق من الربط"
+          } else {
+            $dir = "owner_studio/بيانات_المالك"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            [System.IO.File]::WriteAllText("$dir/owner_secrets.json", $env:OWNER_SECRETS_JSON, (New-Object System.Text.UTF8Encoding $false))
+            Write-Host "استُعيدت شفرة المالك من GitHub Secret"
+          }
+
+      # التوليد الجديد يدويّ فقط — يبطل كل مفاتيح العملاء الحالية.
       - name: Regenerate owner secrets (manual only)
         if: ${{ inputs.regenerate_owner_secrets == true }}
         shell: pwsh
@@ -47,9 +63,13 @@ jobs:
       - name: Verify owner-user license link
         shell: pwsh
         run: |
-          $out = python tools/verify_owner_link.py 2>&1 | Out-String
-          Write-Host $out
-          if ($LASTEXITCODE -ne 0) { throw "الربط بين برنامج المالك وبرنامج المستخدم مكسور — أوقف البناء" }
+          if (Test-Path "owner_studio/بيانات_المالك/owner_secrets.json") {
+            $out = python tools/verify_owner_link.py 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { throw "الربط بين برنامج المالك وبرنامج المستخدم مكسور — أوقف البناء" }
+          } else {
+            Write-Host "::warning::تخطّي التحقق من الربط (لا شفرة مالك في بيئة البناء) — شغّل tools/verify_owner_link.py على جهازك"
+          }
 
       # ------------------------------------------------------------- النماذج
       - name: Download ISNet model
@@ -73,7 +93,8 @@ jobs:
           $env:PYTHONPATH = "src;windows_app;owner_studio;."
           $env:QT_QPA_PLATFORM = "offscreen"
           $failed = @()
-          foreach ($t in @("test_license.py", "test_trial_and_link.py", "test_units.py")) {
+          foreach ($t in @("test_license.py", "test_trial_and_link.py",
+                           "test_units.py", "test_owner_data_dir.py")) {
             Write-Host "----- $t"
             python "tests/$t"
             if ($LASTEXITCODE -ne 0) { $failed += $t }

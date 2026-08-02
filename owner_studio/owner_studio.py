@@ -32,11 +32,52 @@ def _base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+_DATA_DIR_NAME = "بيانات_المالك"
+
+
+def _is_writable(d: Path) -> bool:
+    """فحص فعلي للكتابة — لا يكفي os.access على ويندوز بسبب UAC."""
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".w"
+        probe.write_text("1", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _fallback_data_dir() -> Path:
+    """مجلد بديل دائم الكتابة في ملف المستخدم."""
+    root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    base = Path(root) if root else Path.home() / ".local" / "share"
+    return base / "AhmedAlFaifiOwnerStudio" / _DATA_DIR_NAME
+
+
 def _data_dir() -> Path:
-    """مجلد بيانات المالك: بجانب البرنامج (محمول) لسهولة النسخ الاحتياطي."""
-    d = _base_dir() / "بيانات_المالك"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """مجلد بيانات المالك.
+
+    الأفضلية لمجلد بجانب البرنامج (محمول — أسهل للنسخ الاحتياطي).
+    لكن إن كان البرنامج مُثبّتًا في Program Files فويندوز يمنع الكتابة
+    بجانبه للمستخدم العادي (أو يحوّلها لـ VirtualStore فتضيع صامتًا)،
+    لذلك ننتقل لمجلد المستخدم وننقل أي بيانات قديمة مرة واحدة.
+    """
+    portable = _base_dir() / _DATA_DIR_NAME
+    if _is_writable(portable):
+        return portable
+
+    fb = _fallback_data_dir()
+    fb.mkdir(parents=True, exist_ok=True)
+    # هجرة لمرة واحدة: انقل ما كان بجانب البرنامج إن وجد ولم يُنقل بعد
+    try:
+        if portable.is_dir():
+            for f in portable.glob("*.json"):
+                dst = fb / f.name
+                if not dst.exists():
+                    dst.write_bytes(f.read_bytes())
+    except Exception:
+        pass
+    return fb
 
 
 BASE = _base_dir()
@@ -284,7 +325,8 @@ class OwnerStudio(tk.Tk):
             return
         save_secrets(sec)
         self.secrets = sec
-        messagebox.showinfo("تم", "استُوردت شفرة المالك بنجاح وحُفظت في مجلد بيانات_المالك بجانب البرنامج.")
+        messagebox.showinfo(
+            "تم", f"استُوردت شفرة المالك بنجاح وحُفِظت في:\n{DATA}")
         self._build_main_ui()
 
     def _generate_new_secrets(self):
@@ -308,7 +350,7 @@ class OwnerStudio(tk.Tk):
         save_secrets(sec)
         self.secrets = sec
         messagebox.showinfo(
-            "تم", "وُلدت شفرة مالك جديدة وحُفظت في مجلد بيانات_المالك.\n"
+            "تم", f"وُلدت شفرة مالك جديدة وحُفِظت في:\n{DATA}\n\n"
             "مهم: انسخ المفاتيح العامة من تبويب (الإعدادات) واغرسها في "
             "برنامج العملاء قبل البناء القادم.")
         self._build_main_ui()
@@ -927,7 +969,7 @@ class OwnerStudio(tk.Tk):
         tk.Label(c2, text="أين تُحفظ بياناتي؟", font=F_H, bg=C_CARD,
                  fg=C_GOLD).pack(anchor="e", padx=16, pady=(14, 2))
         tk.Label(c2,
-                 text=f"كل شيء في مجلد واحد بجانب البرنامج:\n{DATA}\n"
+                 text=f"كل شيء في مجلد واحد:\n{DATA}\n"
                       "انسخ هذا المجلد كاملًا = نسخة احتياطية يدوية كاملة.",
                  font=F_BODY, bg=C_CARD, fg=C_TEXT,
                  justify="right").pack(anchor="e", padx=16, pady=(0, 8))
