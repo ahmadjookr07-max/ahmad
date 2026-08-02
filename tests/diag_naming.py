@@ -35,6 +35,21 @@ def check(name, ok, detail=""):
 
 native = (ROOT / "windows_app" / "native_app.py").read_text(encoding="utf-8")
 
+
+def _strip_comments(src: str) -> str:
+    """يجرد تعليقات الأسطر — ذكر اسم محذوف في تعليق
+    من نوع «حُذف كذا» ليس تكرارًا ولا منفذًا حقيقيًا."""
+    out = []
+    for line in src.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+native_code = _strip_comments(native)
+
 print("=" * 70)
 print("A) توصيل جذر بيانات التسمية")
 print("=" * 70)
@@ -118,17 +133,19 @@ check("زر سياسة التسمية موجود ومربوط بمعالج",
       "naming_policy_button" in native
       and "_open_naming_policy" in native,
       "الزر أو المعالج ناقص")
-check("أداة إعادة التسمية الجماعية موصولة",
-      "BulkRenameDialog" in native,
-      "لا وصول لأداة إعادة تسمية الملفات القديمة")
-check("زر إعادة التسمية موجود ومربوط بمعالج",
-      "bulk_rename_button" in native and "_open_bulk_rename" in native,
-      "الزر أو المعالج ناقص")
+# 2.9.5 — أداة إعادة التسمية المستقلة حُذفت: قرار المالك «لا تكرار».
+# الفحص انعكس: نتأكد من غيابها ومن وجود المنفذ الموحد بدلها.
+check("أداة التسمية المستقلة محذوفة (لا تكرار)",
+      "BulkRenameDialog" not in native_code
+      and "_open_bulk_rename" not in native_code,
+      "ما زال هناك منفذ قديم لأداة تسمية مستقلة")
+check("زر «فتح مجلد منجز» هو المنفذ الموحد",
+      "فتح مجلد منجز" in native
+      and "_open_legacy_folder" in native,
+      "الزر الموحد أو معالجه ناقص")
 check("أزرار التسمية تتبع نظام المقياس (لا أرقام صلبة)",
       bool(re.search(
-          r"_register_metric\(self\.naming_policy_button", native))
-      and bool(re.search(
-          r"_register_metric\(self\.bulk_rename_button", native)),
+          r"_register_metric\(self\.naming_policy_button", native)),
       "زر بارتفاع صلب يُقص على الشاشات القصيرة")
 check("السياسة تُعاد قراءتها بعد الحفظ بلا إعادة تشغيل",
       "_after_naming_policy_changed" in native,

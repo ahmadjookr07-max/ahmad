@@ -2041,8 +2041,10 @@ class MainWindow(QMainWindow):
             "والوحدة تُقرأ حرفيًا من الإكسل دون تغيير.")
         self.naming_policy_button.clicked.connect(self._open_naming_policy)
         self._register_metric(self.naming_policy_button, "min_height", 34)
-        # 2.9.4 (قرار المالك): أُلغي منفذ التعديل القديم (نافذة
-        # BulkRenameDialog المستقلة) وحلّ محلّه فتح المجلد المنجز
+        # 2.9.5 (قرار المالك — منفّذ بالكامل): منفذ التعديل القديم
+        # (نافذة التسمية المستقلة) لم يُخفَ فقط بل **حُذف من الجذور**:
+        # النافذة ودالة فتحها وزرها وأنماطها — لأن الترك يعني وجود
+        # الوظيفة في مكانين. المنفذ الوحيد الآن هو فتح المجلد المنجز
         # **داخل نفس استوديو المراجعة والربط**: «كل شيء يعمل في
         # واجهة واحدة». تبديل لا إضافة حتى لا ينكسر توازن الأزرار
         # المُعاير على 800×600.
@@ -4990,43 +4992,9 @@ class MainWindow(QMainWindow):
             report_csv="",
         )
 
-    def _open_bulk_rename(self) -> None:
-        """يفتح أداة إعادة تسمية وتنطيف مجلد نتائج سابق.
-
-        2.9.4: لم يبق لها زر في الواجهة (قرار المالك: إلغاء مكان
-        التعديل القديم وتوحيد العمل في واجهة واحدة)، وتُبقى الدالة
-        لتوافق الاختبارات القائمة وللاستدعاء البرمجي إن لزم.
-        """
-        try:
-            from v2_ui import BulkRenameDialog
-        except Exception:
-            try:
-                from windows_app.v2_ui import BulkRenameDialog
-            except Exception as exc:
-                QMessageBox.warning(
-                    self, "إعادة التسمية",
-                    "تعذّر فتح أداة إعادة التسمية.\n"
-                    f"السبب: {exc}")
-                return
-        try:
-            dlg = BulkRenameDialog(self)
-            # تهيئة مسبقة بمجلد النتائج الحالي إن توفر — يوفر خطوة استعراض
-            out = ""
-            ws = getattr(self, "current_workspace", None)
-            if ws is not None:
-                try:
-                    out = str(ws) if Path(ws).is_dir() else ""
-                except Exception:
-                    out = ""
-            if out and hasattr(dlg, "folder_edit"):
-                try:
-                    dlg.folder_edit.setText(str(out))
-                except Exception:
-                    pass
-            dlg.exec()
-        except Exception as exc:
-            QMessageBox.warning(self, "إعادة التسمية",
-                                f"تعذّر فتح الأداة.\nالسبب: {exc}")
+    # 2.9.5 — _open_bulk_rename حُذفت مع BulkRenameDialog نهائيًا.
+    # قرار المالك: لا تكرار — مكان واحد للوظيفة. المجلدات
+    # المنجزة تُفتح بـ_open_legacy_folder داخل جدول المراجعة نفسه.
 
     def _select_catalog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(

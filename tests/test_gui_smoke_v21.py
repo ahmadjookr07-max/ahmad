@@ -19,7 +19,15 @@ def check(name, fn):
         print(f"PASS {name}")
     except Exception as exc:
         failures.append((name, exc))
-        print(f"FAIL {name}: {exc}")
+        # إظهار النوع والموقع — بعض الاستثناءات (مثل AssertionError
+        # بلا رسالة) تطبع فارغًا فيضيع السبب ويصعب الإصلاح.
+        import traceback
+        tb = traceback.extract_tb(exc.__traceback__)
+        where = f"{tb[-1].filename.split('/')[-1]}:{tb[-1].lineno}" if tb else "?"
+        detail = str(exc) or f"{type(exc).__name__} بلا رسالة"
+        code = tb[-1].line if tb else ""
+        print(f"FAIL {name}: {detail} @ {where}"
+              + (f"\n      السطر: {code}" if code else ""))
 
 
 def t_imports():
@@ -56,13 +64,25 @@ def t_mainwindow():
     # v2.2: الأزرار انتقلت من الهيدر إلى شريط أدوات v2Toolbar مستقل (إصلاح التداخل)
     names = [w.objectName() for w in win.findChildren(
         __import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)]
+    # 2.6+: زر «v2EditorBtn» (محرر الصور المنفصل) حُذف — أدواته
+    # مدمجة في تبويب «تعديل الصورة» (editImageButton) داخل النافذة.
     for expected in ("v2HelpBtn", "v2SaveNowBtn", "v2RefineBtn",
-                     "v2EditorBtn", "v2NutritionToolbarBtn"):
+                     "v2NutritionToolbarBtn", "editImageButton"):
         assert expected in names, f"{expected} not in window: {names[:20]}"
+    # ولا يجوز عودة المحرر المنفصل كزر ثانٍ (تكرار)
+    assert "v2EditorBtn" not in names, \
+        "v2EditorBtn عاد — تكرار لمحرر الصور المدمج"
     # v2.2: أداة الميول اليدوية الخارجية في شريط الربط
     assert hasattr(win, "manual_tilt_spin"), "manual_tilt_spin missing"
-    # جدول النتائج بمصغرات مكبرة
-    assert win.results_table.iconSize().width() == 80
+    # جدول النتائج بمصغرات مكبرة — لكن القيمة **تكيفية** لا صلبة:
+    # المرجع 80px يتقلّص تلقائيًا حتى 28px عند شاشة/نافذة ضيقة لمنع
+    # قص الباركود أو الاسم (مطلب المالك: لا نص مقصوص ولا تمرير
+    # أفقي). فرض == 80 يكسر التكيف ويفشل في offscreen (عرض صغير).
+    icon_side = win.results_table.iconSize().width()
+    assert 28 <= icon_side <= 80, \
+        f"حجم المصغرة {icon_side} خارج المدى المقبول 28..80"
+    assert win.results_table.iconSize().height() == icon_side, \
+        "المصغرة غير مربعة — تشوه نسبة العرض"
     win.close()
 
 
@@ -77,15 +97,22 @@ def t_editor():
     dlg.close()
 
 
-def t_bulk_rename_tabs():
-    from PySide6.QtWidgets import QApplication, QTabWidget
-    app = QApplication.instance() or QApplication(sys.argv[:1])
+def t_no_rename_duplicate():
+    """2.9.5 — أداة إعادة التسمية المستقلة حُذفت نهائيًا.
+
+    قرار المالك: لا تكرار — وظيفة واحدة في مكان واحد. هذا الاختبار
+    يحرس القرار: أي محاولة مستقبلية لإعادة النافذة أو زرها تُفشله.
+    """
     import v2_ui
-    dlg = v2_ui.BulkRenameDialog(parent=None)
-    tabs = dlg.findChildren(QTabWidget)
-    assert tabs, "BulkRenameDialog has no tabs"
-    assert tabs[0].count() >= 3, f"expected >=3 tabs, got {tabs[0].count()}"
-    dlg.close()
+    import native_app_v2
+    import inspect
+    assert not hasattr(v2_ui, "BulkRenameDialog"), \
+        "BulkRenameDialog عادت للوجود — تكرار ممنوع"
+    src = inspect.getsource(native_app_v2)
+    assert 'QPushButton("أداة إعادة التسمية")' not in src, \
+        "زر «أداة إعادة التسمية» عاد لشريط الأدوات — تكرار ممنوع"
+    assert "v2_open_rename_tool" not in src, \
+        "منفذ v2_open_rename_tool عاد — تكرار ممنوع"
 
 
 def t_batch_refine_options():
@@ -110,7 +137,7 @@ check("imports_engine", t_engine_imports)
 check("license_trial_3days", t_license_trial)
 check("mainwindow_buttons", t_mainwindow)
 check("editor_new_tools", t_editor)
-check("bulk_rename_tabs", t_bulk_rename_tabs)
+check("no_rename_duplicate", t_no_rename_duplicate)
 check("batch_refine_options", t_batch_refine_options)
 check("platform_profiles", t_platform_profiles)
 

@@ -86,9 +86,11 @@ for lbl in win.findChildren(QLabel):
         break
 check("license_badge_visible", badge_found)
 
-# 4) أزرار V2 في الهيدر
+# 4) أزرار V2 في شريط الأدوات
+# 2.6+: زر «محرر الصور» المنفصل حُذف — المحرر مدمج في تبويب
+# «تحرير» (الزر editImageButton نصه «✎ تحرير») داخل النافذة نفسها.
 btn_texts = [b.text() for b in win.findChildren(QPushButton)]
-for want, name in [("محرر", "btn_editor"), ("ضبط الصور", "btn_refine"),
+for want, name in [("تحرير", "btn_editor"), ("ضبط الصور", "btn_refine"),
                    ("تسمية", "btn_naming"), ("جلسات", "btn_sessions")]:
     check(name, any(want in t for t in btn_texts),
           "" if any(want in t for t in btn_texts) else str(btn_texts[:10]))
@@ -164,16 +166,30 @@ try:
 except Exception as exc:
     check("nutrition_dialog", False, str(exc))
 
-# 8) نافذة إعادة التسمية الجماعية
+# 8) نافذة إعادة التسمية الجماعية — حُذفت نهائيًا في 2.9.5
+#    قرار المالك: «لا تكرار — كل شيء في واجهة واحدة». المجلدات المنجزة
+#    تُفتح بزر «فتح مجلد منجز» داخل جدول المراجعة نفسه. الاختبار الآن
+#    يتحقق من **غياب** النافذة بدل وجودها.
+check("rename_dialog_removed",
+      not hasattr(v2_ui, "BulkRenameDialog"),
+      "BulkRenameDialog ما زالت موجودة — تكرار لم يُحذف")
+check("rename_port_removed",
+      not hasattr(win, "v2_open_rename_tool"),
+      "v2_open_rename_tool ما زال موصولًا بالنافذة")
+
+# 8ب) المنفذ البديل الوحيد: زر «فتح مجلد منجز» في النافذة الرئيسية
 try:
-    rdlg = v2_ui.BulkRenameDialog(win)
-    rdlg.show()
-    app.processEvents()
-    check("rename_dialog", rdlg.isVisible())
-    check("rename_shot", shot(rdlg, "05_rename"))
-    rdlg.close()
+    from PySide6.QtWidgets import QPushButton
+    legacy_btns = [b for b in win.findChildren(QPushButton)
+                   if "فتح مجلد منجز" in (b.text() or "")]
+    check("legacy_folder_button_present", len(legacy_btns) == 1,
+          f"عدد الأزرار = {len(legacy_btns)} (يجب 1 بالضبط)")
+    rename_btns = [b for b in win.findChildren(QPushButton)
+                   if "أداة إعادة التسمية" in (b.text() or "")]
+    check("no_visible_rename_button", not rename_btns,
+          f"أزرار تسمية مرئية = {len(rename_btns)} (يجب 0)")
 except Exception as exc:
-    check("rename_dialog", False, str(exc))
+    check("legacy_folder_button_present", False, str(exc))
 
 # 9) نافذة الجلسات
 try:
