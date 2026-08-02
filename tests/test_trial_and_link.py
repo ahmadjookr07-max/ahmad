@@ -11,6 +11,7 @@
 7. الاشتراك المدفوع المنتهي لا يعيد فتح فترة تجريبية جديدة.
 """
 import json
+import os
 import shutil
 import sys
 import time
@@ -30,11 +31,41 @@ def check(name, cond, note=""):
           (f" — {note}" if note else ""))
 
 
+def _clear_attrs(path):
+    """يزيل سمة hidden/readonly على ويندوز قبل الكتابة أو الحذف.
+
+    الإنتاج يضع ملف الأثر الثانوي (.trial.dat) مخفيًا عبر
+    SetFileAttributesW(0x02)، وويندوز يرفض فتحه للكتابة مباشرة
+    فيرمي PermissionError. لذلك نعيده NORMAL(0x80) قبل أي عملية،
+    وهو نفس ما يفعله license_v2 في الإنتاج.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)
+    except Exception:
+        pass
+
+
+def fwrite(path, blob):
+    """كتابة قسرية تعمل على ويندوز ولينكس معًا."""
+    _clear_attrs(path)
+    Path(path).write_bytes(blob)
+
+
+def fdelete(path):
+    """حذف قسري يعمل على ويندوز ولينكس معًا."""
+    _clear_attrs(path)
+    Path(path).unlink()
+
+
 def clean_state():
     """يمسح كل آثار الترخيص/التجربة/الساعة لبدء حالة جهاز جديد."""
     d = lv._license_dir()
     for p in list(d.iterdir()):
         try:
+            _clear_attrs(p)
             p.unlink()
         except Exception:
             shutil.rmtree(p, ignore_errors=True)
@@ -73,21 +104,21 @@ check("trial_shadow_exists", shadow_trial.is_file(), str(shadow_trial.name))
 # اجعل بداية التجربة قديمة (يومان) في كلا الأثرين
 old_start = int(time.time()) - 2 * 86400
 blob = lv._encrypt(json.dumps({"start": old_start}).encode(), b"trial")
-main_trial.write_bytes(blob)
-shadow_trial.write_bytes(blob)
+fwrite(main_trial, blob)
+fwrite(shadow_trial, blob)
 t2 = lv.start_or_check_trial()
 check("trial_counts_elapsed", t2.valid and t2.days_left <= 1,
       f"متبق {t2.days_left}")
 
 # احذف الملف الرئيسي فقط: الأثر الثانوي يحفظ التاريخ الأقدم
-main_trial.unlink()
+fdelete(main_trial)
 t3 = lv.start_or_check_trial()
 check("trial_delete_no_reset", t3.days_left == t2.days_left,
       f"قبل {t2.days_left} بعد {t3.days_left}")
 
 # احذف الأثر الثانوي أيضًا وأعد الرئيسي بتاريخ قديم: يبقى الأقدم معتمدًا
-shadow_trial.unlink()
-main_trial.write_bytes(blob)
+fdelete(shadow_trial)
+fwrite(main_trial, blob)
 t4 = lv.start_or_check_trial()
 check("trial_oldest_wins", t4.days_left == t2.days_left,
       f"متبق {t4.days_left}")
@@ -96,11 +127,11 @@ check("trial_oldest_wins", t4.days_left == t2.days_left,
 clock = d / lv.CLOCK_FILENAME if hasattr(lv, "CLOCK_FILENAME") else None
 future = int(time.time()) + 30 * 86400
 if clock is not None:
-    clock.write_bytes(lv._encrypt(str(future).encode(), b"clock"))
+    fwrite(clock, lv._encrypt(str(future).encode(), b"clock"))
     t5 = lv.start_or_check_trial()
     check("clock_tamper_detected", not t5.valid and "ساعة" in t5.status,
           t5.status)
-    clock.unlink()
+    fdelete(clock)
 else:
     check("clock_tamper_detected", False, "CLOCK_FILENAME غير معرّف")
 
@@ -108,8 +139,8 @@ else:
 clean_state()
 expired = int(time.time()) - (lv.TRIAL_DAYS + 1) * 86400
 blob_exp = lv._encrypt(json.dumps({"start": expired}).encode(), b"trial")
-main_trial.write_bytes(blob_exp)
-shadow_trial.write_bytes(blob_exp)
+fwrite(main_trial, blob_exp)
+fwrite(shadow_trial, blob_exp)
 t6 = lv.start_or_check_trial()
 check("trial_expired_blocks", not t6.valid and t6.days_left == 0, t6.status)
 check("trial_expired_msg", "تفعيل" in t6.status or "المالك" in t6.status,
@@ -165,7 +196,7 @@ lic_path = d / lv.LICENSE_FILENAME
 raw = lv._decrypt(lic_path.read_bytes(), b"license")
 payload = json.loads(raw.decode("utf-8"))
 payload["exp"] = int(time.time()) - 10
-lic_path.write_bytes(lv._encrypt(
+fwrite(lic_path, lv._encrypt(
     json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
     b"license"))
 eff3 = lv.effective_license()

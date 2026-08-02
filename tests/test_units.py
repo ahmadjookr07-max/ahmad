@@ -5,6 +5,7 @@
 والتطبيع مسموح للمقارنة الداخلية فقط لا في أسماء الملفات.
 """
 import glob
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +25,22 @@ def check(name, cond, note=""):
           (f" — {note}" if note else ""))
 
 
-cands = sorted(glob.glob("/home/ubuntu/upload/*.xlsx"))
+def asset_dirs():
+    """مجلدات البحث عن أصول الاختبار، محايدة لنوع نظام التشغيل."""
+    dirs = []
+    env = os.environ.get("TEST_ASSETS_DIR", "").strip()
+    if env:
+        dirs.append(Path(env))
+    dirs.append(Path("/home/ubuntu/upload"))
+    dirs.append(ROOT / "test_assets")
+    return dirs
+
+
+cands = []
+for d in asset_dirs():
+    cands = sorted(glob.glob(str(d / "*.xlsx")))
+    if cands:
+        break
 if not cands:
     print("لا يوجد ملف إكسل للاختبار — شغّل tests/make_test_assets.py أولًا")
     sys.exit(1)

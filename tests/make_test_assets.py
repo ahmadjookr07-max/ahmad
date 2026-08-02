@@ -1,14 +1,29 @@
 # -*- coding: utf-8 -*-
-"""توليد أصول اختبار بديلة في /home/ubuntu/upload:
-صورة منتج اصطناعية بالاسم المفقود + ملف إكسل كتالوج صغير."""
+"""توليد أصول اختبار بديلة: صورة منتج اصطناعية + ملف إكسل كتالوج صغير.
+
+مجلد الأصول يُحدَّد بمتغير البيئة TEST_ASSETS_DIR؛ وإن غاب فيُستخدم
+/home/ubuntu/upload على لينكس أو <جذر المشروع>/test_assets على ويندوز،
+حتى يعمل الاختبار في الساندبوكس وعلى مُشغّل ويندوز في CI على حد سواء."""
+import os
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-UP = Path("/home/ubuntu/upload")
-UP.mkdir(exist_ok=True)
+
+def assets_dir() -> Path:
+    env = os.environ.get("TEST_ASSETS_DIR", "").strip()
+    if env:
+        return Path(env)
+    legacy = Path("/home/ubuntu/upload")
+    if legacy.parent.is_dir():
+        return legacy
+    return Path(__file__).resolve().parent.parent / "test_assets"
+
+
+UP = assets_dir()
+UP.mkdir(parents=True, exist_ok=True)
 
 # صورة منتج اصطناعية (عبوة على خلفية فاتحة)
 img = np.full((1200, 900, 3), 235, np.uint8)
