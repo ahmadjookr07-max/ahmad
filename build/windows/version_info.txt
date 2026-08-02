@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 0, 0, 0),
-    prodvers=(2, 0, 0, 0),
+    filevers=(2, 9, 5, 0),
+    prodvers=(2, 9, 5, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Ahmed Al-Faifi'),
             StringStruct('FileDescription', 'Ahmed Al-Faifi Market Image Studio'),
-            StringStruct('FileVersion', '2.1.0'),
+            StringStruct('FileVersion', '2.9.5'),
             StringStruct('InternalName', 'AhmedAlFaifiMarketImageStudio'),
             StringStruct('LegalCopyright', 'Copyright 2026 Ahmed Al-Faifi'),
             StringStruct('OriginalFilename', 'AhmedAlFaifiMarketImageStudio.exe'),
             StringStruct('ProductName', 'Ahmed Al-Faifi Market Image Studio'),
-            StringStruct('ProductVersion', '2.1.0')
+            StringStruct('ProductVersion', '2.9.5')
           ]
         )
       ]

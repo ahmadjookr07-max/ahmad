@@ -4,8 +4,10 @@ import base64
 import json
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from engine_v2 import license_v2 as lv
 
@@ -18,10 +20,21 @@ def check(name, cond, note=""):
           (f" — {note}" if note else ""))
 
 
-# 1) توليد مفاتيح المالك
+# 1) توليد مفاتيح المالك (كلاسيكي + مقاوم للكم)
 priv, pub = lv.generate_owner_keypair()
 check("keypair", len(base64.b64decode(priv)) == 32
       and len(base64.b64decode(pub)) == 32)
+
+# التوقيع الهجين إلزامي في المحرك: اغرس مفتاح PQC عام تجريبيًا
+# ومرر الخاص لكل مفتاح يُصدر، وإلا رُفض المفتاح بحق كما لو كان مزورًا.
+pqc_priv, pqc_pub = lv.generate_pqc_keypair()
+lv.OWNER_PQC_PUBLIC_KEY_B64 = pqc_pub
+
+
+def issue(fp, plan, days, note=""):
+    """يُصدر مفتاحًا موقعًا توقيعًا هجينًا كما يفعل استوديو المالك."""
+    return lv.make_activation_key(priv, fp, plan, days, note,
+                                  pqc_private_key_b64=pqc_priv)
 
 # 2) بصمة الجهاز ثابتة وصيغتها صحيحة
 fp1, fp2 = lv.machine_fingerprint(), lv.machine_fingerprint()
@@ -29,8 +42,8 @@ check("fingerprint", fp1 == fp2 and len(fp1) == 19 and fp1.count("-") == 3,
       fp1)
 
 # 3) إصدار مفتاح شهري وتفعيله
-key = lv.make_activation_key(priv, fp1, "monthly", 30, "جهاز المالك")
-check("key_format", key.startswith("SCV2.") and key.count(".") == 2)
+key = issue(fp1, "monthly", 30, "جهاز المالك")
+check("key_format", key.startswith("SCV2.") and key.count(".") == 3)
 info = lv.activate_with_key(key, pub)
 check("activate", info.valid and 28 <= info.days_left <= 30, info.status)
 
@@ -39,7 +52,7 @@ info2 = lv.check_license(pub)
 check("check_stored", info2.valid and info2.plan == "monthly", info2.status)
 
 # 5) مفتاح لجهاز آخر يُرفض
-key_other = lv.make_activation_key(priv, "AAAA-BBBB-CCCC-DDDD", "yearly", 365)
+key_other = issue("AAAA-BBBB-CCCC-DDDD", "yearly", 365)
 info3 = lv.activate_with_key(key_other, pub)
 check("reject_other_device", not info3.valid
       and "جهاز آخر" in info3.status, info3.status)
@@ -55,15 +68,18 @@ check("reject_forged", not info4.valid and "مرفوض" in info4.status,
       info4.status)
 
 # 7) مفتاح منتهي الصلاحية يُرفض
-key_exp = lv.make_activation_key(priv, fp1, "trial", 30)
+# يُوقع توقيعًا هجينًا صحيحًا حتى يكون سبب الرفض الانتهاء لا التوقيع
+key_exp = issue(fp1, "trial", 30)
 pl, sg, _ = lv.parse_activation_key(key_exp)
-# أعد توقيع حمولة منتهية فعليًا بالمفتاح الصحيح
+pl.pop("_pqc_sig_b64", None)
 pl["exp"] = int(time.time()) - 10
 raw = json.dumps(pl, sort_keys=True, separators=(",", ":")).encode()
 sig = lv._sign_ed25519(priv, raw)
 expired_key = ("SCV2." + base64.urlsafe_b64encode(raw).decode().rstrip("=")
                + "." + base64.urlsafe_b64encode(
-                   base64.b64decode(sig)).decode().rstrip("="))
+                   base64.b64decode(sig)).decode().rstrip("=")
+               + "." + base64.urlsafe_b64encode(
+                   lv._sign_pqc(pqc_priv, raw)).decode().rstrip("="))
 info5 = lv.activate_with_key(expired_key, pub)
 check("reject_expired", not info5.valid and "انته" in info5.status,
       info5.status)
@@ -74,7 +90,7 @@ info6 = lv.check_license(pub)
 check("revocation", not info6.valid and "ملغى" in info6.status, info6.status)
 
 # 9) إعادة تفعيل بمفتاح جديد بعد الإلغاء (lid جديد)
-key2 = lv.make_activation_key(priv, fp1, "lifetime", 0)
+key2 = issue(fp1, "lifetime", 0)
 info7 = lv.activate_with_key(key2, pub)
 check("reactivate_lifetime", info7.valid and info7.days_left == -1,
       info7.status)

@@ -35,23 +35,33 @@ class ProductSegmenterV2:
         self._input_size = 1024
 
     # ----------------------------------------------------------- session
+    def _search_dirs(self) -> list[Path]:
+        """مجلدات البحث: الممرر صراحة ثم محدد المسارات الموحد."""
+        dirs = [self.model_dir, self.model_dir / "models"]
+        try:
+            from engine_v2.paths_v2 import models_dir
+            d = Path(models_dir())
+            dirs += [d, d / "models"]
+        except Exception:
+            pass
+        out, seen = [], set()
+        for d in dirs:
+            k = str(d)
+            if k not in seen:
+                seen.add(k)
+                out.append(d)
+        return out
+
     def _find_model(self) -> Path | None:
-        candidates = [
-            self.model_dir / "isnet-general-use.onnx",
-            self.model_dir / "models" / "isnet-general-use.onnx",
-            Path("/home/ubuntu/v2_project/models_v2/isnet-general-use.onnx"),
-        ]
-        for c in candidates:
-            if c.is_file():
-                return c
-        # u2net احتياطي (وu2netp الأخف للبيئات المحدودة)
-        for c in [self.model_dir / "u2net.onnx",
-                  self.model_dir / "u2netp.onnx",
-                  self.model_dir / "models" / "u2net.onnx",
-                  self.model_dir / "models" / "u2netp.onnx",
-                  self.model_dir.parent.parent / "resources" / "models" / "u2net.onnx"]:
-            if c.is_file():
-                return c
+        # ISNet أولاً (أدق حواف)، ثم u2net فالأخف u2netp للبيئات المحدودة
+        for fname in ("isnet-general-use.onnx", "u2net.onnx", "u2netp.onnx"):
+            for d in self._search_dirs():
+                c = d / fname
+                try:
+                    if c.is_file():
+                        return c
+                except Exception:
+                    continue
         return None
 
     def _get_session(self):

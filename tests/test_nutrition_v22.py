@@ -141,8 +141,19 @@ def main() -> int:
           bool(r2.nutrition_output_path) and
           Path(r2.nutrition_output_path).is_file(),
           r2.nutrition_output_path)
-    check("standalone: داخل مجلد حقائق التغذية",
-          nut_dir.is_dir() and any(nut_dir.glob("*_تغذية.webp")))
+    # من 2.3: الصورة المنفردة تُحفظ **بجانب صور الصنف** وتُرقّم ضمنها
+    # وفق سياسة التسمية (10014649_قوة-1) لتُرفع للمتجر مباشرة،
+    # وترجع لمجلد "حقائق التغذية" فقط إن تعذر تحليل الاسم.
+    _np = Path(r2.nutrition_output_path) if r2.nutrition_output_path else None
+    _beside = bool(_np) and _np.parent == out_dir and "10014649" in _np.stem
+    _legacy = nut_dir.is_dir() and any(nut_dir.glob("*_تغذية.webp"))
+    check("standalone: تُرقّم بجانب صور الصنف (أو مجلد التغذية)",
+          _beside or _legacy,
+          f"path={r2.nutrition_output_path} beside={_beside} "
+          f"legacy={_legacy}")
+    if _beside:
+        check("standalone: لا تدوس الناتج الرئيسي",
+              _np.name != "10014649_قوة.webp", _np.name)
 
     # rebuild بقيم معتمدة (لا OCR — تطابق 100%)
     from engine_v2.nutrition_ocr_v2 import blank_template

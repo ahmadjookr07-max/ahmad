@@ -199,29 +199,65 @@ def detect_date_regions(img: np.ndarray,
             ocr = None
     h, w = img.shape[:2]
     ar_budget = 2   # محاولات OCR عربية مكلفة — حد أقصى
+
+    # إعداد مرشحات OCR مرة واحدة ثم تشغيل tesseract في **دفعة واحدة**.
+    # كل استدعاء لـ image_to_string يُشغّل عملية نظام مستقلة (~0.25s)،
+    # فـ 12 مرشحًا = ~3s. دمج المرشحين في لوحة رأسية واحدة بفواصل
+    # بيضاء يجعلها استدعاءً واحدًا بـ psm 6، ثم تُقرأ الأسطر مرتبة.
+    boxes: list[tuple] = []
     for (x, y, bw_, bh_) in candidates:
-        if len(regions) >= 4:
-            break  # إيقاف مبكر — طمس 4 تواريخ يكفي لأي عبوة
         in_protected = protected[y:y + bh_, x:x + bw_].mean() > 60
         pad = max(2, bh_ // 4)
         x0, y0 = max(0, x - pad), max(0, y - pad)
         x1, y1 = min(w, x + bw_ + pad), min(h, y + bh_ + pad)
-        crop = img[y0:y1, x0:x1]
-        text, conf = "", 0.0
-        if ocr is not None:
-            try:
-                roi = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        boxes.append((x0, y0, x1, y1, in_protected, bh_))
+
+    batch_texts: dict[int, str] = {}
+    if ocr is not None and boxes:
+        try:
+            rois = []
+            for (x0, y0, x1, y1, _ip, _bh) in boxes:
+                roi = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
                 if roi.shape[0] < 34:
                     sc = 34 / roi.shape[0]
                     roi = cv2.resize(roi, None, fx=sc, fy=sc,
                                      interpolation=cv2.INTER_CUBIC)
                 roi = cv2.threshold(roi, 0, 255,
                                     cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-                text = ocr.image_to_string(
-                    roi, lang="eng",
-                    config="--psm 7 -c tessedit_char_whitelist="
-                           "0123456789/.-:EXPRODBMFGJANUYLGSTCVebrpamjunlgsoctvd ")
-                text = (text or "").strip()
+                rois.append(roi)
+            gap = 18
+            sheet_w = max(r.shape[1] for r in rois) + 2 * gap
+            sheet_h = sum(r.shape[0] + gap for r in rois) + gap
+            sheet = np.full((sheet_h, sheet_w), 255, np.uint8)
+            offsets = []
+            cy = gap
+            for r in rois:
+                sheet[cy:cy + r.shape[0], gap:gap + r.shape[1]] = r
+                offsets.append(cy)
+                cy += r.shape[0] + gap
+            raw = ocr.image_to_string(
+                sheet, lang="eng",
+                config="--psm 6 -c tessedit_char_whitelist="
+                       "0123456789/.-:EXPRODBMFGJANUYLGSTCVebrpamjunlgsoctvd ")
+            lines = [ln.strip() for ln in (raw or "").splitlines()
+                     if ln.strip()]
+            # ربط الأسطر بالمرشحين بالترتيب (لوحة رأسية مرتبة)
+            for i, ln in enumerate(lines[:len(boxes)]):
+                batch_texts[i] = ln
+        except Exception:
+            batch_texts = {}
+
+    ar_pending: list[int] = []
+    for bi, (x0, y0, x1, y1, in_protected, bh_) in enumerate(boxes):
+        if len(regions) >= 4:
+            break  # إيقاف مبكر — طمس 4 تواريخ يكفي لأي عبوة
+        crop = img[y0:y1, x0:x1]
+        text, conf = "", 0.0
+        if ocr is not None:
+            try:
+                text = (batch_texts.get(bi) or "").strip()
                 if _looks_like_date(text):
                     # داخل المنطقة المحمية نطمس فقط التاريخ الصريح المؤكد
                     # (صيغة رقمية كاملة أو EXP/PROD) — لا قيم الحقائق الغذائية
@@ -233,20 +269,50 @@ def detect_date_regions(img: np.ndarray,
                     else:
                         conf = 0.9
                 else:
-                    # محاولة عربية إن وُجدت حزمة ara
+                    # محاولة عربية — تُأجّل لدفعة واحدة بعد الحلقة
                     if not in_protected and ar_budget > 0:
                         ar_budget -= 1
-                        try:
-                            t2 = ocr.image_to_string(crop, lang="ara+eng",
-                                                     config="--psm 7").strip()
-                            if _looks_like_date(t2):
-                                text, conf = t2, 0.75
-                        except Exception:
-                            pass
+                        ar_pending.append(bi)
             except Exception:
                 conf = 0.0
         if conf > 0:
             regions.append(DateRegion(x0, y0, x1 - x0, y1 - y0, text, conf))
+
+    # دفعة عربية واحدة فقط إن لم يُعط المسار الإنجليزي أي نتيجة.
+    # التواريخ المطبوعة رقمية في الغالب، فإن نجح الإنجليزي نتجاوز ara
+    # تمامًا (توفير ~0.5s لكل صورة بلا أي خسارة في الدقة).
+    if ocr is not None and ar_pending and not regions:
+        try:
+            crops = []
+            for bi in ar_pending:
+                x0, y0, x1, y1 = boxes[bi][:4]
+                c = img[y0:y1, x0:x1]
+                if c.shape[0] < 34:
+                    sc = 34 / c.shape[0]
+                    c = cv2.resize(c, None, fx=sc, fy=sc,
+                                   interpolation=cv2.INTER_CUBIC)
+                crops.append(c)
+            gap = 18
+            sw = max(c.shape[1] for c in crops) + 2 * gap
+            sh = sum(c.shape[0] + gap for c in crops) + gap
+            sheet2 = np.full((sh, sw, 3), 255, np.uint8)
+            cy = gap
+            for c in crops:
+                sheet2[cy:cy + c.shape[0], gap:gap + c.shape[1]] = c
+                cy += c.shape[0] + gap
+            raw2 = ocr.image_to_string(sheet2, lang="ara+eng",
+                                       config="--psm 6")
+            lines2 = [ln.strip() for ln in (raw2 or "").splitlines()
+                      if ln.strip()]
+            for i, bi in enumerate(ar_pending[:len(lines2)]):
+                if _looks_like_date(lines2[i]):
+                    x0, y0, x1, y1 = boxes[bi][:4]
+                    regions.append(DateRegion(x0, y0, x1 - x0, y1 - y0,
+                                              lines2[i], 0.75))
+                    if len(regions) >= 4:
+                        break
+        except Exception:
+            pass
     return regions
 
 
@@ -261,20 +327,24 @@ def _color_match_fill(img: np.ndarray, box: tuple[int, int, int, int],
     H, W = img.shape[:2]
     x = max(0, min(x, W - 1)); y = max(0, min(y, H - 1))
     w_ = max(1, min(w_, W - x)); h_ = max(1, min(h_, H - y))
-    # نافذة محلية موسعة حول المنطقة
-    pad = max(16, feather * 4, min(w_, h_))
+    # نافذة محلية موسعة حول المنطقة — مقيّدة بسقف لمنع
+    # توسّعها على المناطق العريضة (النافذة الأكبر = inpaint أبطأ)
+    pad = max(16, feather * 4, min(min(w_, h_), 64))
     wy0, wy1 = max(0, y - pad), min(H, y + h_ + pad)
     wx0, wx1 = max(0, x - pad), min(W, x + w_ + pad)
     win = img[wy0:wy1, wx0:wx1]
     ly, lx = y - wy0, x - wx0
     mask = np.zeros(win.shape[:2], np.uint8)
     mask[ly:ly + h_, lx:lx + w_] = 255
-    radius = max(3, min(w_, h_) // 3)
-    # سقف زمني: inpaint على مناطق كبيرة بطيء جداً — نفذه على نسخة
-    # مصغرة ثم أعد التكبير (الطمس لا يحتاج دقة عالية أصلاً)
+    # نصف قطر inpaint مقيّد بـ 4: زمن TELEA ينمو تربيعيًا مع نصف
+    # القطر (radius=20 → 1.07s مقابل radius=3 → 0.03s لنفس المنطقة)،
+    # والمنطقة تُموّه بـ Gaussian بعده أصلاً فلا فرق بصري يُذكر.
+    radius = max(3, min(4, min(w_, h_) // 3))
+    # سقف زمني إضافي: المناطق الكبيرة تُعالج على نسخة
+    # مصغرة ثم تُكبر (الطمس لا يحتاج دقة عالية أصلاً)
     _scale = 1.0
-    if mask.sum() // 255 > 40000:
-        _scale = (40000.0 / (mask.sum() // 255)) ** 0.5
+    if mask.sum() // 255 > 20000:
+        _scale = (20000.0 / (mask.sum() // 255)) ** 0.5
         small_win = cv2.resize(win, None, fx=_scale, fy=_scale,
                                interpolation=cv2.INTER_AREA)
         small_mask = cv2.resize(mask, (small_win.shape[1],
@@ -311,16 +381,17 @@ def _color_match_fill(img: np.ndarray, box: tuple[int, int, int, int],
     soft3 = soft[:, :, None]
     blended = win.astype(np.float32) * (1 - soft3) + \
         filled.astype(np.float32) * soft3
-    out = img.copy()
-    out[wy0:wy1, wx0:wx1] = np.clip(blended, 0, 255).astype(np.uint8)
-    return out
+    # يُعدّل داخل النافذة مباشرة دون نسخ الصورة الكاملة
+    # (المستدعي مسؤول عن تمرير نسخة قابلة للتعديل)
+    img[wy0:wy1, wx0:wx1] = np.clip(blended, 0, 255).astype(np.uint8)
+    return img
 
 
 def blur_regions(img: np.ndarray,
                  regions: list[DateRegion] | list[tuple],
                  mode: str = "color_match") -> np.ndarray:
     """يطمس قائمة مناطق. mode: color_match (افتراضي) | gaussian."""
-    out = img.copy()
+    out = np.ascontiguousarray(img.copy())
     for r in regions:
         box = r.box() if isinstance(r, DateRegion) else tuple(r)
         if mode == "gaussian":

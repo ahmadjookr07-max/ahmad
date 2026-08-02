@@ -165,7 +165,7 @@ def _default_model_dir() -> str:
         here = Path(__file__).parent
         for cand in [here / "models",
                      here.parent.parent / "resources" / "models",
-                     Path("/home/ubuntu/v2_project/models_v2")]:
+                     here.parents[2] / "resources" / "models"]:
             if cand.is_dir():
                 return str(cand)
         return str(here)

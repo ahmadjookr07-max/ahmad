@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
 """Functional test: save a session from a populated window, restore in a new one."""
-import os, sys, tempfile
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/windows_app")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
+import os
+import sys
+import tempfile
 
-import native_app_v2
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "windows_app"))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
+
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+
+# حراسة ضد التعليق: أي حوار مُودال في بيئة بلا شاشة ينتظر للأبد
+for _k in ("warning", "critical", "information", "question", "about"):
+    setattr(QMessageBox, _k,
+            staticmethod(lambda *a, **kw: QMessageBox.StandardButton.Ok))
+
+import native_app_v2  # noqa: E402
 native_app_v2._activate_engine = lambda: None
-import native_app
-native_app.APP_VERSION = "2.0.0"
+import native_app  # noqa: E402
 native_app_v2._patch_ui(native_app)
 
-from PySide6.QtWidgets import QApplication
-from pathlib import Path
+from pathlib import Path  # noqa: E402
 
 tmp = Path(tempfile.mkdtemp())
 app = QApplication([])
@@ -20,7 +29,15 @@ app = QApplication([])
 # window 1: fill results, save session
 w1 = native_app.MainWindow()
 w1.v2_session_store = __import__("engine_v2.session_v2", fromlist=["SessionStore"]).SessionStore(tmp)
-fixture = "/home/ubuntu/v2_project/app_v2/windows_app/assets/app_icon.png"
+# صورة مولّدة محليًا: لا اعتماد على ملفات خارجية
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+fixture = str(tmp / "fixture.png")
+_fx = np.full((300, 300, 3), 235, np.uint8)
+cv2.rectangle(_fx, (70, 60), (230, 250), (70, 130, 205), -1)
+cv2.imwrite(fixture, _fx)
+assert os.path.isfile(fixture), "تعذر توليد صورة الاختبار"
 items = [
     native_app.BatchItemResult(
         source_path=fixture, source_name=f"PHOTO-{i:03d}.jpg", status="review",

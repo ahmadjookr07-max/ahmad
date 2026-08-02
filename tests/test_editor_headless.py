@@ -1,25 +1,57 @@
 # -*- coding: utf-8 -*-
 """اختبار headless للمحرر V2PhotoEditorDialog: يفتح صورة حقيقية ويشغّل
 كل الأدوات برمجيًا ويتحقق من النتائج."""
-import os, sys, time
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/windows_app")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
+import os
+import sys
+import tempfile
+import time
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "windows_app"))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
+
+import cv2
 import numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 app = QApplication(sys.argv)
 
-from photo_editor_v2 import V2PhotoEditorDialog, EditorCanvas
+# حراسة ضد التعليق: أي صندوق حوار مُودال في بيئة بلا شاشة يعلّق
+# الاختبار للأبد (ينتظر ضغطة زر لن تأتي) — نسجلها ونمضي.
+_DIALOGS = []
 
-SRC = "/home/ubuntu/upload/92E19735-37AF-4F79-BBA1-467F1AFE4883.jpeg"
-OUT_DIR = "/home/ubuntu/v2_project/v2_out/editor_test"
+
+def _no_modal(kind):
+    def _fn(*a, **kw):
+        _DIALOGS.append((kind, [x for x in a if isinstance(x, str)]))
+        return QMessageBox.StandardButton.Ok
+    return _fn
+
+
+for _k in ("warning", "critical", "information", "question", "about"):
+    setattr(QMessageBox, _k, staticmethod(_no_modal(_k)))
+
+from photo_editor_v2 import V2PhotoEditorDialog, EditorCanvas  # noqa: E402
+
+OUT_DIR = os.path.join(tempfile.mkdtemp(prefix="editor_test_"), "out")
 os.makedirs(OUT_DIR, exist_ok=True)
+
+# صورة منتج مولّدة محليًا: لا اعتماد على ملفات خارجية
+SRC = os.path.join(OUT_DIR, "منتج_اختبار.jpg")
+_img = np.full((900, 1000, 3), 232, np.uint8)
+cv2.rectangle(_img, (300, 180), (700, 760), (60, 120, 200), -1)
+cv2.rectangle(_img, (360, 250), (640, 420), (245, 245, 245), -1)
+cv2.circle(_img, (500, 200), 70, (40, 90, 170), -1)
+cv2.putText(_img, "PRODUCT", (372, 350), cv2.FONT_HERSHEY_SIMPLEX,
+            1.1, (30, 30, 30), 3)
+cv2.imwrite(SRC, _img)
+assert os.path.isfile(SRC), "تعذر توليد صورة الاختبار"
 
 checks = {}
 
 dlg = V2PhotoEditorDialog(SRC)
+checks["no_modal_on_load"] = not _DIALOGS
 checks["load"] = dlg._original is not None
 print("loaded:", dlg._original.shape)
 
@@ -59,11 +91,32 @@ checks["erase_pen"] = dlg._alpha_manual is not None and (dlg._alpha_manual == 0)
 dlg._on_stroke(pts[:5], 30, EditorCanvas.TOOL_RESTORE)
 checks["restore_pen"] = (dlg._alpha_manual == 255).any()
 
-# 5) الظل الواقعي
+# 5) الظل الواقعي — القائمة تُعبّأ عند فتح لوحة الظل فقط
+dlg._populate_shadow_presets()
+checks["shadow_presets_loaded"] = dlg.shadow_combo.count() >= 5
 idx = dlg.shadow_combo.findText("ظل استوديو 3D")
+checks["shadow_preset_found"] = idx >= 0
+_before_shadow = None if dlg._composited is None else dlg._composited.copy()
+# الظل مربوط بمفتاح تفعيل مستقل (كما يفعل المستخدم)
+dlg.shadow_combo.setVisible(True)
 dlg.shadow_combo.setCurrentIndex(idx)
+dlg.shadow_enable_cb.setChecked(True)
+dlg._shadow_changed()
 dlg._recompose()
 checks["shadow"] = dlg._shadow_opts is not None and dlg._composited is not None
+# الظل يجب أن يغير البكسل فعلًا لا أن يُسجّل في الإعدادات فقط
+checks["shadow_changes_pixels"] = (
+    _before_shadow is not None and dlg._composited is not None
+    and (_before_shadow.shape != dlg._composited.shape
+         or bool(np.abs(_before_shadow.astype(int)
+                        - dlg._composited.astype(int)).max() > 3)))
+# إلغاء التفعيل يجب أن يزيل الظل
+dlg.shadow_enable_cb.setChecked(False)
+dlg._shadow_changed()
+checks["shadow_off"] = dlg._shadow_opts is None
+dlg.shadow_enable_cb.setChecked(True)
+dlg._shadow_changed()
+dlg._recompose()
 
 # 6) التأطير 800×700
 dlg._smart_frame()
@@ -78,7 +131,6 @@ dlg._redo_action()
 checks["redo"] = len(dlg._history) == n_hist
 
 # 8) حفظ مباشر (بدون حوار)
-import cv2
 out_path = os.path.join(OUT_DIR, "final.webp")
 ok, buf = cv2.imencode(".webp", dlg._composited, [cv2.IMWRITE_WEBP_QUALITY, 101])
 buf.tofile(out_path)

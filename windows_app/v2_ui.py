@@ -852,7 +852,16 @@ def install_v2(main_window, data_root: Path) -> None:
         if setup.get("source_folder"):
             store.state.source_folder = setup["source_folder"]
         store.state.phase = "results" if snap.get("items") else "setup"
-        store.state.current_position = int(snap.get("current_row", 0) or 0)
+        # موضع العمل يُحفظ في الحقل position المُسلسل في JSON.
+        # (كان يُكتب إلى current_position غير الموجود في SessionState
+        #  فتُنشأ صفة عابرة لا تُحفظ فيُفقد الموضع عند الاستئناف.)
+        _row = int(snap.get("current_row", 0) or 0)
+        _items = snap.get("items", []) or []
+        _src_name = ""
+        if 0 <= _row < len(_items):
+            _d = _items[_row] or {}
+            _src_name = _d.get("source_name") or _d.get("source_path") or ""
+        store.state.position = {"source_name": _src_name, "row": _row, "col": 0}
         for d in snap.get("items", []):
             key = d.get("source_name") or d.get("source_path")
             if not key:
@@ -905,23 +914,48 @@ def install_v2(main_window, data_root: Path) -> None:
             except Exception:
                 pass
             if hasattr(state, "images"):  # SessionState object
-                items_data = [
-                    {
-                        "source_path": img.source_path,
-                        "source_name": key if "." in key else Path(img.source_path).name,
-                        "status": img.status or "review",
-                        "item_code": img.item_code,
-                        "product_name": img.item_name,
-                        "barcode": img.barcode,
-                        "explanation": img.error,
-                        "review_path": img.output_path or img.source_path,
-                    }
-                    for key, img in state.images.items()
-                ]
+                # ملاحظة: الصور تُخزّن قواميس في JSON لا كائنات؛
+                # القراءة بصيغة img.attr كانت ترمي AttributeError يُبتلع
+                # صامتًا فتضيع كل النتائج عند الاستئناف. ندعم الاثنين.
+                def _g(obj, name, default=""):
+                    if isinstance(obj, dict):
+                        val = obj.get(name, default)
+                    else:
+                        val = getattr(obj, name, default)
+                    return default if val is None else val
+
+                items_data = []
+                for key, img in (state.images or {}).items():
+                    _sp = str(_g(img, "source_path"))
+                    items_data.append({
+                        "source_path": _sp,
+                        "source_name": (key if "." in str(key)
+                                        else (Path(_sp).name if _sp
+                                              else str(key))),
+                        "status": str(_g(img, "status") or "review"),
+                        "item_code": str(_g(img, "item_code")),
+                        "product_name": str(_g(img, "item_name")),
+                        "barcode": str(_g(img, "barcode")),
+                        "explanation": str(_g(img, "error")),
+                        "review_path": str(_g(img, "output_path") or _sp),
+                    })
+                _pos = getattr(state, "position", {}) or {}
+                try:
+                    _row = int(_pos.get("row", 0) or 0)
+                except (TypeError, ValueError):
+                    _row = 0
+                # إن تغير ترتيب الصور، نعتمد الاسم لا الرقم
+                _pname = str(_pos.get("source_name", "") or "")
+                if _pname:
+                    for _i, _d in enumerate(items_data):
+                        if _d.get("source_name") == _pname or \
+                                _d.get("source_path") == _pname:
+                            _row = _i
+                            break
                 state = {
                     "items": items_data,
                     "workspace": state.output_folder,
-                    "current_row": state.current_position,
+                    "current_row": _row,
                 }
             items_data = state.get("items") or []
             if not items_data:

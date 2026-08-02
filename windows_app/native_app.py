@@ -148,7 +148,7 @@ _vision_pipeline._prepare_individual_source = _prepare_individual_perspective_so
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.9.5"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -7126,7 +7126,52 @@ class MainWindow(QMainWindow):
         if interactive_close and not self._confirm_leave_results("إغلاق البرنامج"):
             event.ignore()
             return
+        # إيقاف منظم للخيوط قبل الإغلاق: تدمير QThread وهو يعمل يسبب
+        # تحذير "Destroyed while thread is still running" وقد ينهي
+        # العملية فجأة (خصوصًا إن أُغلق البرنامج أثناء معالجة دفعة).
+        self._shutdown_workers()
         event.accept()
+
+    def _shutdown_workers(self, wait_ms: int = 4000) -> None:
+        """يطلب إيقاف كل الخيوط العاملة وينتظرها ثم يقاطعها إن تعنّتت."""
+        for attr in ("batch_worker", "manual_worker", "individual_worker"):
+            worker = getattr(self, attr, None)
+            if worker is None:
+                continue
+            try:
+                if not worker.isRunning():
+                    continue
+                # علم الإيقاف التعاوني إن كان الخيط يدعمه
+                for flag in ("stop", "request_stop", "cancel"):
+                    fn = getattr(worker, flag, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
+                else:
+                    for flag in ("_stop", "_cancelled", "stopped"):
+                        if hasattr(worker, flag):
+                            try:
+                                setattr(worker, flag, True)
+                            except Exception:
+                                pass
+                            break
+                worker.requestInterruption()
+                if not worker.wait(wait_ms):
+                    worker.terminate()
+                    worker.wait(1000)
+            except Exception:
+                pass
+        # مؤقتات الواجهة: إيقافها يمنع نبضات بعد التدمير
+        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
 
 
 def _self_test(output_path: Path) -> int:

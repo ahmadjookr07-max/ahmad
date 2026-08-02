@@ -1,46 +1,73 @@
-"""Compare V2 segmentation (ISNet / BiRefNet) against 1.2.1 baseline output."""
-import sys, time
+# -*- coding: utf-8 -*-
+"""اختبار عزل المنتج ProductSegmenterV2 على الواجهة الحالية.
+
+يتحقق أن العزل يعمل بلا موديلات مثبتة (مسار احتياطي)، وأن قناع الشفافية
+يعطي إطارًا منطقيًا، وأن التركيب على خلفية بيضاء ينتج صورة سليمة الأبعاد.
+"""
+import sys
+import time
 from pathlib import Path
+
 import cv2
 import numpy as np
 
-sys.path.insert(0, "/home/ubuntu/v2_project/v2")
-from engine_v2.segmentation_v2 import ProductSegmenterV2, alpha_bbox
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from engine_v2.segmentation_v2 import ProductSegmenterV2
+
+PASS, FAIL = [], []
+
+
+def check(name, cond, note=""):
+    (PASS if cond else FAIL).append(name)
+    print(("  PASS " if cond else "  FAIL ") + name +
+          (f" — {note}" if note else ""))
+
 
 SRC = Path("/home/ubuntu/upload/3988D8E6-BF91-4876-9438-C7D2E931A303.jpeg")
-OUT = Path("/home/ubuntu/v2_project/seg_compare")
-OUT.mkdir(exist_ok=True)
+if not SRC.is_file():
+    print("لا توجد صورة اختبار — شغّل tests/make_test_assets.py أولًا")
+    sys.exit(1)
 
 image = cv2.imread(str(SRC))
-print("input:", image.shape)
+check("read_input", image is not None and image.ndim == 3,
+      str(None if image is None else image.shape))
 
-seg = ProductSegmenterV2("/home/ubuntu/v2_project/models_v2")
-for model in ["isnet", "birefnet"]:
-    t0 = time.time()
-    try:
-        res = seg.segment(image, model=model)
-    except Exception as e:
-        print(model, "FAILED:", e)
-        continue
-    dt = time.time() - t0
-    composed = seg.compose_on_white(image, res.alpha)
-    bbox = alpha_bbox(res.alpha)
-    if bbox:
-        x0, y0, x1, y1 = bbox
-        pad = 20
-        x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
-        x1, y1 = min(image.shape[1], x1 + pad), min(image.shape[0], y1 + pad)
-        crop = composed[y0:y1, x0:x1]
-    else:
-        crop = composed
-    # fit into 800x700 canvas with margins like the old engine
-    canvas = np.full((700, 800, 3), 255, np.uint8)
-    ch, cw = crop.shape[:2]
-    scale = min((800 - 96) / cw, (700 - 80) / ch)
-    nw, nh = int(cw * scale), int(ch * scale)
-    resized = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-    ox, oy = (800 - nw) // 2, (700 - nh) // 2
-    canvas[oy:oy + nh, ox:ox + nw] = resized
-    out_path = OUT / f"result_{model}.png"
-    cv2.imwrite(str(out_path), canvas)
-    print(f"{model}: {dt:.2f}s conf={res.confidence:.3f} -> {out_path}")
+seg = ProductSegmenterV2(ROOT / "models_v2")
+t0 = time.time()
+res = seg.segment(image)
+dt = time.time() - t0
+check("segment_runs", res is not None and res.alpha is not None,
+      f"{dt:.2f}s model={res.model_name} conf={res.confidence:.3f}")
+check("alpha_shape", res.alpha.shape[:2] == image.shape[:2],
+      str(res.alpha.shape))
+# المحرك يعيد قناعًا float32 بمدى 0..1 (لا uint8) ليدعم الحواف الناعمة
+check("alpha_dtype", res.alpha.dtype == np.float32, str(res.alpha.dtype))
+check("alpha_range", 0.0 <= float(res.alpha.min())
+      and float(res.alpha.max()) <= 1.0,
+      f"{float(res.alpha.min()):.2f}..{float(res.alpha.max()):.2f}")
+
+# القناع ليس فارغًا ولا يغطي كل الصورة (منتج حقيقي معزول)
+cover = float((res.alpha > 0.03).mean())
+check("alpha_coverage", 0.01 < cover < 0.999, f"{cover:.3f}")
+check("segment_confidence", res.confidence > 0.5, f"{res.confidence:.3f}")
+
+bbox = seg.alpha_bbox(res.alpha)
+check("alpha_bbox", bbox is not None and bbox[2] > bbox[0]
+      and bbox[3] > bbox[1], str(bbox))
+
+composed = seg.compose_on_white(image, res.alpha)
+check("compose_shape", composed.shape == image.shape, str(composed.shape))
+check("compose_white_corner",
+      bool((composed[0, 0] > 200).all()), str(composed[0, 0]))
+
+decon = seg.decontaminate(image, res.alpha)
+check("decontaminate", decon is not None
+      and decon.shape[:2] == image.shape[:2],
+      str(None if decon is None else decon.shape))
+
+print(f"\n===== {len(PASS)} passed / {len(FAIL)} failed =====")
+if FAIL:
+    print("FAILED:", FAIL)
+sys.exit(0 if not FAIL else 1)
