@@ -16,6 +16,7 @@ import threading
 import traceback
 import unicodedata
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -58,9 +59,16 @@ from PySide6.QtWidgets import (
 )
 
 from ui_scale import ScaleEngine
-from smart_catalog_vision.final_images import FinalImageOptions
-from smart_catalog_vision import pipeline as _vision_pipeline
-from smart_catalog_vision.pipeline import (
+
+# 2.9.6 — تسريع الإقلاع.
+# محرّك الرؤية (`smart_catalog_vision.pipeline`) يجرّ خلفه cv2 وnumpy
+# وopenpyxl وfinal_images. استيراده وقت الإقلاع كان يحجز الشاشة
+# فارغة قبل رسم أول بكسل، ولا شيء منه مطلوب لبناء الواجهة.
+# `lazy_engine` يقدّم وكلاء بنفس الأسماء تُحمّل المحرّك عند أول
+# استعمال حقيقي، مع تسخين خلفي بعد ظهور النافذة.
+import lazy_engine as _lazy_engine
+from lazy_engine import (
+    FinalImageOptions,
     SUPPORTED_IMAGE_EXTENSIONS,
     BatchItemResult,
     BatchRunResult,
@@ -68,12 +76,54 @@ from smart_catalog_vision.pipeline import (
     apply_individual_image_edit,
     apply_manual_link,
     apply_manual_links,
+    pipeline as _vision_pipeline,
     preview_individual_image_edit,
     run_batch,
 )
 
 
-_ORIGINAL_PREPARE_INDIVIDUAL_SOURCE = _vision_pipeline._prepare_individual_source
+try:
+    from engine_v2.source_vault_v2 import (
+        deposit_job_sources as _vault_deposit,
+        repair_job_state as _vault_repair,
+    )
+except Exception:  # pragma: no cover - حزمة بلا المحرك الجديد
+    _vault_deposit = None
+    _vault_repair = None
+
+
+def _vault_secure_sources(workspace, image_paths, catalog_path="") -> None:
+    """إيداع صور الدفعة وملف الإكسل في خزانة مساحة العمل.
+
+    بدونها يعتمد أي تعديل لاحق على بقاء الصور في موقعها الأصلي،
+    فيفشل «حفظ واعتماد التعديل» إن نُقلت أو حُذفت. الإيداع رخيص
+    (ربط صلب على نفس القرص) ولا يرفع استثناءً أبدًا.
+    """
+    if _vault_deposit is None:
+        return
+    try:
+        _vault_deposit(workspace, image_paths, catalog_path)
+    except Exception:
+        pass
+
+
+def _vault_restore_sources(workspace, extra_dirs=None):
+    """استرجاع مسارات المصادر المفقودة قبل أي تعديل فردي/ربط يدوي.
+
+    يعيد تقرير الإصلاح (أو None) لتستطيع الواجهة تسمية الملف
+    المفقود بدل رسالة عامة غامضة.
+    """
+    if _vault_repair is None:
+        return None
+    try:
+        return _vault_repair(workspace, extra_dirs=extra_dirs)
+    except Exception:
+        return None
+
+
+# الدالة الأصلية تُلتقط لحظة تحميل المحرّك لا وقت استيراد هذه الوحدة؛
+# قراءتها مبكرًا كانت ستُبطل التأجيل وتُعيد الإقلاع إلى بطئه.
+_ORIGINAL_PREPARE_INDIVIDUAL_SOURCE = None
 
 
 def _prepare_individual_perspective_source(
@@ -144,7 +194,19 @@ def _prepare_individual_perspective_source(
     return prepared, coordinates
 
 
-_vision_pipeline._prepare_individual_source = _prepare_individual_perspective_source
+def _install_perspective_patch(original):
+    """يُركّب القص المنظوري فور تحميل المحرّك لا قبله.
+
+    يُستدعى مرة واحدة من `lazy_engine.load_engine`، فيحفظ الدالة
+    الأصلية ثم يُعيد البديل. بهذا يبقى سلوك القص مطابقًا
+    تمامًا لما كان قبل التأجيل.
+    """
+    global _ORIGINAL_PREPARE_INDIVIDUAL_SOURCE
+    _ORIGINAL_PREPARE_INDIVIDUAL_SOURCE = original
+    return _prepare_individual_perspective_source
+
+
+_lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
@@ -174,10 +236,34 @@ def _friendly_error_message(traceback_text: str) -> str:
             "أغلق ملف Excel إن كان مفتوحًا، وتأكد من صلاحية الكتابة ثم أعد المحاولة."
         )
     if "filenotfounderror" in folded or "no such file or directory" in folded:
-        return (
-            "تعذر العثور على أحد ملفات المهمة. تأكد من أن ملف Excel والصور لم تُنقل أو تُحذف، "
-            "ثم اخترها من جديد."
+        # 2.9.6: كانت الرسالة عامة فلا يعرف المالك أي ملف مفقود.
+        # نستخرج الملف من الأثر ومن تقرير خزانة المصادر إن أُرفق.
+        raw = str(traceback_text or "")
+        missing = ""
+        vault_note = ""
+        marker = "[تفاصيل المصادر]"
+        if marker in raw:
+            vault_note = raw.split(marker, 1)[1].strip()
+        match = re.search(r"غير موجود[ة]?\s*:\s*(.+)", raw)
+        if not match:
+            match = re.search(r"No such file or directory:\s*'?\"?([^'\"\n]+)",
+                              raw, re.IGNORECASE)
+        if match:
+            # يجب فصل مسارات ويندوز (\\) ولينكس (/) معًا، لأن Path
+            # على منصة واحدة لا تفهم فاصل المنصة الأخرى.
+            raw_path = match.group(1).strip().strip("'\"")
+            missing = re.split(r"[\\/]", raw_path)[-1].strip()
+        lines = ["تعذر العثور على ملف مطلوب لإكمال العملية."]
+        if missing:
+            lines.append(f"الملف المفقود: {missing}")
+        if vault_note:
+            lines.append(vault_note)
+        lines.append(
+            "الأغلب أن مجلد الصور أو ملف Excel نُقل أو حُذف بعد تشغيل الدفعة. "
+            "أعد اختيار مجلد الصور الأصلية من جديد ثم أعد المحاولة؛ ولن يتكرر هذا "
+            "للدفعات الجديدة لأن البرنامج أصبح يحفظ نسخة داخلية من المصادر."
         )
+        return "\n".join(lines)
     if "memoryerror" in folded or "out of memory" in folded:
         return (
             "الذاكرة المتاحة لا تكفي لإكمال هذه الدفعة. أغلق البرامج غير المستخدمة أو قسّم الصور "
@@ -275,6 +361,120 @@ class ImageListWidget(QListWidget):
         event.acceptProposedAction()
 
 
+def _available_memory_gb() -> float:
+    """الذاكرة المتاحة فعليًا بالجيجابايت (0.0 إن تعذر القياس).
+
+    تعمل على ويندوز ولينكس بلا تبعيات إضافية إلزامية.
+    """
+    try:  # الأدق إن توفر
+        import psutil  # type: ignore
+        return float(psutil.virtual_memory().available) / (1024 ** 3)
+    except Exception:
+        pass
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemStatus()
+            status.dwLength = ctypes.sizeof(_MemStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(  # type: ignore
+                    ctypes.byref(status)):
+                return float(status.ullAvailPhys) / (1024 ** 3)
+        except Exception:
+            pass
+    else:
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("MemAvailable:"):
+                        return float(line.split()[1]) / (1024 ** 2)
+        except Exception:
+            pass
+    return 0.0
+
+
+#: تقدير استهلاك الذاكرة لكل مسار جودة (صورة كبيرة + نسخ OCR وسيطة).
+_QUALITY_WORKER_MEMORY_GB = 0.75
+
+
+def _quality_pass_workers(total: int) -> int:
+    """عدد المسارات المتوازية لتمريرة الجودة (2.9.6 — تسريع الدفعة).
+
+    مقاس على صور حقيقية 2000×1800 مع طمس التواريخ:
+    2–3 مسارات تعطي تسريعًا ×1.8–×2.3، بينما 5–6 مسارات تنهار
+    إلى ×0.05 بسبب ضغط الذاكرة (كل مسار يحمل صورة كاملة
+    ونسخًا وسيطة). لذلك الحساب واعٍ بالذاكرة لا بالنوى وحدها،
+    ومسقوف بـ 4 مهما كان الجهاز قويًا.
+
+    يُضبط يدويًا بمتغير البيئة ``MIS_QUALITY_WORKERS`` (1 = تسلسلي).
+    """
+    if total <= 1:
+        return 1
+    override = os.environ.get("MIS_QUALITY_WORKERS", "").strip()
+    if override.isdigit() and int(override) >= 1:
+        return max(1, min(int(override), total))
+    try:
+        cpu = os.cpu_count() or 1
+    except Exception:
+        cpu = 1
+    if cpu <= 2:
+        return 1
+    by_cpu = cpu // 2
+    memory_gb = _available_memory_gb()
+    if memory_gb <= 0:  # تعذر القياس → محافظ جدًا
+        by_memory = 2
+    else:
+        # نترك هامش جيجابايت واحد للواجهة والنظام
+        by_memory = int(max(0.0, memory_gb - 1.0) / _QUALITY_WORKER_MEMORY_GB)
+    return max(1, min(4, by_cpu, by_memory, total))
+
+
+class _OpenCVThreadBudget:
+    """يقيّد خيوط OpenCV الداخلية أثناء التوازي ثم يعيدها.
+
+    بدونه يصير مجموع الخيوط = عدد المسارات × عدد النوى،
+    فيحدث اكتظاظ (oversubscription) يبطئ المعالجة بدل أن يسرّعها.
+    """
+
+    def __init__(self, workers: int) -> None:
+        self._workers = max(1, workers)
+        self._previous = None
+
+    def __enter__(self):
+        try:
+            import cv2  # متأخر عمدًا: لا داعي لتحميله إن لم تبدأ دفعة
+
+            self._previous = cv2.getNumThreads()
+            cpu = os.cpu_count() or 1
+            cv2.setNumThreads(max(1, cpu // self._workers))
+        except Exception:
+            self._previous = None
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._previous is not None:
+            try:
+                import cv2
+
+                cv2.setNumThreads(self._previous)
+            except Exception:
+                pass
+        return False
+
+
 class BatchWorker(QThread):
     progress_changed = Signal(int, int, str)
     completed = Signal(object)
@@ -303,6 +503,10 @@ class BatchWorker(QThread):
 
     def run(self) -> None:
         try:
+            # 2.9.6: إيداع المصادر قبل المعالجة لا بعدها، لأن الدفعة
+            # الطويلة قد تُقاطع فيبقى ما أُودع متاحًا للتعديل لاحقًا.
+            _vault_secure_sources(
+                self.workspace, self.image_paths, self.catalog_path)
             result = run_batch(
                 self.catalog_path,
                 self.image_paths,
@@ -322,7 +526,13 @@ class BatchWorker(QThread):
     def _quality_post_pass(self, result) -> None:
         """تمريرة جودة لاحقة على النواتج: حدة نصية ذكية تبقي كتابات
         المنتج والحقائق الغذائية واضحة + طمس التواريخ المطبوعة تلقائيًا.
-        آمنة: لا تعيد الحفظ إلا إذا تحسّنت المقروئية أو طُمس تاريخ."""
+        آمنة: لا تعيد الحفظ إلا إذا تحسّنت المقروئية أو طُمس تاريخ.
+
+        2.9.6 (أداء): كانت تعمل تسلسليًا على نواة واحدة — ولأنّ طمس
+        التواريخ يكلف ≈ 1.3 ثانية للصورة، فدفعة من 100 صورة كانت
+        تضيف أكثر من دقيقتين. الآن تتوزّع على كل النوى المتاحة
+        (OpenCV وOCR يحرران GIL) مع تقدّم حقيقي لكل صورة.
+        """
         if not (self.text_polish or self.blur_dates):
             return
         try:
@@ -331,21 +541,85 @@ class BatchWorker(QThread):
             return
         items = getattr(result, "items", None) or []
         seen: set[str] = set()
-        total = len(items)
-        for i, item in enumerate(items):
+        paths: list[str] = []
+        for item in items:
             path = getattr(item, "output_path", "") or ""
             if not path or path in seen:
                 continue
             seen.add(path)
+            paths.append(path)
+        total = len(paths)
+        if not total:
+            return
+
+        def _polish_one(path: str) -> None:
             try:
                 if Path(path).is_file():
                     polish_output_file(path, quality=101,
                                        blur_dates=self.blur_dates)
             except Exception:
-                continue
-            if total and i % 5 == 0:
-                self.progress_changed.emit(
-                    total, total, f"تحسين الوضوح النهائي {i + 1}/{total}")
+                pass
+
+        workers = _quality_pass_workers(total)
+        if workers <= 1:
+            for i, path in enumerate(paths):
+                _polish_one(path)
+                if i % 5 == 0 or i == total - 1:
+                    self.progress_changed.emit(
+                        total, total,
+                        f"تحسين الوضوح النهائي {i + 1}/{total}")
+            return
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        done = 0
+        with _OpenCVThreadBudget(workers):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_polish_one, p) for p in paths]
+                for _ in as_completed(futures):
+                    done += 1
+                    if done % 3 == 0 or done == total:
+                        self.progress_changed.emit(
+                            total, total,
+                            f"تحسين الوضوح النهائي {done}/{total}"
+                            f" — {workers} مسارات متوازية")
+
+
+class VisualSignatureWorker(QThread):
+    """2.9.6 — يبني البصمات البصرية خارج خيط الواجهة.
+
+    بناء البصمة يقرأ الصورة من القرص ويفكّ ترميزها (~47ms للصورة الواحدة
+    على صور اختبار، وأضعاف ذلك على صور الكاميرا الحقيقية). تنفيذه على خيط
+    الواجهة لـ109 صورة كان يُجمّد النافذة ثوانٍ طويلة ويجعل ويندوز يرسمها بيضاء
+    مع «لا يستجيب». هذا العامل ينقل العمل كله إلى الخلفية ويُرسل النتيجة دفعة واحدة.
+    """
+
+    ready = Signal(object)
+
+    def __init__(self, paths: Iterable[str]) -> None:
+        super().__init__()
+        self.paths = tuple(dict.fromkeys(str(p) for p in paths if str(p)))
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:  # pragma: no cover - يُغطّى عبر اختبار التكامل
+        built: dict[str, object] = {}
+        try:
+            from engine_v2 import visual_match_v2 as _vm
+        except Exception as exc:
+            print(f"[link] visual signature engine unavailable: {exc}", file=sys.stderr)
+            self.ready.emit(built)
+            return
+        for path in self.paths:
+            if self._cancelled:
+                break
+            try:
+                built[path] = _vm.build_signature(path)
+            except Exception:
+                built[path] = None
+        self.ready.emit(built)
 
 
 class ManualLinkWorker(QThread):
@@ -420,6 +694,9 @@ class ManualLinkWorker(QThread):
 
     def run(self) -> None:
         try:
+            # 2.9.6: الربط اليدوي يقرأ المسار المطلق المخزّن في job_state؛
+            # إن نُقلت الصور أو استُعيدت جلسة قديمة فشل بـFileNotFoundError.
+            self._repair_report = _vault_restore_sources(self.workspace)
             if len(self.source_names) == 1:
                 result = apply_manual_link(
                     self.workspace,
@@ -441,7 +718,17 @@ class ManualLinkWorker(QThread):
             self._apply_rotation_to_outputs(result)
             self.completed.emit(result)
         except Exception:
-            self.failed.emit(traceback.format_exc())
+            self.failed.emit(self._augment_failure(traceback.format_exc()))
+
+    def _augment_failure(self, trace: str) -> str:
+        """إرفاق أسماء الملفات المفقودة بالأثر لتكون الرسالة دقيقة."""
+        report = getattr(self, "_repair_report", None)
+        detail = getattr(report, "summary_ar", None)
+        if callable(detail):
+            text = detail()
+            if text:
+                return f"{trace}\n[تفاصيل المصادر] {text}"
+        return trace
 
 
 class IndividualEditWorker(QThread):
@@ -525,6 +812,10 @@ class IndividualEditWorker(QThread):
 
     def run(self) -> None:
         try:
+            # 2.9.6: أهم إصلاح في هذا المسار — «حفظ واعتماد التعديل» كان
+            # يفشل لأن المحرك يعود للمسار المطلق المخزّن وقت الدفعة.
+            # الاسترجاع يسبق أي قراءة للحالة.
+            self._repair_report = _vault_restore_sources(self.workspace)
             arguments = {
                 "manual_crop": self.manual_crop,
                 "smart_enhance": self.smart_enhance,
@@ -552,7 +843,17 @@ class IndividualEditWorker(QThread):
                 if _override_active:
                     _vision_pipeline._prepare_individual_source = _prev_prepare
         except Exception:
-            self.failed.emit(traceback.format_exc())
+            self.failed.emit(self._augment_failure(traceback.format_exc()))
+
+    def _augment_failure(self, trace: str) -> str:
+        """إرفاق أسماء الملفات المفقودة بالأثر لتكون الرسالة دقيقة."""
+        report = getattr(self, "_repair_report", None)
+        detail = getattr(report, "summary_ar", None)
+        if callable(detail):
+            text = detail()
+            if text:
+                return f"{trace}\n[تفاصيل المصادر] {text}"
+        return trace
 
     def _run_pipeline(self, arguments: dict) -> None:
         if self.preview_only:
@@ -1574,6 +1875,12 @@ class MainWindow(QMainWindow):
         self.batch_worker: BatchWorker | None = None
         self.manual_worker: ManualLinkWorker | None = None
         self.individual_worker: IndividualEditWorker | None = None
+        # 2.9.6 — حماية من انهيار «QThread: Destroyed while thread is still
+        # running» (SIGABRT، يُغلق التطبيق فورًا بلا رسالة). إسناد عامل جديد
+        # إلى نفس الحقل بينما القديم يعمل يُسقط آخر مرجع بايثون فيدمّره جامع
+        # القمامة أثناء عمله. هذه المجموعة تحتفظ بمرجع قوي لكل عامل حتى
+        # تُطلق إشارة finished، فيستحيل جمعه وهو يعمل.
+        self._live_workers: set = set()
         self._pending_individual_position: tuple[str, int, int] | None = None
         self._individual_preview_active = False
         self._individual_preview_path: Path | None = None
@@ -1584,6 +1891,19 @@ class MainWindow(QMainWindow):
         self._result_items_by_name: dict[str, BatchItemResult] = {}
         self._result_thumbnail_cache: dict[str, QIcon] = {}
         self._visual_signature_cache: dict[str, tuple[float, ...]] = {}
+        # 2.9.6 — إصلاح تجمّد الواجهة عند اختيار صف في استوديو المراجعة.
+        # بناء البصمة البصرية يكلّف ~47ms للصورة الواحدة (قراءة القرص + فك
+        # الترميز). كان يُنفَّذ على خيط الواجهة لكل صور الدفعة ⇒ 5 ثوانٍ فأكثر
+        # تجمّدًا كاملًا («لا يستجيب») مع 109 صنف. الآن: كاش LRU + عامل خلفي.
+        self._visual_sig_lru: "OrderedDict[str, object]" = OrderedDict()
+        self._visual_sig_capacity = 2000
+        self._visual_sig_worker: "VisualSignatureWorker | None" = None
+        self._visual_sig_pending: set[str] = set()
+        self._visual_sig_failed: set[str] = set()
+        self._visual_warm_timer = QTimer(self)
+        self._visual_warm_timer.setSingleShot(True)
+        self._visual_warm_timer.setInterval(120)
+        self._visual_warm_timer.timeout.connect(self._flush_visual_signature_queue)
         self._individual_edit_source_name = ""
         self._individual_crop_box: tuple[float, ...] | None = None
         self._preview_timer = QTimer(self)
@@ -1617,6 +1937,30 @@ class MainWindow(QMainWindow):
             self._refresh_legacy_after_catalog)
         # إعادة قياس بعد استقرار التخطيط الفعلي للنافذة
         QTimer.singleShot(0, self._refresh_ui_scale)
+        # 2.9.6 — تسريع الإقلاع: المحرّك الثقيل لم يعد يُستورد قبل ظهور
+        # النافذة، لكن أول دفعة تحتاجه. يُسخَّن في خيط خلفي بعد أن تصير
+        # الواجهة مرئية ومستجيبة، فلا يشعر المستخدم بالتحميل في الحالتين.
+        QTimer.singleShot(120, self._warm_engine_async)
+        # وكذلك تبويب المحرّر: يُبنى بعد أول رسم لا قبله، فيظهر
+        # التطبيق أسرع ويبقى فتح التبويب فوريًا عند أول تحرير.
+        QTimer.singleShot(180, self._warm_editor_deferred)
+
+    def _warm_engine_async(self) -> None:
+        """يبدأ تحميل محرّك الرؤية في الخلفية بعد ظهور الواجهة.
+
+        لا يمسّ خيط الواجهة إطلاقًا: `lazy_engine.warm_up_async` يشتغل في
+        خيط عفريت واحد، وأي فشل يُسجَّل ولا يُوقف التطبيق — فالمحرّك
+        سيُحمَّل عند أول استعمال حقيقي على أي حال ويُظهر الخطأ عندها.
+        """
+        def _report(ok: bool, message: str) -> None:
+            if not ok:
+                print(f"[boot] engine warm-up failed: {message}",
+                      file=sys.stderr)
+
+        try:
+            _lazy_engine.warm_up_async(_report)
+        except Exception as exc:  # pragma: no cover - دفاعي بحت
+            print(f"[boot] engine warm-up not started: {exc}", file=sys.stderr)
 
     def _setup_window(self) -> None:
         self.setWindowTitle(f"{APP_NAME} — {APP_VERSION}")
@@ -1893,7 +2237,6 @@ class MainWindow(QMainWindow):
         margins = layout_obj.contentsMargins() if layout_obj else None
         chrome = (margins.top() + margins.bottom()) if margins else 20
         spacing = layout_obj.spacing() if layout_obj else 7
-        scale = getattr(self, "ui_scale", None)
         # 2.9.2 إصلاح 2: الأرضية من المحتوى (صنفان كاملان) لا من 96 مقيسة،
         # لأن 96 × 0.620 = 60px وهو أقل من صف واحد فيقبل Qt قصّ الجدول.
         floor = self._useful_table_floor()
@@ -2713,6 +3056,12 @@ class MainWindow(QMainWindow):
                     and obj is self.results_table.viewport()
                     and event.type() == QEvent.Resize):
                 self._adjust_results_table_columns()
+            # 2.9.6: F11 داخل النافذة الموسّعة يرجع للتبويب المدمج
+            if (event.type() == QEvent.KeyPress
+                    and obj is getattr(self, "_expanded_editor_window", None)
+                    and event.key() == Qt.Key_F11):
+                obj.close()
+                return True
         except Exception:
             pass
         return super().eventFilter(obj, event)
@@ -2884,18 +3233,9 @@ class MainWindow(QMainWindow):
             "(صورة الباركود + الجهات الأخرى) ملتقطة متتالية"
         )
         self.link_same_item_button.clicked.connect(self._link_selected_to_nearest_above)
-        # وضع «اربط بالنقر»: أبسط طريقة — نقرة على الصورة بلا باركود
-        # ثم نقرة على صورة الباركود فترتبط فورًا (طلب المستخدم).
-        self.tap_link_button = QPushButton("👆 اربط بالنقر")
-        self.tap_link_button.setObjectName("tapLinkButton")
-        self.tap_link_button.setCheckable(True)
-        self.tap_link_button.setToolTip(
-            "أسهل طريقة للربط:\n"
-            "1) فعّل الوضع ثم انقر الصورة التي بلا باركود\n"
-            "2) انقر صورة الباركود التابعة لنفس المنتج\n"
-            "فترتبط فورًا بنفس رقم الصنف — بلا أزرار ولا قوائم."
-        )
-        self.tap_link_button.toggled.connect(self._toggle_tap_link_mode)
+        # 2.9.6 — أُزيل وضع «اربط بالنقر» بطلب المالك: كان يعتمد على ترتيب
+        # نقرتين متتاليتين فينكسر بسهولة (نقرة خاطئة = ربط خاطئ)،
+        # وبديله الموثوق هو حقل البحث + الاقتراح الذكي + الربط بالمرجع.
         # زر حقائق التغذية — اقتصاص يدوي حر من الصورة الأصلية بدقتها الكاملة
         # يُحفظ فورًا كصورة منفردة ضمن صور الصنف — بلا Tesseract ولا OCR.
         self.nutrition_button = QPushButton("🍎 حقائق التغذية")
@@ -2929,7 +3269,6 @@ class MainWindow(QMainWindow):
         # الشدة القصوى وحدها. النص الأصلي يُحفظ في ``_full_label``
         # فيعود حرفيًا عند التوسّع، ويُضمّ للتلميح دائمًا.
         self._link_button_glyphs = [
-            (self.tap_link_button, "👆"),
             (self.use_reference_button, "⚑"),
             (self.suggest_group_button, "◎"),
             (self.reference_group_link_button, "⚓"),
@@ -2954,7 +3293,6 @@ class MainWindow(QMainWindow):
             self.reference_group_link_button,
             self.link_by_image_button,
             self.link_same_item_button,
-            self.tap_link_button,
             self.nutrition_button,
             self.delete_output_button,
             self.jump_to_previews_button,
@@ -2978,7 +3316,9 @@ class MainWindow(QMainWindow):
         self.manual_reference_badge.setMaximumWidth(160)
         # 2.6: صف واحد ملتف (FlowLayout) بدل صفّين ثابتين — الأزرار تنزل
         # لسطر جديد تلقائيًا عند ضيق العرض فلا يُقص أي زر مطلقًا.
-        from unified_editor import _FlowLayout as _LinkFlowLayout
+        # 2.9.6 — تسريع الإقلاع: يُستورد من الوحدة الخفيفة لا من
+        # ``unified_editor``، فالأخير يجرّ numpy قبل ظهور النافذة.
+        from flow_layout import FlowLayout as _LinkFlowLayout
         # 2.9.3 إصلاح 7: QWidget العادي يبني sizeHint من heightForWidth
         # محسوبًا على عرض sizeHint الضيق (≈عرض أوسع زر) لا على عرضه
         # الفعلي، فيعلن 388px (ستة أسطر) بدل 130px (سطرين) على
@@ -2992,7 +3332,6 @@ class MainWindow(QMainWindow):
             "QFrame#linkFlowHost { background: transparent; border: none; }")
         quick_flow = _LinkFlowLayout(quick_flow_host, margin=0, spacing=6)
         for link_btn in (
-            self.tap_link_button,
             self.use_reference_button,
             self.suggest_group_button,
             self.reference_group_link_button,
@@ -3009,8 +3348,9 @@ class MainWindow(QMainWindow):
         # 2.3: شارة المرجع انتقلت إلى صف العنوان — وتنكمش عند الضيق بدل تجاوز الحافة
         self.manual_reference_badge.setMinimumWidth(0)
         link_heading.addWidget(self.manual_reference_badge)
-        # إرشاد وضع «اربط بالنقر» — تلميح عائم منبثق (مثل السوايب) فوق القائمة
-        # لا يأخذ أي مساحة داخل اللوحة فلا تنحشر الأزرار (طلب المستخدم).
+        # تلميح عائم منبثق فوق القائمة — آلية إشعارات عامة (حفظ حقائق
+        # التغذية، حذف الصور، وغيرها). لا يأخذ مساحة داخل اللوحة
+        # فلا تنحشر الأزرار.
         self.tap_link_hint = QLabel("", self)
         self.tap_link_hint.setObjectName("tapLinkHint")
         self.tap_link_hint.setWordWrap(True)
@@ -3348,12 +3688,16 @@ class MainWindow(QMainWindow):
 
         # 2.6: المحرر الموحد الكامل — كل أدوات المحرر الاحترافي القديم مدمجة
         # في هذه الصفحة: معالجة ذكية، إزالة خلفية، فرشاة، ظل، منزلقات…
-        from unified_editor import UnifiedEditorWidget
-
-        self.unified_editor = UnifiedEditorWidget()
-        self.unified_editor.setObjectName("unifiedEditor")
-        self.unified_editor.setMinimumWidth(300)
-        tab_layout.addWidget(self.unified_editor, 1)
+        #
+        # 2.9.6 — تسريع الإقلاع: المحرّر لا يُبنى هنا بعد اليوم.
+        # بناؤه وقت الإقلاع كان يكلّف قرابة 400 مللي ثانية (استيراد
+        # `photo_editor_v2` ومعه numpy ثم إنشاء عشرات الودجتات)، رغم أن
+        # التبويب غير مرئي عند الإقلاع، ولا يُفتح إلا بعد دفعة وربط
+        # واختيار صف. يُبنى الآن عند أول لمسة حقيقية عبر `unified_editor`
+        # (خاصية كسولة)، ويُسخَّن مسبقًا بعد استقرار الواجهة في
+        # `_warm_editor_deferred`، فلا يشعر المستخدم بأي تأخير لاحق.
+        self._editor_host_layout = tab_layout
+        self._editor_host_index = tab_layout.count()
 
         # عناصر الجيل السابق تبقى مُنشأة (يشير إليها منطق قديم واختبارات)
         # لكنها مخفية تمامًا — المحرر الموحد يعوضها كلها.
@@ -3450,10 +3794,22 @@ class MainWindow(QMainWindow):
             "حدد جدول حقائق التغذية بالسحب واحفظه كصورة جديدة\n"
             "مرتبطة برقم الصنف — يمكن حفظ عدة اقتصاصات دون إغلاق النافذة")
         self.editor_nutrition_button.clicked.connect(self._open_nutrition_crop)
+        # 2.9.6 — النقطة 4: صفحة تحرير موسّعة بحرية أكبر.
+        # المحرّر نفسه (لا نسخة ثانية) يُنقل إلى نافذة بملء الشاشة
+        # فتبقى كل الحالة والتاريخ والتعديلات كما هي دون أي فقد.
+        self.editor_expand_button = QPushButton("⛶ توسيع الصفحة")
+        self.editor_expand_button.setObjectName("secondaryButton")
+        self.editor_expand_button.setMinimumHeight(34)
+        self.editor_expand_button.setToolTip(
+            "يفتح المحرّر في صفحة بملء الشاشة مع الأدوات المتقدمة مفتوحة:\n"
+            "مساحة أكبر للصورة وحرية أوسع في التعديل — لا تُفقد أي تعديلات\n"
+            "عند التوسيع أو العودة (F11 أو إغلاق النافذة للرجوع)")
+        self.editor_expand_button.clicked.connect(self._toggle_expanded_editor)
         # 2.6: لا قص لنصوص الأزرار — عرض أدنى مبني على النص الفعلي لكل زر
         for footer_btn in (self.individual_cancel_button,
                            self.individual_reset_button,
                            self.editor_nutrition_button,
+                           self.editor_expand_button,
                            self.individual_apply_button):
             footer_btn.setMinimumWidth(
                 footer_btn.fontMetrics().horizontalAdvance(footer_btn.text()) + 28)
@@ -3461,6 +3817,7 @@ class MainWindow(QMainWindow):
         # عند الالتفاف، والتلميح النصي أخيرًا لأنه العنصر القابل للانكماش.
         for footer_widget in (
             self.individual_apply_button,
+            self.editor_expand_button,
             self.editor_nutrition_button,
             self.individual_reset_button,
             self.individual_cancel_button,
@@ -3469,7 +3826,72 @@ class MainWindow(QMainWindow):
         ):
             footer_layout.addWidget(footer_widget)
         tab_layout.addWidget(footer)
+        # مرساة المحرّر داخل التبويب — يُعاد إليها بعد إغلاق النافذة الموسّعة
+        self._editor_tab_layout = tab_layout
+        self._editor_tab_footer = footer
+        self._expanded_editor_window = None
         return tab
+
+    # ------------------------------------------------- 2.9.6 المحرّر الكسول
+    @property
+    def unified_editor(self):
+        """المحرّر الموحّد — يُبنى عند أول لمسة فعلية لا وقت الإقلاع.
+
+        كل الكود القائم يكتب ``self.unified_editor.x`` كما كان تمامًا؛
+        الفرق الوحيد أن البناء يحدث عند أول وصول. ملاحظة مهمة:
+        الفحوصات القديمة ``hasattr(self, "unified_editor")`` كانت تعني
+        «هل اكتمل بناء الواجهة؟»، لكن مع الخاصية الكسولة صار ``hasattr``
+        نفسه يُنشئ المحرّر ويُلغي الفائدة؛ لذا استُبدلت كلها بـ
+        ``_editor_ready()`` التي تفحص دون إنشاء.
+        """
+        editor = self.__dict__.get("_unified_editor_instance")
+        if editor is not None:
+            return editor
+        layout = getattr(self, "_editor_host_layout", None)
+        if layout is None:
+            # مرساة التبويب لم تُنشأ بعد — نحن داخل بناء الواجهة.
+            raise AttributeError("unified_editor")
+        from unified_editor import UnifiedEditorWidget
+
+        editor = UnifiedEditorWidget()
+        editor.setObjectName("unifiedEditor")
+        editor.setMinimumWidth(300)
+        self.__dict__["_unified_editor_instance"] = editor
+        layout.insertWidget(self._editor_host_index, editor, 1)
+        # المحرّر يولد بعد تطبيق الأنماط والمقاييس، فيُعاد تطبيقهما
+        # عليه وحده ليطابق مظهره ما كان يوم كان يُبنى وقت الإقلاع.
+        sheet = getattr(self, "_base_stylesheet", None)
+        scale = getattr(self, "ui_scale", None)
+        if sheet and scale is not None:
+            editor.setStyleSheet(scale.scale_stylesheet(sheet))
+        busy = bool(getattr(self, "_busy", False))
+        try:
+            editor.setEnabled(
+                not busy and self._individual_editable_item() is not None)
+        except Exception:
+            pass
+        return editor
+
+    def _editor_ready(self) -> bool:
+        """هل المحرّر مبنيٌ فعلًا؟ — فحص لا يُنشئه.
+
+        يحلّ محل ``hasattr(self, "unified_editor")`` القديمة، لأن ``hasattr``
+        مع خاصية كسولة يستدعيها فيبني المحرّر حيث كان القصد مجرد
+        السؤال عن وجوده.
+        """
+        return self.__dict__.get("_unified_editor_instance") is not None
+
+    def _warm_editor_deferred(self) -> None:
+        """يبني المحرّر بعد استقرار الواجهة فيصير فتح التبويب فوريًا.
+
+        بناء ودجتات Qt يجب أن يبقى على خيط الواجهة، لكن تأخيره إلى ما بعد
+        أول رسم ينقل الكلفة من «شاشة فارغة ينتظرها المستخدم» إلى لحظة
+        الواجهة فيها معروضة وجاهزة.
+        """
+        try:
+            self.unified_editor  # noqa: B018 - الوصول هو البناء
+        except Exception as exc:  # pragma: no cover - دفاعي
+            print(f"[boot] editor warm-up failed: {exc}", file=sys.stderr)
 
     def _on_preview_tab_changed(self, _index: int) -> None:
         """فتح تبويب «تحرير مباشر» مباشرة يجهّز الصورة المحددة للتحرير تلقائيًا."""
@@ -4020,12 +4442,20 @@ class MainWindow(QMainWindow):
         # 2.6: تحميل الصورة في المحرر الموحد — كل الأدوات تعمل مباشرة على الصورة
         self.unified_editor.load_image(str(source))
         self.individual_editor_product_label.setText(item.product_name or item.source_name)
-        unit = "حبة" if item.item_code else "غير محددة"
+        unit = self._units_label_for_code(item.item_code)
         self.individual_editor_meta_label.setText(
             f"رقم الصنف: {item.item_code or 'غير مرتبط'}  •  الوحدة: {unit}  •  الملف: {item.source_name}"
         )
         self.individual_editor_state_label.setText("جاهز للتحرير")
         self.individual_editor_state_label.setProperty("previewPending", False)
+        # 2.9.6: إن كانت الصفحة الموسّعة مفتوحة تتحدّث معلوماتها فورًا
+        info_label = getattr(self, "_expanded_info_label", None)
+        if info_label is not None and getattr(self, "_expanded_editor_window", None):
+            info_label.setText(
+                f"{item.product_name or item.source_name}  —  "
+                f"رقم الصنف: {item.item_code or 'غير مرتبط'}  •  "
+                f"الوحدة: {unit}  •  الملف: {item.source_name}"
+            )
         # 2.6: اللوحة القديمة تبقى مخفية — المحرر الموحد يعوضها بالكامل
         self.individual_editor_panel.setVisible(False)
         self._update_individual_crop_info()
@@ -4043,10 +4473,154 @@ class MainWindow(QMainWindow):
         self.results_action_bar.setVisible(False)
         self.unified_editor.canvas.setFocus(Qt.OtherFocusReason)
 
+    # ------------------------------------------------ 2.9.6 صفحة تحرير موسّعة
+    def _toggle_expanded_editor(self) -> None:
+        """فتح/إغلاق صفحة التحرير الموسّعة (النقطة 4).
+
+        الفكرة: لا ننشئ محرّرًا ثانيًا — ننقل ودجت المحرّر نفسه
+        وتذييله إلى نافذة بملء الشاشة، فتبقى الصورة والتاريخ
+        وكل التعديلات غير المحفوظة سليمة تمامًا في الاتجاهين.
+        """
+        window = getattr(self, "_expanded_editor_window", None)
+        if window is not None and window.isVisible():
+            window.close()
+            return
+        self._open_expanded_editor()
+
+    def _open_expanded_editor(self) -> None:
+        # الحارس: لا نوسّع قبل أن تكتمل مرساة التبويب. يقبل أيضًا
+        # الحالة التي يُسنَد فيها المحرّر مباشرة (هياكل الاختبار)،
+        # فالمطلوب فعليًا وجود محرّر وتخطيط تبويب يُرجَع إليه.
+        if not (hasattr(self, "_editor_host_layout")
+                or "unified_editor" in self.__dict__
+                or self._editor_ready()):
+            return
+        if not hasattr(self, "_editor_tab_layout"):
+            return
+        if getattr(self, "_expanded_editor_window", None) is not None:
+            self._expanded_editor_window.raise_()
+            self._expanded_editor_window.activateWindow()
+            return
+
+        window = QDialog(self)
+        window.setWindowTitle(f"{APP_NAME} — صفحة التحرير الموسّعة")
+        window.setObjectName("expandedEditorWindow")
+        window.setModal(False)
+        window.setLayoutDirection(Qt.RightToLeft)
+        window.setSizeGripEnabled(True)
+        window.setWindowFlags(
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        layout = QVBoxLayout(window)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # شريط معلومات مصغّر يكرّر بيانات الصنف داخل النافذة الموسّعة
+        info = QLabel(
+            f"{self.individual_editor_product_label.toolTip() or self.individual_editor_product_label.text()}"
+            f"  —  {self.individual_editor_meta_label.toolTip() or self.individual_editor_meta_label.text()}"
+        )
+        info.setObjectName("expandedEditorInfo")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        self._expanded_info_label = info
+
+        # نقل المحرّر والتذييل إلى النافذة (نفس الكائنات تمامًا)
+        layout.addWidget(self.unified_editor, 1)
+        layout.addWidget(self._editor_tab_footer)
+
+        # لافتة داخل التبويب توضح أن المحرّر مفتوح في نافذة موسّعة
+        placeholder = QLabel(
+            "المحرّر مفتوح الآن في صفحة موسّعة.\n"
+            "أغلق النافذة الموسّعة (أو اضغط F11) للعودة إلى التحرير المدمج."
+        )
+        placeholder.setObjectName("expandedEditorPlaceholder")
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setWordWrap(True)
+        self._editor_tab_layout.insertWidget(1, placeholder, 1)
+        self._expanded_placeholder = placeholder
+
+        # الأدوات المتقدمة تُفتح تلقائيًا — فالمساحة تتسع لها هنا
+        self._expanded_prev_advanced = bool(
+            self.unified_editor.advanced_toggle_btn.isChecked())
+        if not self._expanded_prev_advanced:
+            self.unified_editor.advanced_toggle_btn.setChecked(True)
+
+        window.finished.connect(lambda _r: self._close_expanded_editor())
+        window.installEventFilter(self)
+        self._expanded_editor_window = window
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            window.resize(int(available.width() * 0.94),
+                          int(available.height() * 0.92))
+            window.move(available.center() - window.rect().center())
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        QTimer.singleShot(0, lambda: self.unified_editor.canvas.fit_view())
+        self.editor_expand_button.setText("⤵ إرجاع للتبويب")
+
+    def _close_expanded_editor(self) -> None:
+        """إعادة المحرّر إلى التبويب بنفس حالته دون فقد أي تعديل."""
+        window = getattr(self, "_expanded_editor_window", None)
+        if window is None:
+            return
+        self._expanded_editor_window = None
+        placeholder = getattr(self, "_expanded_placeholder", None)
+        if placeholder is not None:
+            self._editor_tab_layout.removeWidget(placeholder)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+            self._expanded_placeholder = None
+        # إعادة المحرّر والتذييل إلى موضعهما الأصلي في التبويب
+        self._editor_tab_layout.insertWidget(1, self.unified_editor, 1)
+        self._editor_tab_layout.addWidget(self._editor_tab_footer)
+        self.unified_editor.show()
+        self._editor_tab_footer.show()
+        if not getattr(self, "_expanded_prev_advanced", False):
+            self.unified_editor.advanced_toggle_btn.setChecked(False)
+        self.editor_expand_button.setText("⛶ توسيع الصفحة")
+        window.deleteLater()
+        QTimer.singleShot(0, lambda: self.unified_editor.canvas.fit_view())
+
+    def _units_label_for_code(self, code: str | None) -> str:
+        """2.9.6: وحدات الصنف الحقيقية من الإكسل لترويسة المحرّر.
+
+        كانت الوحدة مثبتة نصّاً ("حبة") فتناقض اسم الملف الناتج الذي
+        يجمع كل وحدات الإكسل (النقطة 3). الآن تُقرأ من نفس المصدر.
+        """
+        if not code:
+            return "غير محددة"
+        index = getattr(self, "v2_catalog_index", None)
+        if index is None:
+            return "— (الإكسل غير محمّل)"
+        try:
+            units = list(index.units_for_code(str(code)) or [])
+        except Exception:
+            units = []
+        if not units:
+            return "غير موجودة في الإكسل"
+        try:
+            from engine_v2.naming_v2 import clean_unit
+            cleaned = [clean_unit(u) for u in units]
+            units = [u for u in cleaned if u] or units
+        except Exception:
+            pass
+        return " + ".join(units)
+
     def _exit_individual_edit_mode(self) -> None:
         """2.3: إنهاء جلسة التحرير المدمج والعودة لتبويب النتيجة."""
         if self.individual_worker is not None and self.individual_worker.isRunning():
             return
+        # 2.9.6: لا تُترك النافذة الموسّعة معلقة بعد إنهاء الجلسة
+        expanded = getattr(self, "_expanded_editor_window", None)
+        if expanded is not None:
+            expanded.close()
         self._individual_edit_source_name = None
         self._individual_editor_dirty = False
         self._individual_preview_active = False
@@ -4060,7 +4634,7 @@ class MainWindow(QMainWindow):
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
         # 2.6: تفريغ المحرر الموحد عند إنهاء الجلسة
-        if hasattr(self, "unified_editor"):
+        if self._editor_ready():
             self.unified_editor.clear()
         self.individual_editor_state_label.setText("جاهز للتحرير")
         self.individual_editor_state_label.setProperty("previewPending", False)
@@ -4204,7 +4778,7 @@ class MainWindow(QMainWindow):
             pane.set_image(source)
             pane.viewer.fit_image()
             # 2.6: إعادة تحميل الأصل في المحرر الموحد يلغي كل التعديلات غير المحفوظة
-            if hasattr(self, "unified_editor"):
+            if self._editor_ready():
                 self.unified_editor.load_image(str(source))
         self._individual_preview_active = False
         self._individual_preview_path = None
@@ -4315,6 +4889,7 @@ class MainWindow(QMainWindow):
         self.individual_worker.completed.connect(self._on_individual_edit_completed)
         self.individual_worker.failed.connect(self._on_individual_edit_failed)
         self.individual_worker.finished.connect(self._on_individual_worker_finished)
+        self._track_worker(self.individual_worker)
         self._set_busy(True)
         operation = "معاينة" if preview_only else "حفظ"
         self.individual_editor_state_label.setText(f"جارٍ {operation} الصورة…")
@@ -4375,7 +4950,7 @@ class MainWindow(QMainWindow):
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
         # 2.6: بعد الحفظ الناجح نفرغ المحرر الموحد (التعديلات اعتُمدت)
-        if hasattr(self, "unified_editor"):
+        if self._editor_ready():
             self.unified_editor.clear()
         self._populate_results(restore_position=restore_position)
         self.progress.setRange(0, 1)
@@ -4444,6 +5019,9 @@ class MainWindow(QMainWindow):
             QFrame#fixedActionBar { background: #f7faff; border: 1px solid #d5e1ed; border-radius: 10px; }
             QFrame#editorHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0f2747, stop:0.55 #163d68, stop:1 #3b2575); border: 1px solid #355b83; border-radius: 13px; }
             QFrame#editorFooter { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ffffff, stop:1 #eef4ff); border: 1px solid #bdcde0; border-radius: 12px; }
+            QDialog#expandedEditorWindow { background: #f4f7fc; }
+            QLabel#expandedEditorInfo { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0f2747, stop:1 #3b2575); color: #ffffff; font-weight: 700; font-size: 13px; padding: 8px 14px; border-radius: 10px; }
+            QLabel#expandedEditorPlaceholder { color: #5a6a80; font-size: 13px; background: #ffffff; border: 2px dashed #bdcde0; border-radius: 12px; padding: 24px; }
             QLabel#editorProductLabel { color: #ffffff; font-size: 17px; font-weight: 900; background: transparent; }
             QLabel#editorMetaLabel { color: #d6e7f7; font-size: 10px; background: transparent; }
             QLabel#editorStateBadge { color: #07543c; background: #d9f8ec; border: 1px solid #70cfad; border-radius: 13px; padding: 7px 13px; font-weight: 900; }
@@ -4651,9 +5229,6 @@ class MainWindow(QMainWindow):
             QPushButton#suggestNearbyButton:hover { background: #ffe5a8; }
             QPushButton#referenceLinkButton { background: #e7f8f2; color: #066a50; border: 1px solid #78cbb0; padding: 5px 9px; }
             QPushButton#referenceLinkButton:hover { background: #cef1e4; }
-            QPushButton#tapLinkButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #8b5cf6, stop:1 #6d28d9); color: #ffffff; border: 2px solid #4c1d95; border-radius: 9px; padding: 5px 12px; font-weight: 900; }
-            QPushButton#tapLinkButton:hover { background: #7c3aed; }
-            QPushButton#tapLinkButton:checked { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #d97706); border-color: #92400e; }
             QLabel#tapLinkHint { background: rgba(76, 29, 149, 0.94); color: #ffffff; border: 1px solid #8b5cf6; border-radius: 10px; padding: 10px 14px; font-weight: 800; font-size: 13px; }
             QPushButton#nutritionButton { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #34d399, stop:1 #059669); color: #ffffff; border: 2px solid #065f46; border-radius: 9px; padding: 5px 12px; font-weight: 900; }
             QPushButton#nutritionButton:hover { background: #10b981; }
@@ -5137,6 +5712,11 @@ class MainWindow(QMainWindow):
         if not self.image_paths:
             QMessageBox.warning(self, APP_NAME, "أضف صورة واحدة على الأقل.")
             return
+        # 2.9.6 — منع تشغيل دفعتين معًا: إسناد عامل جديد فوق عامل يعمل
+        # يُدمّر QThread أثناء تشغيله ⇒ SIGABRT وإغلاق التطبيق بلا رسالة.
+        if self.batch_worker is not None and self.batch_worker.isRunning():
+            self.status_label.setText("هناك دفعة قيد المعالجة بالفعل — انتظر اكتمالها.")
+            return
         # لا تستبدل نتيجة ناجحة قبل أن تكتمل المهمة الجديدة. تبقى القائمة
         # ومساحة العمل السابقة متاحتين إذا فشل Excel أو تعذرت الكتابة.
         pending_workspace = self._new_workspace()
@@ -5159,6 +5739,7 @@ class MainWindow(QMainWindow):
         self.batch_worker.progress_changed.connect(self._on_progress)
         self.batch_worker.completed.connect(self._on_batch_completed)
         self.batch_worker.failed.connect(self._on_worker_failed)
+        self._track_worker(self.batch_worker)
         self.batch_worker.start()
 
     def _on_progress(self, done: int, total: int, name: str) -> None:
@@ -5182,6 +5763,9 @@ class MainWindow(QMainWindow):
         self._show_results_page()
         self._set_busy(False)
         self._update_controls()
+        # 2.9.6 — تسخين البصمات البصرية في الخلفية فور انتهاء الدفعة،
+        # ليكون أول اختيار صف في لوحة الربط فوريًا بلا تجمّد.
+        QTimer.singleShot(0, self._warm_visual_signatures)
         QMessageBox.information(
             self,
             APP_NAME,
@@ -5864,47 +6448,137 @@ class MainWindow(QMainWindow):
             return None, 0.0
         try:
             from engine_v2 import visual_match_v2 as _vm
+            # 2.9.6 — لا يُبنى أي شيء هنا على خيط الواجهة. نقرأ من الكاش فقط،
+            # وما ينقص يُجدول للعامل الخلفي ثم يُحدّث الزر تلقائيًا عند الجاهزية.
+            missing: list[str] = []
             tgt_sigs = []
             for t in unresolved:
                 path = getattr(t, "source_path", "") or ""
                 if not path:
                     continue
-                sig = self._visual_sig_cached(path)
+                sig = self._visual_sig_lookup(path, missing)
                 if sig is not None and sig.ok:
                     tgt_sigs.append(sig)
-            if not tgt_sigs:
-                return None, 0.0
             best_item, best_score = None, 0.0
             for item in linked_items:
-                ref_sig = self._visual_sig_cached(item.source_path)
+                ref_sig = self._visual_sig_lookup(item.source_path, missing)
+                if not tgt_sigs:
+                    continue
                 if ref_sig is None or not ref_sig.ok:
                     continue
                 score = max(_vm.pair_similarity(ts, ref_sig) for ts in tgt_sigs)
                 if score > best_score:
                     best_item, best_score = item, score
+            if missing:
+                self._queue_visual_signatures(missing)
+            if not tgt_sigs:
+                return None, 0.0
             return best_item, best_score
         except Exception as exc:
             print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
             return None, 0.0
 
+    # ------------------------------------------------------------------
+    # 2.9.6 — البصمات البصرية: كاش LRU + بناء في الخلفية
+    # ------------------------------------------------------------------
+    def _visual_sig_lookup(self, path: str, missing: list[str] | None = None):
+        """يقرأ البصمة من الكاش فقط — ولا يبنيها أبدًا على خيط الواجهة.
+
+        إن لم تكن جاهزة، يُضاف المسار إلى `missing` ليُبنى في الخلفية."""
+        if not path:
+            return None
+        key = str(path)
+        lru = self._visual_sig_lru
+        if key in lru:
+            lru.move_to_end(key)
+            return lru[key]
+        if missing is not None and key not in self._visual_sig_failed:
+            missing.append(key)
+        return None
+
+    def _queue_visual_signatures(self, paths: Iterable[str]) -> None:
+        """يجدول بناء بصمات في الخلفية دون تعطيل الواجهة إطلاقًا."""
+        added = False
+        for path in paths:
+            key = str(path or "")
+            if not key or key in self._visual_sig_lru:
+                continue
+            if key in self._visual_sig_pending or key in self._visual_sig_failed:
+                continue
+            self._visual_sig_pending.add(key)
+            added = True
+        if added and not self._visual_warm_timer.isActive():
+            self._visual_warm_timer.start()
+
+    def _flush_visual_signature_queue(self) -> None:
+        """يشغّل عاملًا خلفيًا واحدًا لبناء كل البصمات المنتظرة."""
+        if not self._visual_sig_pending:
+            return
+        worker = self._visual_sig_worker
+        if worker is not None and worker.isRunning():
+            # العامل مشغول — أعد المحاولة بعد قليل بدل إنشاء عامل ثانٍ.
+            self._visual_warm_timer.start()
+            return
+        batch = sorted(self._visual_sig_pending)
+        self._visual_sig_pending.clear()
+        try:
+            worker = VisualSignatureWorker(batch)
+        except Exception as exc:
+            print(f"[link] visual signature worker failed to start: {exc}", file=sys.stderr)
+            return
+        self._visual_sig_worker = worker
+        worker.ready.connect(self._on_visual_signatures_ready)
+        self._track_worker(worker)
+        worker.start()
+
+    def _on_visual_signatures_ready(self, built: object) -> None:
+        """يستقبل البصمات الجاهزة ويحدّث الاقتراح مرة واحدة فقط."""
+        if not isinstance(built, dict):
+            return
+        lru = self._visual_sig_lru
+        for key, sig in built.items():
+            if sig is None or not getattr(sig, "ok", False):
+                self._visual_sig_failed.add(key)
+                continue
+            lru[key] = sig
+            lru.move_to_end(key)
+        while len(lru) > self._visual_sig_capacity:
+            lru.popitem(last=False)
+        if self._visual_sig_pending and not self._visual_warm_timer.isActive():
+            self._visual_warm_timer.start()
+        try:
+            self._refresh_smart_link_button()
+        except Exception:
+            pass
+
+    def _warm_visual_signatures(self) -> None:
+        """تسخين مسبق: يبني بصمات كل صور الدفعة في الخلفية فور انتهائها،
+        فيكون أول اختيار صف فوريًا بدل أن ينتظر المستخدم ثوانٍ."""
+        result = self.current_result
+        if result is None:
+            return
+        paths = [
+            getattr(item, "source_path", "") or ""
+            for item in getattr(result, "items", []) or []
+        ]
+        self._queue_visual_signatures([p for p in paths if p])
+
     def _visual_sig_cached(self, path: str):
-        """بصمة بصرية مع ذاكرة مؤقتة — فلا تُحسب لنفس الصورة مرتين
-        أثناء تنقل المستخدم بين الصفوف (استجابة فورية للزر الذكي)."""
-        cache = getattr(self, "_visual_sig_cache", None)
-        if cache is None:
-            cache = {}
-            self._visual_sig_cache = cache
-        if path in cache:
-            return cache[path]
+        """متوافق مع الإصدارات السابقة — يقرأ من الكاش، ولا يبني إلا عند
+        الاستدعاء الصريح خارج مسار الواجهة التفاعلية."""
+        sig = self._visual_sig_lookup(path)
+        if sig is not None:
+            return sig
         try:
             from engine_v2 import visual_match_v2 as _vm
             sig = _vm.build_signature(path)
         except Exception:
             sig = None
-        # سقف بسيط للذاكرة — دفعات العمل اليومية لا تتجاوز مئات الصور.
-        if len(cache) > 600:
-            cache.clear()
-        cache[path] = sig
+        if sig is not None and getattr(sig, "ok", False):
+            self._visual_sig_lru[str(path)] = sig
+            self._visual_sig_lru.move_to_end(str(path))
+            while len(self._visual_sig_lru) > self._visual_sig_capacity:
+                self._visual_sig_lru.popitem(last=False)
         return sig
 
     def _refresh_smart_link_button(self) -> None:
@@ -6129,21 +6803,35 @@ class MainWindow(QMainWindow):
                 self, APP_NAME, "لا توجد صور مرتبطة بعد لاختيار الصنف منها.")
             return
 
-        # اقتراح بصري تلقائي: المنتج نفسه من زوايا أخرى (أمام/جنب/خلف)
+        # اقتراح بصري تلقائي: المنتج نفسه من زوايا أخرى (أمام/جنب/خلف).
+        # 2.9.6 — لا نبني أي بصمة هنا على خيط الواجهة؛ فتح الحوار يجب أن
+        # يكون فوريًا. نقرأ من الكاش المُسخَّن، وما ينقص يُجدول للخلفية
+        # فيستفيد منه الفتح التالي؛ وإن لم تتوفر بصمات بقي الترتيب الطبيعي.
         similarity: dict[str, float] = {}
         try:
             from engine_v2 import visual_match_v2 as _vm
-            tgt_sigs = [_vm.build_signature(t.source_path) for t in targets
-                        if getattr(t, "source_path", "")]
-            tgt_sigs = [s for s in tgt_sigs if s.ok]
+            missing: list[str] = []
+            tgt_sigs = []
+            for t in targets:
+                path = getattr(t, "source_path", "") or ""
+                if not path:
+                    continue
+                sig = self._visual_sig_lookup(path, missing)
+                if sig is not None and sig.ok:
+                    tgt_sigs.append(sig)
             if tgt_sigs:
                 for item in linked_items:
-                    ref_sig = _vm.build_signature(item.source_path)
-                    if not ref_sig.ok:
+                    ref_sig = self._visual_sig_lookup(item.source_path, missing)
+                    if ref_sig is None or not ref_sig.ok:
                         continue
                     best = max(_vm.pair_similarity(ts, ref_sig)
                                for ts in tgt_sigs)
                     similarity[item.source_name] = best
+            else:
+                for item in linked_items:
+                    self._visual_sig_lookup(item.source_path, missing)
+            if missing:
+                self._queue_visual_signatures(missing)
         except Exception as exc:
             print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
 
@@ -6155,7 +6843,7 @@ class MainWindow(QMainWindow):
 
         from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QListWidget,
                                        QListWidgetItem, QVBoxLayout, QLineEdit,
-                                       QLabel, QPushButton, QHBoxLayout)
+                                       QLabel)
         dlg = QDialog(self)
         dlg.setWindowTitle("اختر الصورة المرتبطة مصدر الصنف")
         dlg.setLayoutDirection(Qt.RightToLeft)
@@ -6339,30 +7027,7 @@ class MainWindow(QMainWindow):
             f"جارٍ ربط {len(unresolved)} صورة بالصنف {target_code}…",
         )
 
-    def _toggle_tap_link_mode(self, enabled: bool) -> None:
-        """وضع «اربط بالنقر» — أبسط طريقة ربط (طلب المستخدم):
-        نقرة على الصورة بلا باركود ثم نقرة على صورة الباركود فترتبط فورًا."""
-        self._tap_link_pending: list[str] = []
-        if enabled:
-            self.tap_link_button.setText("✖ إنهاء الربط بالنقر")
-            self._show_tap_hint(
-                "الخطوة 1 من 2: انقر الصورة التي بلا باركود 🟠 (يمكن أكثر من واحدة بـ Ctrl)")
-            # نلتقط النقرات بعد تحديث التحديد — cellClicked تصل بعد selectionChanged.
-            try:
-                self.results_table.cellClicked.connect(self._tap_link_cell_clicked)
-            except Exception:
-                pass
-        else:
-            self.tap_link_button.setText("👆 اربط بالنقر")
-            self.tap_link_hint.setVisible(False)
-            try:
-                self._tap_hint_timer.stop()
-            except Exception:
-                pass
-            try:
-                self.results_table.cellClicked.disconnect(self._tap_link_cell_clicked)
-            except Exception:
-                pass
+    # 2.9.6 — حُذف `_toggle_tap_link_mode` مع وضع «اربط بالنقر» بطلب المالك.
 
     def _show_tap_hint(self, text: str, msec: int = 6000) -> None:
         """يعرض التلميح العائم في شريط سفلي فوق شريط الحالة مباشرة.
@@ -6439,65 +7104,8 @@ class MainWindow(QMainWindow):
                 y = max(margin, self.height() - hint.height() - 2)
         hint.move(x, y)
 
-    def _tap_link_cell_clicked(self, row: int, _column: int) -> None:
-        """معالجة نقرة واحدة في وضع «اربط بالنقر».
+    # 2.9.6 — حُذف `_tap_link_cell_clicked` مع وضع «اربط بالنقر» بطلب المالك.
 
-        المنطق: نقرة على صف غير مرتبط ← يُضاف للانتظار (الخطوة 1).
-        نقرة على صف مرتبط وهناك صور بالانتظار ← ربط فوري (الخطوة 2)."""
-        if not getattr(self, "tap_link_button", None) or not self.tap_link_button.isChecked():
-            return
-        source_cell = self.results_table.item(row, 0)
-        if source_cell is None:
-            return
-        source_name = str(source_cell.data(Qt.UserRole) or "")
-        item = self._result_items_by_name.get(source_name)
-        if item is None:
-            return
-        pending = getattr(self, "_tap_link_pending", [])
-        if not item.item_code:
-            # الخطوة 1: صورة بلا باركود — خذ كل غير المرتبط من التحديد الحالي
-            # (يدعم Ctrl/Shift لعدة صور) مع المنقورة نفسها.
-            names = {source_name}
-            for sel in self._selected_result_items():
-                if not sel.item_code:
-                    names.add(sel.source_name)
-            self._tap_link_pending = list(names)
-            count = len(self._tap_link_pending)
-            count_txt = "صورة واحدة" if count == 1 else f"{count} صور"
-            self._show_tap_hint(
-                f"الخطوة 2 من 2: اخترت {count_txt} ✅ — الآن انقر صورة الباركود 🟢 ليتم الربط فورًا")
-            return
-        # الخطوة 2: صورة مرتبطة (لها صنف) — نفّذ الربط الفوري.
-        if not pending:
-            self._show_tap_hint(
-                "الخطوة 1 من 2: هذه الصورة مرتبطة أصلًا — انقر أولًا الصورة التي بلا باركود 🟠")
-            return
-        targets = [self._result_items_by_name[n] for n in pending
-                   if n in self._result_items_by_name
-                   and not self._result_items_by_name[n].item_code]
-        if not targets:
-            self._tap_link_pending = []
-            return
-        target_code = item.item_code
-        display = item.product_name or target_code
-        self._tap_link_pending = []
-        count_txt = "صورة" if len(targets) == 1 else f"{len(targets)} صور"
-        self._show_tap_hint(
-            f"✅ تم! رُبطت {count_txt} بـ: {display} ({target_code}) — انقر صورة أخرى بلا باركود لمواصلة الربط")
-        # تسجيل القرار للتعلم الذاتي — نفس مسار الزر الذكي.
-        try:
-            from engine_v2 import learning_v2 as _lrn
-            for t in targets:
-                _lrn.record_link_decision(
-                    source=t.source_name, item_code=target_code,
-                    visual_score=0.0, accepted=True)
-        except Exception:
-            pass
-        self._begin_manual_links(
-            targets,
-            target_code,
-            f"جارٍ ربط {len(targets)} صورة بالصنف {target_code} (ربط بالنقر)…",
-        )
 
     # ------------------------------------------------------------------
     # حقائق التغذية — اقتصاص يدوي حر بجودة كاملة (بلا OCR)
@@ -6882,6 +7490,13 @@ class MainWindow(QMainWindow):
         source_names = tuple(dict.fromkeys(item.source_name for item in targets))
         if not source_names:
             return
+        # 2.9.6 — حارس التزامن: بدء ربط جديد بينما السابق يعمل كان يستبدل
+        # المرجع ويُسقط QThread عاملًا ⇒ SIGABRT وإغلاق التطبيق بلا رسالة.
+        # الآن يُرفض الطلب بلطف مع إبقاء الأزرار معطلة حتى ينتهي الجاري.
+        if self.manual_worker is not None and self.manual_worker.isRunning():
+            self.status_label.setText(
+                "هناك ربط قيد الحفظ بالخلفية — انتظر ثانية واحدة ثم أعد المحاولة.")
+            return
         # ثبّت مكان المستخدم فور ضغط الحفظ؛ قد يتغير التحديد أثناء عمل
         # المعالجة الخلفية، لكن العودة يجب أن تكون إلى الصف والتمرير الأصليين.
         self._pending_manual_position = self._capture_results_position()
@@ -6904,6 +7519,7 @@ class MainWindow(QMainWindow):
         )
         self.manual_worker.completed.connect(self._on_manual_completed)
         self.manual_worker.failed.connect(self._on_manual_failed)
+        self._track_worker(self.manual_worker)
         self.manual_worker.start()
 
     def _on_manual_completed(self, result: BatchRunResult) -> None:
@@ -6945,6 +7561,9 @@ class MainWindow(QMainWindow):
         else:
             message = f"تم تعديل/ربط {count} صور وتحديث أرقام الأصناف النهائية."
         self.status_label.setText(f"{message} تم تحديث التقارير وحزمة ZIP في الخلفية.")
+        # 2.9.6 — الربط يُغيّر مسارات المخرجات؛ سخّن البصمات الناقصة
+        # في الخلفية ليبقى انتقال المراجعة بين الأصناف فوريًا.
+        QTimer.singleShot(0, self._warm_visual_signatures)
 
     def _open_results_folder(self) -> None:
         if self.current_workspace and self.current_workspace.is_dir():
@@ -7026,7 +7645,7 @@ class MainWindow(QMainWindow):
         )
         can_edit_one = self._individual_editable_item() is not None
         self.individual_editor_panel.setEnabled(not busy and can_edit_one)
-        if hasattr(self, "unified_editor"):
+        if self._editor_ready():
             self.unified_editor.setEnabled(not busy and can_edit_one)
         self.individual_preview_button.setEnabled(not busy and can_edit_one)
         self.individual_apply_button.setEnabled(not busy and can_edit_one)
@@ -7078,7 +7697,7 @@ class MainWindow(QMainWindow):
         )
         can_edit_one = self._individual_editable_item() is not None
         self.individual_editor_panel.setEnabled(not busy and can_edit_one)
-        if hasattr(self, "unified_editor"):
+        if self._editor_ready():
             self.unified_editor.setEnabled(not busy and can_edit_one)
         self.individual_preview_button.setEnabled(not busy and can_edit_one)
         self.individual_apply_button.setEnabled(not busy and can_edit_one)
@@ -7132,10 +7751,43 @@ class MainWindow(QMainWindow):
         self._shutdown_workers()
         event.accept()
 
+    def _track_worker(self, worker) -> None:  # type: ignore[no-untyped-def]
+        """الاحتفاظ بمرجع قوي للخيط حتى ينتهي فعليا.
+
+        بدونها، إسناد عامل جديد إلى نفس الحقل (مثل self.manual_worker)
+        يُسقط آخر مرجع للعامل القديم؛ فإن كان لا يزال يعمل يدمّره
+        جامع القمامة وهو يعمل، ويطلق Qt انهيارا فوريا على مستوى C++
+        («QThread: Destroyed while thread is still running» => SIGABRT)
+        فيُغلق التطبيق نفسه بلا أي رسالة ويفقد المستخدم عمله.
+        """
+        try:
+            workers = self._live_workers
+        except AttributeError:  # توافق مع نوافذ أُنشئت قبل الترقية
+            workers = self._live_workers = set()
+        workers.add(worker)
+
+        def _release() -> None:
+            workers.discard(worker)
+
+        try:
+            worker.finished.connect(_release)
+        except Exception:
+            # إن تعذر الربط نحتفظ بالمرجع: تسريب ضئيل أرحم من انهيار.
+            pass
+
     def _shutdown_workers(self, wait_ms: int = 4000) -> None:
         """يطلب إيقاف كل الخيوط العاملة وينتظرها ثم يقاطعها إن تعنّتت."""
+        # 2.9.6 — نشمل أيضًا كل الخيوط الحية المتتبّعة حتى لو لم تعد مسندة
+        # إلى حقول النافذة؛ وإلا قد تُدمّر مع النافذة وهي تعمل ⇒ SIGABRT.
+        targets = []
         for attr in ("batch_worker", "manual_worker", "individual_worker"):
-            worker = getattr(self, attr, None)
+            candidate = getattr(self, attr, None)
+            if candidate is not None:
+                targets.append(candidate)
+        for extra in tuple(getattr(self, "_live_workers", ()) or ()):
+            if extra not in targets:
+                targets.append(extra)
+        for worker in targets:
             if worker is None:
                 continue
             try:
@@ -7165,7 +7817,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         # مؤقتات الواجهة: إيقافها يمنع نبضات بعد التدمير
-        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer"):
+        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer",
+                     "_visual_warm_timer"):
             timer = getattr(self, attr, None)
             if timer is not None:
                 try:

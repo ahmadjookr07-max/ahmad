@@ -89,14 +89,27 @@ def normalize_stem(stem: str) -> str:
     return stem.strip("_ ").strip() or "item"
 
 
+_INNER_SPACE_RE = re.compile(r"\s+")
+
+
 def clean_unit(unit: str) -> str:
     """تعقيم قيمة الوحدة القادمة من الإكسل أو الإدخال اليدوي:
     إزالة الشرطات السفلية والمسافات الطرفية التي كانت تولّد `__حبه`.
 
     ملاحظة: تحفظ الإملاء كما ورد في الإكسل حرفيًا (قرار المالك).
     للمقارنة بين إملاءين لنفس الوحدة استخدم `unit_key`.
+
+    2.9.6 (قرار المالك — الخيار «أ»): **المسافة الداخلية تُحذف**.
+    الإكسل يحتوي وحدات بمسافة (`كرتون 1` في 594 صفًا، `نص كرتون` في 4)
+    وهي وحدات حقيقية مميزة لا أخطاء إملائية — فحص عبواتها يثبت ذلك
+    (10008272: كرتون=64 مقابل كرتون 1=256). لكن المسافة في اسم الملف
+    تُفسد روابط المتاجر، فتُحذف مع حفظ التمييز:
+        `كرتون 1` -> `كرتون1`   |   `نص كرتون` -> `نصكرتون`
     """
-    return str(unit or "").strip().strip("_").strip()
+    text = str(unit or "").strip().strip("_").strip()
+    if not text:
+        return ""
+    return _INNER_SPACE_RE.sub("", text)
 
 
 # ------------------------------------------------- مفتاح المقارنة للوحدات
@@ -426,7 +439,11 @@ class NamingSettings:
     - ``scheme``: dash (الجديد الافتراضي) | classic | custom.
     - آخر اختيار يُحفظ تلقائيًا عبر save() ويُعتمد في المرات القادمة.
     """
-    unit_policy: str = "per_image"       # per_image | replicate_all_units | default_unit
+    # 2.9.6 (قرار المالك): الافتراضي أصبح join_all_units ليتعرف البرنامج
+    # ويسمّي بنفسه بلا أي ضبط يدوي. كان per_image فخرجت 991 صورة
+    # للمالك كلها بوحدة `حبه` واحدة مع أن 74.4% من الأصناف
+    # (16,440 من 22,087) لها أكثر من وحدة في الإكسل.
+    unit_policy: str = UNIT_POLICY_JOIN_ALL  # per_image | replicate_all_units | default_unit | join_all_units
     default_unit: str = UNIT_SUFFIX_DEFAULT
     template: str = TEMPLATE_DASH
     scheme: str = SCHEME_DASH
@@ -470,6 +487,9 @@ class NamingSettings:
 
     def to_dict(self) -> dict:
         return {"unit_policy": self.unit_policy,
+                # يدلّ على أن السياسة اختيار صريح لا افتراضي قديم،
+                # فلا تُرقّى فوق رغبة المالك في الإصدارات القادمة.
+                "unit_policy_explicit": True,
                 "default_unit": self.default_unit,
                 "template": self.template,
                 "scheme": self.scheme,
@@ -483,7 +503,13 @@ class NamingSettings:
         s = cls()
         s.unit_policy = d.get("unit_policy", s.unit_policy)
         if s.unit_policy not in VALID_POLICIES:
-            s.unit_policy = "per_image"
+            s.unit_policy = UNIT_POLICY_JOIN_ALL
+        # ترقية 2.9.6: ملفات الإعدادات القديمة تحمل per_image لأنه كان
+        # الافتراضي لا لأن المالك اختاره. يُرقّى تلقائيًا إلى join_all_units
+        # ما لم يكن الملف يحمل علم اختيار صريح (unit_policy_explicit).
+        if s.unit_policy == UNIT_POLICY_PER_IMAGE and \
+                not bool(d.get("unit_policy_explicit", False)):
+            s.unit_policy = UNIT_POLICY_JOIN_ALL
         s.default_unit = d.get("default_unit", s.default_unit)
         s.scheme = d.get("scheme", "")
         if s.scheme not in VALID_SCHEMES:

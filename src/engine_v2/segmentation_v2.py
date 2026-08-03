@@ -15,6 +15,24 @@ import cv2
 import numpy as np
 
 
+class SmartCutoutUnavailable(FileNotFoundError):
+    """العزل الذكي غير متاح في هذه البيئة (محرك أو نموذج مفقود).
+
+    يرث ``FileNotFoundError`` حفاظاً على توافق معالجات الأخطاء القائمة،
+    لكنه يحمل رسالة عربية صريحة قابلة للعرض مباشرة للمستخدم.
+    """
+
+
+def _missing_message(feature: str = "cutout") -> str:
+    """رسالة عربية واضحة، مع بديل مضمون إن غابت وحدة التقوية."""
+    try:
+        from .runtime_deps_v2 import describe_missing
+        return describe_missing(feature)
+    except Exception:
+        return ("تعذّر تشغيل عزل الخلفية الذكي في هذه البيئة؛ "
+                "تابع بالمعالجة التقليدية.")
+
+
 @dataclass
 class SegmentationResult:
     alpha: np.ndarray            # float32 0..1 بنفس أبعاد الصورة
@@ -62,17 +80,27 @@ class ProductSegmenterV2:
                         return c
                 except Exception:
                     continue
-        return None
+        # لم يوجد محلياً: وحدة الاكتفاء الذاتي تبحث في مجلد بيانات المستخدم
+        # ثم تُنزّل النموذج الخفيف تلقائياً عند توفر الإنترنت (بلا استثناء).
+        try:
+            from .runtime_deps_v2 import ensure_model
+            return ensure_model(self.model_dir)
+        except Exception:
+            return None
 
     def _get_session(self):
         if self._session is None:
             with self._lock:
                 if self._session is None:
-                    import onnxruntime as ort
+                    try:
+                        import onnxruntime as ort
+                    except Exception as exc:  # بيئة بلا محرك ذكاء محلي
+                        raise SmartCutoutUnavailable(
+                            _missing_message("cutout")) from exc
                     path = self._find_model()
                     if path is None:
-                        raise FileNotFoundError(
-                            f"لا يوجد نموذج قص في {self.model_dir}")
+                        raise SmartCutoutUnavailable(
+                            _missing_message("cutout"))
                     so = ort.SessionOptions()
                     so.intra_op_num_threads = max(2, (os.cpu_count() or 4) // 2)
                     self._session = ort.InferenceSession(

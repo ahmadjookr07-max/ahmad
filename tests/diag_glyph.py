@@ -22,7 +22,7 @@ NAMES = ["منظف ومعقم متعدد الاستخدامات برائحة ا�
          "حبوب إفطار كاملة القمح مدعمة بالفيتامينات والحديد"]
 
 EXPECTED = {
-    "tap_link_button": "👆 اربط بالنقر",
+    # 2.9.6 — أُزيل tap_link_button مع وضع «اربط بالنقر» بطلب المالك.
     "use_reference_button": "اعتماد مرجع",
     "suggest_group_button": "اقتراح قريب",
     "reference_group_link_button": "ربط بالمرجع",

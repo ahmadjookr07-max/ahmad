@@ -21,8 +21,47 @@ import time
 import webbrowser
 from pathlib import Path
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+    TK_AVAILABLE = True
+    TK_ERROR = ""
+except Exception as _tk_exc:  # بيئة بلا مكتبة رسوميات
+    TK_AVAILABLE = False
+    TK_ERROR = str(_tk_exc)
+
+    class _TkStub:
+        """بديل صوري يجعل الوحدة **قابلة للاستيراد** بلا tkinter.
+
+        تعريفات الفئات ترث من ``tk.Frame`` و``tk.Tk`` وقت الاستيراد؛
+        فيلزم كائن يوفّر أي سمة كفئة قابلة للوراثة. أي محاولة لإنشاء
+        واجهة فعلية ترفع خطأً عربياً واضحاً بدل تتبّع تقني.
+        """
+
+        def __getattr__(self, name):
+            class _Missing:
+                def __init__(self, *a, **k):
+                    raise RuntimeError(tk_missing_message())
+
+                def __init_subclass__(cls, **kw):
+                    super().__init_subclass__(**kw)
+
+            _Missing.__name__ = name
+            return _Missing
+
+    tk = _TkStub()       # type: ignore[assignment]
+    filedialog = messagebox = ttk = _TkStub()  # type: ignore[assignment]
+
+
+def tk_missing_message() -> str:
+    """رسالة عربية واضحة تُعرض بدل الانهيار عند غياب tkinter."""
+    return (
+        "تعذّر فتح استوديو المالك: مكتبة الرسوميات tkinter غير مثبّتة "
+        "في هذه البيئة.\n"
+        "على ويندوز: أعد التثبيت من المُثبِّت الرسمي.\n"
+        "على لينكس: sudo apt install python3-tk\n"
+        f"التفصيل التقني: {TK_ERROR}"
+    )
 
 # ------------------------------------------------------------------ paths
 def _base_dir() -> Path:
@@ -339,7 +378,14 @@ class OwnerStudio(tk.Tk):
             priv, pub = lv.generate_owner_keypair()
             pqc_priv, pqc_pub = lv.generate_pqc_keypair()
         except Exception as e:
-            messagebox.showerror("خطأ", f"تعذر توليد المفاتيح: {e}")
+            detail = str(e)
+            if not getattr(lv, "_HAVE_PQC", True):
+                detail = (
+                    "مكتبة التوقيع المقاوم للحوسبة الكمية (dilithium-py) غير "
+                    "مثبّتة في هذه البيئة، وهي لازمة لتوليد شفرة مالك "
+                    "جديدة.\nثبّتها بالأمر: pip install dilithium-py\n"
+                    "ملاحظة: إصدار المفاتيح من شفرة موجودة لا يتأثر.")
+            messagebox.showerror("خطأ", f"تعذر توليد المفاتيح: {detail}")
             return
         sec = {
             "ed25519_private": priv, "ed25519_public": pub,
@@ -1100,6 +1146,14 @@ class OwnerStudio(tk.Tk):
 
 
 def main() -> None:
+    if not TK_AVAILABLE:
+        # لا انهيار بتتبع تقني: رسالة عربية واضحة ثم خروج مرتّب
+        msg = tk_missing_message()
+        try:
+            print(msg, file=sys.stderr)
+        except Exception:
+            pass
+        raise SystemExit(2)
     app = OwnerStudio()
     app.mainloop()
 

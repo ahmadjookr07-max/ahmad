@@ -202,9 +202,29 @@ def _configure_tesseract(pytesseract) -> None:
             continue
 
 
+def ocr_available() -> bool:
+    """هل قراءة النصوص متاحة فعلياً؟ فحص رخيص لا يرمي استثناءاً."""
+    try:
+        from .runtime_deps_v2 import have_ocr
+        return have_ocr()
+    except Exception:
+        try:
+            import pytesseract  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+
 def extract_nutrition_data(img: np.ndarray) -> NutritionData:
-    """يستخرج NutritionData من صورة جدول حقائق تغذية."""
-    import pytesseract
+    """يستخرج NutritionData من صورة جدول حقائق تغذية.
+
+    اكتفاء ذاتي: إن غاب محرك OCR تُعاد نتيجة فارغة بثقة صفر
+    (أي: أدخِل القيم يدوياً) بدل إسقاط التطبيق في البيئات الناقصة.
+    """
+    try:
+        import pytesseract
+    except Exception:
+        return NutritionData()
     _configure_tesseract(pytesseract)
     binary = _prepare_for_ocr(img)
     config = "--psm 6"
@@ -212,7 +232,11 @@ def extract_nutrition_data(img: np.ndarray) -> NutritionData:
         raw = pytesseract.image_to_string(binary, lang="ara+eng",
                                           config=config)
     except Exception:
-        raw = pytesseract.image_to_string(binary, config=config)
+        try:
+            raw = pytesseract.image_to_string(binary, config=config)
+        except Exception:
+            # محرك Tesseract غير مثبّت على النظام — لا انهيار
+            return NutritionData()
 
     data = NutritionData()
     matched = 0

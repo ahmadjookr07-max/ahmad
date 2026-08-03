@@ -199,8 +199,21 @@ def smart_extract(img: np.ndarray) -> SmartExtractionResult:
 
     كل حقل: صوتان متفقان = ثقة عالية (needs_review=False)، صوت واحد =
     يُعرض لكن يُعلَّم للمراجعة الإلزامية. لا اختراع قيم أبدًا.
+
+    اكتفاء ذاتي: إن غاب محرك OCR تُعاد نتيجة فارغة مع تنبيه عربي
+    واضح يوجّه للإدخال اليدوي، بدل إسقاط التطبيق.
     """
-    import pytesseract
+    try:
+        import pytesseract
+    except Exception:
+        empty = SmartExtractionResult()
+        try:
+            from .runtime_deps_v2 import describe_missing
+            empty.warnings.append(describe_missing("ocr"))
+        except Exception:
+            empty.warnings.append(
+                "قراءة النصوص غير متاحة على هذا الجهاز — أدخِل القيم يدوياً.")
+        return empty
     _configure_tesseract(pytesseract)
 
     result = SmartExtractionResult()

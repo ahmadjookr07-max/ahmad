@@ -232,10 +232,78 @@ def scan_legacy_folder(folder: str | Path,
     return groups, unparsed
 
 
-def _target_stems(item: str, unit: str, count: int) -> list[str]:
-    """أسماء المجموعة وفق قاعدة المالك: الواجهة بلا رقم ثم -1، -2…"""
-    base = f"{item}_{unit}" if unit else str(item)
-    return [base if i == 0 else f"{base}-{i}" for i in range(count)]
+def _naming_settings():
+    """يقرأ إعدادات التسمية المحفوظة — **نفس مصدر الدفعة الجديدة**.
+
+    2.9.6 (قرار المالك): «اجعله في الدفعة الجديدة والقديمة، كل
+    التعديلات يجب أن تُنفّذ في الاثنين». كان هذا الملف
+    يتجاهل `unit_policy` تمامًا فيبقى المجلد المنجز بوحدة واحدة
+    مهما تغيرت الإعدادات.
+    """
+    try:
+        from .integration_v2 import _current_naming_settings
+        return _current_naming_settings()
+    except Exception:
+        return None
+
+
+def _units_for_group(item: str, index, unit_in_name: str) -> list[str]:
+    """وحدات الصنف للتسمية — **منطق مطابق حرفًا بحرف**
+    لما تفعله الدفعة الجديدة في `integration_v2._units_from_catalog`.
+
+    يعيد قائمة الوحدات مرتّبة بتصدير وحدة العبوة=1، أو [] إن غاب
+    الإكسل (فيُستخدم ما في اسم الملف).
+    """
+    from .naming_v2 import dedupe_units, unit_key
+    if index is None:
+        return [unit_in_name] if unit_in_name else []
+    try:
+        units = [str(u) for u in index.units_for_code(str(item))
+                 if str(u or "").strip()]
+    except Exception:
+        units = []
+    if not units:
+        return []
+    primary = ""
+    try:
+        primary = str(index.primary_unit_for_code(str(item)) or "")
+    except Exception:
+        primary = ""
+    if primary:
+        key = unit_key(primary)
+        units = [primary] + [u for u in units if unit_key(u) != key]
+    return dedupe_units(units)
+
+
+def _target_stems(item: str, unit: str, count: int,
+                  units: list[str] | None = None,
+                  join_all: bool = False) -> list[str]:
+    """أسماء المجموعة وفق قاعدة المالك: الواجهة بلا رقم ثم -1، -2…
+
+    2.9.6: يمر عبر `build_name_join_all` — **نفس دالة الدفعة
+    الجديدة** — لا بناء يدوي، فيتطابق المخرجان حرفًا بحرف.
+    وذلك يُكسب المجلد المنجز تلقائيًا كل معالجات `clean_unit`
+    (حذف المسافة: `كرتون 1` ← `كرتون1`) و`normalize_stem`.
+    """
+    from .naming_v2 import build_name_join_all, clean_unit
+
+    if join_all:
+        unit_list = [u for u in (units or []) if str(u or "").strip()]
+        if not unit_list and unit:
+            unit_list = [unit]
+        if unit_list:
+            return [build_name_join_all(item, unit_list, seq=i + 1,
+                                        total=count)
+                    for i in range(count)]
+
+    # سياسة الوحدة الواحدة — تمر بنفس الدالة بوحدة واحدة
+    # لتكتسب clean_unit وnormalize_stem بدل الوصل النصي الخام.
+    u = clean_unit(unit)
+    if not u:
+        base = str(item)
+        return [base if i == 0 else f"{base}-{i}" for i in range(count)]
+    return [build_name_join_all(item, [u], seq=i + 1, total=count)
+            for i in range(count)]
 
 
 def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
@@ -245,14 +313,24 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
     index: `CatalogIndex` محمّل. إن كان None تُستخدم الوحدة الموجودة
     في اسم الملف (فلا يتعطل العمل بغياب الإكسل).
     """
+    from .naming_v2 import UNIT_POLICY_JOIN_ALL
+
     plan = LegacyPlan()
     plan.groups = groups
     plan.unparsed = list(unparsed or [])
+
+    # 2.9.6: المجلد المنجز يتبع نفس سياسة الدفعة الجديدة.
+    settings = _naming_settings()
+    join_all = bool(settings is not None
+                    and getattr(settings, "enabled", True)
+                    and getattr(settings, "unit_policy", "")
+                    == UNIT_POLICY_JOIN_ALL)
 
     for item in sorted(groups):
         grp = groups[item]
         unit_in_name = grp.unit_in_names
         unit = unit_in_name
+        units: list[str] = []
         note = ""
         if index is not None:
             try:
@@ -272,7 +350,19 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
                 plan.missing_in_excel.append(item)
                 note = "غير موجود في الإكسل — أُبقيت وحدة اسم الملف"
 
-        stems = _target_stems(item, unit, grp.count)
+        if join_all:
+            units = _units_for_group(item, index, unit_in_name)
+            if units:
+                # الوحدة المعروضة في الجدول = المجموع لا واحدة،
+                # ليرى المالك ما سيكتَب فعلًا في اسم الملف.
+                from .naming_v2 import join_units
+                unit = join_units(units)
+                if len(units) > 1 and not note:
+                    note = (f"وحدات الإكسل المجموعة: "
+                            f"{'، '.join(units)}")
+
+        stems = _target_stems(item, unit, grp.count,
+                              units=units, join_all=join_all)
         for i, im in enumerate(grp.images):
             plan.rows.append(RenamePlanRow(
                 item=item, old_path=im.path, new_stem=stems[i], unit=unit,
@@ -306,8 +396,15 @@ def apply_legacy_plan(plan: LegacyPlan,
         unit = rows[0].unit if rows else grp.unit_in_names
         paths = [im.path for im in grp.images]
         out_dir = paths[0].parent
+        # 2.9.6: تُمرّر جذوع الخطة نفسها لا الوحدة وحدها.
+        # كان `renumber_item_images` يعيد بناء الاسم من الوحدة
+        # فيختلف عن خطة المعاينة التي رأى المالك في الجدول
+        # (ومع الوحدة المجموعة `حبه_كرتون_شدة` كان ينتج
+        # `10001633_حبه_كرتون_شدة_حبه_كرتون_شدة` مكررًا).
+        stems = [r.new_stem for r in rows]
         res = renumber_item_images(out_dir, item, paths, [unit] if unit
-                                   else [], settings=None)
+                                   else [], settings=None,
+                                   target_stems=stems)
         if not res.ok:
             errors.append(f"{item}: {res.error}")
             continue

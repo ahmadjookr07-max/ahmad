@@ -54,12 +54,17 @@ def renumber_item_images(
     ordered_paths: list[str | Path],
     units: list[str],
     settings=None,
+    target_stems: list[str] | None = None,
 ) -> PrimaryRenameResult:
     """يعيد تسمية صور الصنف بحيث تكون ordered_paths[0] هي الرئيسية.
 
     ordered_paths: مسارات ملفات الإخراج الحالية لصور الصنف بالترتيب
     المطلوب (الرئيسية أولًا). تُعاد التسمية مع الحفاظ على الامتدادات،
     ويشمل ذلك الملفات الشقيقة بنفس الجذع (png/jpg بجانب webp إن وجدت).
+
+    target_stems (2.9.6): جذوع جاهزة تُستخدم كما هي بدل إعادة بناء
+    الاسم من `units`. لازمة لمسار المجلد المنجز حتى يطابق المنفّذ
+    خطة المعاينة تمامًا ولا تُكرّر الوحدات المجموعة.
     """
     result = PrimaryRenameResult()
     out_dir = Path(out_dir)
@@ -76,7 +81,14 @@ def renumber_item_images(
         except Exception:
             settings = None
 
-    targets = _stem_names(item, units, len(paths), settings)
+    if target_stems:
+        targets = [str(s) for s in target_stems if str(s or "").strip()]
+        targets = targets[:len(paths)]
+        if len(targets) < len(paths):
+            fallback = _stem_names(item, units, len(paths), settings)
+            targets += fallback[len(targets):]
+    else:
+        targets = _stem_names(item, units, len(paths), settings)
 
     # اجمع كل الملفات الفعلية المطلوب نقلها: لكل مسار، كل الأشقاء بنفس الجذع.
     moves: list[tuple[Path, str]] = []  # (ملف حالي، جذع جديد)

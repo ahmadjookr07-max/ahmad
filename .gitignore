@@ -12,3 +12,6 @@ owner_secrets/
 notes/
 owner_studio/بيانات_المالك/
 models_v2/
+
+# تقرير مُشغّل الاختبارات (يُولَّد محليًا)
+tests/_run_all_report.json
