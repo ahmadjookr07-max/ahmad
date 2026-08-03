@@ -18,9 +18,21 @@ PASS, FAIL = [], []
 
 
 def check(name, cond, note=""):
+    """يسجّل تحقّقًا واحدًا ويطبعه.
+
+    الـ`note` مكتوب في مواضع كثيرة كوصف لـحالة الفشل (منها
+    «BulkRenameDialog ما زالت موجودة — تكرار لم يُحذف»)، وكانت
+    الدالة تطبعه حتى عند النجاح، فيقرأ المالك «PASS ... ما زالت
+    موجودة» فيظنّ العطل قائمًا وهو مُصلَح. مخرجٌ يُقرأ على عكس
+    معناه أسوأ من غيابه، لأنه يدفع للبحث في ما لا عيب فيه.
+    لذا نُرفق الوصف عند الفشل وحده، وندع المعلومات تُمرّر عبر
+    `info=` متى لزم إظهار رقم مع النجاح.
+    """
     (PASS if cond else FAIL).append(name)
-    print(("  PASS " if cond else "  FAIL ") + name +
-          (f" — {note}" if note else ""))
+    if cond:
+        print("  PASS " + name)
+    else:
+        print("  FAIL " + name + (f" — {note}" if note else ""))
 
 
 def shot(widget, name):
@@ -231,4 +243,14 @@ lv.deactivate()
 print(f"\n===== {len(PASS)} passed / {len(FAIL)} failed =====")
 if FAIL:
     print("FAILED:", FAIL)
-sys.exit(0 if not FAIL else 1)
+
+# الخروج قبل تفكيك Qt لموارده:
+# كان الملف ينتهي بـSIGABRT (rc=134) بعد طباعة الملخّص سليمًا، لأنّ
+# جامع المهملات يهدم ويدجتات بعد إسقاط QApplication في الوضع
+# المُقنّع (offscreen). فكان المُشغّل يرى «26 نجح / 0 فشل» وrc≠٠ معًا
+# وهو تناقض يجعل النتيجة غير قابلة للتفسير. وهذا الانهيار عرضٌ
+# للتفكيك لا عيب واجهة، وقد انتهى القياس كلّه قبله.
+# لا نُخفي فشلًا حقيقيًا: الرمز يبقى 1 إن سقط تحقق واحد.
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(0 if not FAIL else 1)

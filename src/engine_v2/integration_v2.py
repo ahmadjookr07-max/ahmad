@@ -58,22 +58,60 @@ def set_default_nutrition(settings: dict | None) -> None:
         DEFAULT_NUTRITION.update(settings)
 
 
+def _bridge(opts, explicit=None):
+    """يُمرّر الخيارات عبر جسر الوعي لتسري أوامر المالك فعليًا.
+
+    دون هذه الوصلة كانت أوامر الحوار تُحفظ وتُعرض كأنها نُفّذت
+    ثم تُهمل عند المعالجة. الفشل هنا لا يوقف المعالجة: إعداد
+    مفقود أهون من دفعة متوقفة.
+    """
+    try:
+        from .awareness_bridge_v2 import apply_overrides
+        return apply_overrides(opts, explicit=explicit)
+    except Exception:
+        return opts
+
+
 def _coerce_options(obj, source_path: str = ""):
     """يحول dict قادمة من نافذة حقائق التغذية (أو أي مصدر) إلى
     ProcessOptionsV2 جاهزة للمعالج — مع تحويل bbox النسبي (x1,y1,x2,y2)
-    إلى بكسلات (x,y,w,h) وبناء InsetPlacement من anchor/scale/offset."""
+    إلى بكسلات (x,y,w,h) وبناء InsetPlacement من anchor/scale/offset.
+
+    ويُمرّر الناتج عبر جسر الوعي، فهذه الدالة هي الممر الوحيد
+    لبناء خيارات المعالجة، فمن هنا تسري أوامر المالك على كل صورة.
+    """
     mod = _lazy_processor_mod()
     if obj is None:
         opts = mod.ProcessOptionsV2()
         if DEFAULT_NUTRITION:
-            return _apply_nutrition_dict(opts, DEFAULT_NUTRITION, source_path)
-        return opts
+            opts = _apply_nutrition_dict(opts, DEFAULT_NUTRITION, source_path)
+            return _bridge(opts, explicit=set(DEFAULT_NUTRITION))
+        return _bridge(opts)
     if isinstance(obj, mod.ProcessOptionsV2):
-        return obj
+        # كائن جاهز من المتصل: نحترم ما ضبطه ولا نملأ إلا الفراغات
+        return _bridge(obj, explicit=_non_default_fields(mod, obj))
     if isinstance(obj, dict):
         opts = mod.ProcessOptionsV2()
-        return _apply_nutrition_dict(opts, obj, source_path)
+        opts = _apply_nutrition_dict(opts, obj, source_path)
+        return _bridge(opts, explicit=set(obj))
     return obj
+
+
+def _non_default_fields(mod, opts) -> set:
+    """أسماء الحقول التي غيّرها المتصل عن الافتراضي.
+
+    ما غيّره المتصل صراحةً أقوى من التجاوز المحفوظ، لأن أحدث فعل
+    مباشر أصدق تعبيرًا عن النية من إعداد قديم.
+    """
+    out = set()
+    try:
+        ref = mod.ProcessOptionsV2()
+        for f in getattr(ref, "__dataclass_fields__", {}):
+            if getattr(opts, f, None) != getattr(ref, f, None):
+                out.add(f)
+    except Exception:
+        return out
+    return out
 
 
 def _apply_nutrition_dict(opts, d: dict, source_path: str = ""):

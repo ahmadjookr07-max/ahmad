@@ -211,6 +211,15 @@ def _patch_ui(native_app) -> None:
             except Exception as exc:
                 print(f"[V2] license badge failed: {exc}", file=sys.stderr)
 
+            # ──── طبقة الوعي: شارة الصحة + لوحة الوعي والحوار ────
+            # تُدرج بعد بناء صف الأدوات لأنها تقرأ v2_toolbar_layout.
+            # فشلها لا يمنع التطبيق من العمل: الوعي مُكمّل لا شرط.
+            try:
+                import awareness_ui
+                awareness_ui.install(self)
+            except Exception as exc:
+                print(f"[V2] awareness UI failed: {exc}", file=sys.stderr)
+
             self.v2_nutrition_dialog_cls = v2_ui.NutritionDialog
             _attach_nutrition_button(self, native_app, v2_ui)
 
@@ -260,6 +269,12 @@ def _patch_ui(native_app) -> None:
                               file=sys.stderr)
         except Exception as exc:  # pragma: no cover — never block closing
             print(f"[V2] close handler failed: {exc}", file=sys.stderr)
+        # إغلاق طبقة الوعي: تثبيت القياسات والذاكرة قبل الخروج
+        try:
+            import awareness_ui
+            awareness_ui.shutdown()
+        except Exception:
+            pass
         if callable(original_close):
             original_close(self, event)
         else:
@@ -525,7 +540,31 @@ def _gate_startup(native_app) -> None:
     native_app.MainWindow.__init__ = gated_init
 
 
+def _awake_awareness() -> None:
+    """إيقاظ طبقة الوعي قبل أي شيء آخر.
+
+    الترتيب مقصود: يُوقِظ قبل `_activate_engine` حتى يكون السجل
+    ومراقبة الاستثناءات جاهزًا لالتقاط أي عطل في الإقلاع نفسه —
+    فأعطال الإقلاع كانت أكثر ما أربك المستخدم في الإصدارات السابقة.
+    """
+    try:
+        from awareness import core as _aw
+        _aw.awake(deep=False, heal=True)   # إقلاع خفيف: الفحص العميق في النبضة
+    except Exception as exc:  # pragma: no cover — الوعي لا يعطّل الإقلاع
+        print(f"[V2] awareness awake failed: {exc}", file=sys.stderr)
+
+
+def _sleep_awareness() -> None:
+    """إغلاق نهائي: تثبيت القياسات والذاكرة وإغلاق قاعدة السجل."""
+    try:
+        from awareness import core as _aw
+        _aw.sleep()
+    except Exception:
+        pass
+
+
 def main() -> int:
+    _awake_awareness()          # أولًا: الوعي يراقب الإقلاع نفسه
     _show_splash()              # فورًا: شاشة بدء مرئية خلال أجزاء من الثانية
     _activate_engine()
     import native_app
@@ -535,6 +574,7 @@ def main() -> int:
     try:
         return native_app.main()
     finally:
+        _sleep_awareness()
         _close_splash()
 
 

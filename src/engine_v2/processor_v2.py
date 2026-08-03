@@ -24,6 +24,20 @@ from .nutrition_v2 import (InsetPlacement, detect_nutrition_table,
 NUTRITION_MODES = ("none", "standalone", "merge_small", "rebuild",
                    "remove", "not_found")
 
+# ──────── قياس الأداء (اختياري وغير مُعيق) ────────
+# المحرك يجب أن يعمل حتى لو غابت طبقة الوعي تمامًا؛ لذا نستورد
+# بحماية ونسقط إلى مدير سياق فارغ لا يفعل شيئًا عند التعذر.
+try:  # pragma: no cover - مسار بيئي
+    from awareness import perf as _perf
+
+    def _span(name: str):
+        return _perf.span(name)
+except Exception:  # pragma: no cover
+    import contextlib as _ctx
+
+    def _span(name: str):
+        return _ctx.nullcontext()
+
 
 @dataclass
 class ProcessOptionsV2:
@@ -44,6 +58,8 @@ class ProcessOptionsV2:
     # ظل
     shadow_preset: str = ""                      # اسم preset من shadow_v2
     # محرك الجودة الواعي بالنص + طمس التواريخ
+    quality: int | None = None                    # 50–100؛ None = السلوك القديم
+    output_format: str = ""                      # webp | png | jpeg؛ "" = دون تغيير
     text_aware: bool = True                      # حدة ذكية وتصغير تدريجي يحفظ الكتابات
     blur_dates: bool = True                      # طمس تواريخ الإنتاج/الانتهاء تلقائيًا
 
@@ -68,12 +84,34 @@ def imread_unicode(path: str | Path) -> np.ndarray | None:
 
 
 def imwrite_unicode(path: str | Path, img: np.ndarray,
-                    lossless_webp: bool = True) -> bool:
+                    lossless_webp: bool = True,
+                    quality: int | None = None) -> bool:
+    """يكتب الصورة محترمًا الجودة المطلوبة لا المفروضة.
+
+    كان المحرك يقبل حالتين فقط (101 بلا فقدان أو 95 ثابتة)،
+    فأي أمر من المالك مثل «خلي الجودة 80» لم يكن له موضع
+    يُستقبل فيه فيُهمل صمتًا. والإهمال الصامت أسوأ من الرفض
+    الصريح، لأنه يوهم المالك أن البرنامج أطاعه وهو لم يفعل.
+    """
     path = Path(path)
     ext = path.suffix.lower()
-    params = []
+    params: list[int] = []
     if ext == ".webp":
-        params = [cv2.IMWRITE_WEBP_QUALITY, 101 if lossless_webp else 95]
+        if quality is not None:
+            q = max(1, min(100, int(quality)))
+            # 101 تعني بلا فقدان في OpenCV
+            params = [cv2.IMWRITE_WEBP_QUALITY, 101 if q >= 100 else q]
+        else:
+            params = [cv2.IMWRITE_WEBP_QUALITY, 101 if lossless_webp else 95]
+    elif ext in (".jpg", ".jpeg"):
+        q = 95 if quality is None else max(1, min(100, int(quality)))
+        params = [cv2.IMWRITE_JPEG_QUALITY, q]
+    elif ext == ".png":
+        # في PNG الرقم مستوى ضغط (0–9) لا جودة؛ المخرج بلا فقدان
+        # دائمًا، لكن جودة أقل تعني رضًا بملف أصغر فنرفع الضغط.
+        lvl = 6 if quality is None else max(
+            0, min(9, round((100 - int(quality)) / 11)))
+        params = [cv2.IMWRITE_PNG_COMPRESSION, int(lvl)]
     ok, buf = cv2.imencode(ext, img, params)
     if not ok:
         return False
@@ -125,7 +163,8 @@ class ProcessorV2:
         t0 = time.time()
         opts = opts or ProcessOptionsV2()
         res = ProcessResultV2()
-        img = imread_unicode(source_path)
+        with _span("read_input"):
+            img = imread_unicode(source_path)
         if img is None:
             res.error = f"تعذر قراءة الصورة: {source_path}"
             return res
@@ -181,8 +220,9 @@ class ProcessorV2:
                 else:
                     res.warnings.append("لم يُكشف جدول لإزالته")
 
-            # القص
-            seg = self.segmenter.segment(img)
+            # القص — أغلى خطوة في الخط؛ قياسها منفردة يكشف اختناق النموذج
+            with _span("segment"):
+                seg = self.segmenter.segment(img)
             res.confidence = seg.confidence
             res.warnings.extend(seg.warnings)
             alpha = seg.alpha
@@ -193,8 +233,10 @@ class ProcessorV2:
                                                opts.manual_rotation_degrees)
 
             # تركيب على أبيض + تحسين
-            white = self.segmenter.compose_on_white(img, alpha)
+            with _span("compose_on_white"):
+                white = self.segmenter.compose_on_white(img, alpha)
             if opts.enhance:
+              with _span("enhance"):
                 if getattr(opts, "text_aware", True):
                     try:
                         from .quality_v2 import enhance_preserving_text
@@ -226,7 +268,8 @@ class ProcessorV2:
                     res.warnings.append(f"تعذر الظل: {exc}")
 
             # تأطير
-            final = self._frame_on_canvas(white, alpha, opts)
+            with _span("frame_on_canvas"):
+                final = self._frame_on_canvas(white, alpha, opts)
 
             # حقائق التغذية على الناتج
             out_path = Path(output_path)
@@ -268,7 +311,8 @@ class ProcessorV2:
                     nut_path = nut_dir / (out_path.stem + "_تغذية.webp")
                 nut_img = render_standalone_label(label_img, opts.width,
                                                   opts.height)
-                if imwrite_unicode(nut_path, nut_img, opts.webp_lossless):
+                if imwrite_unicode(nut_path, nut_img, opts.webp_lossless,
+                                   quality=getattr(opts, "quality", None)):
                     res.nutrition_output_path = str(nut_path)
             elif opts.nutrition_mode == "rebuild" and label_img is not None:
                 try:
@@ -288,7 +332,8 @@ class ProcessorV2:
                     nut_img = render_standalone_label(table, opts.width,
                                                       opts.height,
                                                       enhance=False, hq=False)
-                    if imwrite_unicode(nut_path, nut_img, opts.webp_lossless):
+                    if imwrite_unicode(nut_path, nut_img, opts.webp_lossless,
+                                       quality=getattr(opts, "quality", None)):
                         res.nutrition_output_path = str(nut_path)
                     # حفظ JSON للقيم للتحرير لاحقًا
                     import json
@@ -298,9 +343,19 @@ class ProcessorV2:
                 except Exception as exc:
                     res.warnings.append(f"تعذرت إعادة بناء الجدول: {exc}")
 
-            # حفظ الناتج الرئيسي
+            # حفظ الناتج الرئيسي — الكتابة بـWebP اللافقدي مكلفة، نقيسها
+            # الصيغة تُطبّق هنا لا في المسمّي، لأن المالك قد يطلب
+            # PNG بعد أن بُني المسار بـwebp، فنحترم أحدث أمر لا أقدمه.
+            fmt = str(getattr(opts, "output_format", "") or "").lower().lstrip(".")
+            if fmt in ("webp", "png", "jpeg", "jpg"):
+                _ext = ".jpg" if fmt in ("jpeg", "jpg") else f".{fmt}"
+                if out_path.suffix.lower() != _ext:
+                    out_path = out_path.with_suffix(_ext)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            if not imwrite_unicode(out_path, final, opts.webp_lossless):
+            with _span("write_output"):
+                _saved = imwrite_unicode(out_path, final, opts.webp_lossless,
+                                         quality=getattr(opts, "quality", None))
+            if not _saved:
                 res.error = "فشل حفظ الملف الناتج"
                 return res
             res.output_path = str(out_path)

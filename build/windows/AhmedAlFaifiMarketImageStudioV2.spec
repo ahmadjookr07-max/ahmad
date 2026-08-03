@@ -45,6 +45,63 @@ onnx_datas, onnx_binaries, onnx_hidden = collect_all("onnxruntime")
 dil_datas, dil_binaries, dil_hidden = collect_all("dilithium_py")
 datas += zxing_datas + onnx_datas + dil_datas
 binaries = list(zxing_binaries) + list(onnx_binaries) + list(dil_binaries)
+# ───────────── اكتشاف وحدات المشروع تلقائيًا ─────────────
+#
+# لماذا التوليد لا السرد اليدوي؟ لأن السرد اليدوي أخطأ فعلًا:
+# كانت النسخة السابقة تسرد 14 وحدة engine_v2 وتنسى طبقة awareness
+# بأكملها ووحدات واجهة قائمة (unified_editor ، flow_layout ، ui_scale ،
+# nutrition_crop ، lazy_engine). والأخطر أن البناء لا يفشل عند النقص:
+# طبقة الوعي مستوردة داخل try/except لتبقى المعالجة سليمة إن غابت،
+# فيُنتج مُثبِّت يعمل بصمت بلا وعي: لا لوحة، ولا حوار عربي، ولا
+# تنفيذ لأوامر المالك. عطل صامت لا يكتشفه إلا المالك بعد التسليم.
+# لذا: نكتشف الوحدات من القرص، ونفشل صراحةً إن غابت واحدة حرجة.
+
+def _discover(pkg_dir, prefix=""):
+    """يسرد وحدات بايثون حقيقية في مجلد، متجاهلًا المولّد والمخفي."""
+    out = []
+    if not pkg_dir.is_dir():
+        return out
+    for f in sorted(pkg_dir.glob("*.py")):
+        stem = f.stem
+        if stem.startswith("_") and stem != "__init__":
+            continue
+        out.append(prefix + stem if stem != "__init__"
+                   else prefix.rstrip("."))
+    return [m for m in out if m]
+
+
+_engine_mods = _discover(ROOT / "src" / "engine_v2", "engine_v2.")
+_aware_mods = _discover(ROOT / "src" / "awareness", "awareness.")
+_ui_mods = _discover(ROOT / "windows_app")
+
+_project_mods = (["engine_v2"] + _engine_mods
+                 + ["awareness"] + _aware_mods
+                 + _ui_mods)
+
+# الحاجز: وحدات بغيابها يصل للمالك برنامج ناقص بلا إنذار.
+_REQUIRED = (
+    "engine_v2.processor_v2", "engine_v2.integration_v2",
+    "engine_v2.segmentation_v2", "engine_v2.license_v2",
+    "engine_v2.awareness_bridge_v2",
+    "awareness.core", "awareness.dialogue", "awareness.healer",
+    "awareness.identity", "awareness.perf", "awareness.surgeon",
+    "awareness.vitals", "awareness.journal", "awareness.optimizer",
+    "awareness.ledger",
+    "v2_ui", "photo_editor_v2", "license_ui", "awareness_ui",
+    "unified_editor", "ui_scale", "flow_layout",
+)
+_missing = [m for m in _REQUIRED if m not in _project_mods]
+if _missing:
+    raise SystemExit(
+        "\nفشل البناء متعمّدًا: وحدات حرجة لم تُكتشف على القرص:\n  - "
+        + "\n  - ".join(_missing)
+        + "\n\nلو مرّ البناء لوصل للمالك برنامج يعمل بلا هذه القدرات "
+        "دون أي رسالة خطأ، لأن استيراداتها محمية ب try/except.\n")
+
+print(f"[spec] وحدات مكتشفة: {len(_project_mods)} "
+      f"(engine_v2={len(_engine_mods)}, awareness={len(_aware_mods)}, "
+      f"ui={len(_ui_mods)})")
+
 hiddenimports = (list(zxing_hidden) + list(onnx_hidden) + list(dil_hidden) + [
     "zxingcpp", "onnxruntime", "dilithium_py", "dilithium_py.ml_dsa",
     "pytesseract",
@@ -52,18 +109,7 @@ hiddenimports = (list(zxing_hidden) + list(onnx_hidden) + list(dil_hidden) + [
     "cryptography.hazmat.primitives.asymmetric.ed25519",
     "cryptography.hazmat.primitives.ciphers.aead",
     "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageFont", "PIL.features",
-    # V2 engine modules
-    "engine_v2", "engine_v2.paths_v2", "engine_v2.segmentation_v2",
-    "engine_v2.enhancement_v2", "engine_v2.naming_v2",
-    "engine_v2.catalog_index_v2", "engine_v2.session_v2",
-    "engine_v2.alignment_v2", "engine_v2.nutrition_v2",
-    "engine_v2.nutrition_ocr_v2", "engine_v2.nutrition_render_v2",
-    "engine_v2.processor_v2", "engine_v2.integration_v2",
-    "engine_v2.shadow_v2", "engine_v2.batch_refine_v2",
-    "engine_v2.license_v2",
-    # V2 UI modules
-    "v2_ui", "photo_editor_v2", "license_ui",
-])
+] + _project_mods)
 
 a = Analysis(
     [str(ENTRY)],

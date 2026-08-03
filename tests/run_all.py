@@ -40,19 +40,37 @@ def verdict(name: str, rc: int, out: str) -> tuple[str, str]:
     الرمز وحده يخفي إخفاقات حقيقية.
     """
     low = out.lower()
-    # ملخص «N passed / M failed»
     import re
+
+    # ملخص «N passed / M failed»
     m = re.search(r"(\d+)\s*passed\s*/\s*(\d+)\s*failed", low)
     if m:
         passed, failed = int(m.group(1)), int(m.group(2))
         detail = f"{passed} نجح / {failed} فشل"
         return ("PASS" if failed == 0 and rc == 0 else "FAIL", detail)
+
+    # ملخص عربي «نجح N / فشل M» أو «ناجح: N · فاشل: M».
+    # بدون هذا تُقرأ نتيجة ملف طبع «فشل 3» كـ«rc=0» فيُعلن نجاحًا
+    # زائفًا، وهو أسوأ من غياب الملخّص أصلًا.
+    m = re.search(r"نجح\s*(\d+)\s*/\s*فشل\s*(\d+)", out)
+    if not m:
+        m = re.search(r"ناجح\s*[:：]\s*(\d+).{0,4}فاشل\s*[:：]\s*(\d+)",
+                      out, re.S)
+    if m:
+        passed, failed = int(m.group(1)), int(m.group(2))
+        detail = f"{passed} نجح / {failed} فشل"
+        return ("PASS" if failed == 0 and rc == 0 else "FAIL", detail)
+
     if rc != 0:
         return ("FAIL", f"rc={rc}")
     # مؤشرات نصية
     fails = len(re.findall(r"^\s*FAIL\b", out, re.M))
     if fails:
         return ("FAIL", f"{fails} سطر FAIL")
+    # علامة الفشل العربية المستعملة في اختبارات طبقة الوعي
+    marks = len(re.findall(r"^\s*✗", out, re.M))
+    if marks:
+        return ("FAIL", f"{marks} تحقُق فاشل")
     return ("PASS", "rc=0")
 
 
