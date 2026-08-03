@@ -776,6 +776,34 @@ TRANSFORMS = {
 }
 
 
+# أوزان ثقيلة لا تلزم التحقق (نماذج، أرشفة، صور).
+_STAGE_SKIP_SUFFIX = (".onnx", ".zip", ".png", ".jpg", ".jpeg", ".webp",
+                      ".pt", ".pth", ".tflite", ".bin", ".7z", ".exe")
+
+
+def _stage_ignore(dirpath: str, names: list[str]) -> set[str]:
+    """مرشّح نسخ الشجرة المؤقتة للتحقق.
+
+    يُستبعد ``__pycache__`` والأوزان الثقيلة، لكن **تُحفظ**
+    ملفات ``.pyc`` التي تقع خارج ``__pycache__``.
+
+    السبب مقيس: حزمة ``smart_catalog_vision`` في هذا المشروع
+    مكوّنة من وحدات مُصرّفة فقط (``pipeline.pyc`` وأخواتها — كود
+    مملوك بلا مصدر). استبعاد ``*.pyc`` مطلقًا كان ينسخ الحزمة
+    فارغة، فيفشل ``import pipeline`` داخل الشجرة دائمًا، فتُرفض
+    كل رقعة تلمس ملفًا يعتمد عليها — رقع سليمة تُرفض لعيب في
+    بيئة التحقق لا فيها. ذلك أعجز الجرّاح هيكليًا عن إصلاح
+    أجزاء كبيرة من المشروع.
+    """
+    skip = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache",
+            ".ruff_cache", "node_modules"}
+    out = {n for n in names if n in skip}
+    for n in names:
+        if n.lower().endswith(_STAGE_SKIP_SUFFIX):
+            out.add(n)
+    return out
+
+
 # ───────────────────────── الجرّاح ─────────────────────────
 
 def surgery_dir() -> Path:
@@ -1137,13 +1165,25 @@ class Surgeon:
         tmp = None
         try:
             tmp = Path(tempfile.mkdtemp(prefix="mis_surgery_"))
-            for name in ("src", "windows_app", "tests"):
+            # ما يُنسخ: كل مجلدات الكود لا قائمة مغروسة.
+            #
+            # كانت القائمة ("src", "windows_app", "tests") فقط، فغاب مجلد
+            # ``owner_studio``. والاختبار ``test_env_resilience.py`` يضيفه
+            # إلى ``sys.path`` ويستورد منه، فيفشل بـ``ModuleNotFoundError``
+            # داخل الشجرة المؤقتة وينجح في الجذر الحقيقي.
+            #
+            # وهذا يهدم عدالة البوابة الفرقية من أساسها: فهي تقارن
+            # رقعةً في بيئة **ناقصة** بأصلٍ في بيئة **كاملة**، فتُحمّل
+            # الرقعة وزر نقص البيئة. المعيار الصحيح: تكافء البيئتين
+            # تمامًا، فلا يختلف إلا محتوى الملفات المرقّعة.
+            code_dirs = [d.name for d in sorted(self.root.iterdir())
+                         if d.is_dir() and not d.name.startswith(".")
+                         and d.name not in ("build", "dist", "docs", "assets",
+                                            "models", "node_modules")]
+            for name in code_dirs or ["src", "windows_app", "tests"]:
                 s = self.root / name
                 if s.exists():
-                    shutil.copytree(s, tmp / name,
-                                    ignore=shutil.ignore_patterns(
-                                        "__pycache__", "*.pyc", "*.onnx",
-                                        "*.zip", "*.png", "*.jpg"))
+                    shutil.copytree(s, tmp / name, ignore=_stage_ignore)
             for pt in patches:
                 dst = tmp / pt.path
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1320,7 +1360,38 @@ class Surgeon:
         return self._run_cmd([sys.executable, "-c", code], env, cwd)
 
     def _run_cmd(self, cmd: list[str], env: dict, cwd: Path) -> tuple[int, str, str]:
+        """ينفّذ أمرًا في عملية فرعية **معزولة الحالة الخارجية**.
+
+        لماذا العزل ضروري: بوابتا الاستيراد والاختبارات تُشغّلان الأصل
+        والمعدَّل **بالتوازي** (``_pmap``). ووحدات هذا المشروع تكتب حالة
+        دائمة في مجلد المستخدم لا في شجرة المشروع؛ مثال حرج:
+        ``license_v2._license_dir()`` تُرجع ``~/.config`` (أو ``%APPDATA%``
+        على ويندوز)، فيكتب ``activate`` و``deactivate`` ملف ترخيص حقيقيًا
+        هناك.
+
+        فلو تشاركت العمليتان نفس ``HOME``، تنازعتا على ``license.dat``:
+        إحداهما تُبطل التنشيط بينما الأخرى تتحقق من صلاحيته، فتتلف كل
+        واحدة حالة الأخرى. النتيجة رفض رقعة **سليمة** بحجّة أنها أفشلت
+        اختبارًا — وهو ما رصدناه فعلًا: ``test_license.py`` ينجح 8/8
+        متسلسلًا ويفشل ``11 passed / 3 failed`` داخل بيئة التحقق.
+
+        والأخطر أن التنازع **غير حتمي في الاتجاهين**: قد يُخفي رقعة
+        فاسدة إن رجّح كفّتها، فيصير حكم البوابات ضجيجًا لا دليلًا.
+
+        العلاج: مجلد ``HOME`` مؤقت خاص بكل تشغيل، فتُكتب الحالة الدائمة
+        في مكان معزول ويُصبح الحكم حتميًا وقابلًا للتكرار.
+        """
+        sandbox_home = None
         try:
+            env = dict(env)
+            sandbox_home = tempfile.mkdtemp(prefix="mis_home_")
+            env["HOME"] = sandbox_home
+            env["USERPROFILE"] = sandbox_home
+            env["APPDATA"] = str(Path(sandbox_home) / "AppData/Roaming")
+            env["LOCALAPPDATA"] = str(Path(sandbox_home) / "AppData/Local")
+            env["XDG_CONFIG_HOME"] = str(Path(sandbox_home) / ".config")
+            env["XDG_CACHE_HOME"] = str(Path(sandbox_home) / ".cache")
+            env["TMPDIR"] = sandbox_home
             pr = subprocess.run(cmd, env=env, cwd=str(cwd), capture_output=True,
                                 text=True, timeout=_VERIFY_TIMEOUT)
             return pr.returncode, pr.stdout or "", pr.stderr or ""
@@ -1328,6 +1399,9 @@ class Surgeon:
             return 124, "", "انتهت المهلة"
         except Exception as exc:
             return 1, "", str(exc)[:400]
+        finally:
+            if sandbox_home:
+                shutil.rmtree(sandbox_home, ignore_errors=True)
 
     # ── التطبيق والتراجع ──
 
