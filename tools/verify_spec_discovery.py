@@ -20,6 +20,46 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "build" / "windows" / "AhmedAlFaifiMarketImageStudioV2.spec"
 
 
+def _check_datas(src: str, tree: ast.Module, root: Path) -> list[str]:
+    """يستخرج مسارات `datas` من الـspec ويردّ المفقود منها.
+
+    نُقيّم قائمة `datas` الحرفية وحدها (تعريفها الأول بـ`=`)، ونتجاهل
+    ما يُضاف لاحقًا بـ`+=` لأنه ناتج `collect_*` من PyInstaller.
+    """
+    ns: dict[str, object] = {"ROOT": root, "Path": Path}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "_MODELS_SRC" in targets or "datas" in targets:
+            seg = ast.get_source_segment(src, node) or ""
+            if any(k in seg for k in ("collect_", "_hidden")):
+                continue
+            try:
+                exec(compile(ast.Module(body=[node], type_ignores=[]),
+                             filename="<spec-datas>", mode="exec"), ns)
+            except Exception:
+                return []
+            if "datas" in targets:
+                break
+
+    entries = ns.get("datas")
+    if not isinstance(entries, list) or not entries:
+        return []
+    out: list[str] = []
+    for item in entries:
+        try:
+            path = Path(str(item[0]))
+        except Exception:
+            continue
+        if not path.exists():
+            try:
+                out.append(str(path.relative_to(root)))
+            except ValueError:
+                out.append(str(path))
+    return out
+
+
 def main() -> int:
     src = SPEC.read_text(encoding="utf-8")
     tree = ast.parse(src)
@@ -59,6 +99,27 @@ def main() -> int:
         return 1
     except Exception as exc:
         print(f"✗ منطق الاكتشاف نفسه معطوب: {type(exc).__name__}: {exc}")
+        return 1
+
+    # ── فحص ملفات البيانات ──
+    #
+    # لماذا منفصلًا؟ لأن الاقتطاع أعلاه يتوقف عند `collect_data_files`
+    # فلا ينفّذ قائمة `datas` ولا حاجزها. وقد أثبتت التجربة أن
+    # هنا يسكن أخطر عيب بناء: الـspec كان يطلب النماذج من
+    # `resources/models/` الغير موجود، فيفشل البناء بعد دقائق.
+    # فحص يتجاهل ملفات البيانات يمنح طمأنينة زائفة وهي أسوأ
+    # من لا فحص، لأن المالك يثق بها ثم يفاجأ.
+    #
+    # نستخرج المسارات من الشجرة النحوية مباشرة، فلا نحتاج
+    # PyInstaller ولا نكرر القائمة يدويًا (فالتكرار يتعاقم).
+    missing_data = _check_datas(src, tree, ROOT)
+    if missing_data:
+        print("✗ ملفات بيانات مطلوبة غير موجودة:")
+        for p in missing_data:
+            print(f"    - {p}")
+        print("\n  إن كانت نماذج .onnx: مستبعدة من git لحجمها؛ تُجلب")
+        print("  بتشغيل البرنامج مرة واحدة، أو تُنسخ يدويًا إلى")
+        print("  src/engine_v2/models/ .")
         return 1
 
     mods = ns.get("_project_mods") or []

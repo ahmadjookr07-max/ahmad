@@ -10,13 +10,26 @@ ENTRY = ROOT / "windows_app" / "native_app_v2.py"
 ICON = ROOT / "windows_app" / "assets" / "app_icon.ico"
 VERSION_INFO = ROOT / "build" / "windows" / "version_info.txt"
 
+# ───────────── نماذج القص ─────────────
+#
+# كانت النسخة السابقة تطلب النماذج من ``resources/models/`` وهو
+# مجلد **غير موجود** (بقية من بنية 1.2.1)؛ والنماذج الثلاثة
+# تسكن فعلًا في ``src/engine_v2/models/``. وPyInstaller يفشل عند غياب
+# ملف بيانات مسرود، فكان البناء يتوقف قبل أن يبدأ.
+#
+# والمسار المقصود داخل الحزمة هو ``engine_v2/models`` لأن
+# ``paths_v2._candidates()`` يبحث في ``_MEIPASS/engine_v2/models``.
+#
+# أي نموذج يُحزَم؟ ``runtime_deps_v2.MODEL_FILENAMES`` يرتّب الأفضلية:
+# isnet (أدق) ـ u2net (متوسط) ـ u2netp (الأخف). فنحزم isnet إلزامًا
+# وu2netp (4.4م.ب فقط) كشبكة أمان خفيفة تضمن عمل القص دائمًا،
+# ونستثني u2net (168م.ب) لأن منفعته حدية أمام isnet وآلية
+# التنزيل التلقائي تجلبه عند الحاجة — توفير 168م.ب من المُثبِّت.
+_MODELS_SRC = ROOT / "src" / "engine_v2" / "models"
+
 datas = [
-    # legacy 1.2.1 models (fallback engine)
-    (str(ROOT / "resources" / "models" / "u2net.onnx"), "resources/models"),
-    (str(ROOT / "resources" / "models" / "u2netp.onnx"), "resources/models"),
-    # V2 engine model + fonts
-    (str(ROOT / "src" / "engine_v2" / "models" / "isnet-general-use.onnx"),
-     "engine_v2/models"),
+    (str(_MODELS_SRC / "isnet-general-use.onnx"), "engine_v2/models"),
+    (str(_MODELS_SRC / "u2netp.onnx"), "engine_v2/models"),
     (str(ROOT / "src" / "engine_v2" / "assets" / "NotoNaskhArabic-Regular.ttf"),
      "engine_v2/assets"),
     (str(ROOT / "src" / "engine_v2" / "assets" / "NotoNaskhArabic-Bold.ttf"),
@@ -37,6 +50,21 @@ datas = [
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
     (str(ROOT / "VERSION"), "."),
 ]
+
+# الحاجز الأول: ملفات البيانات.
+#
+# PyInstaller يفشل عند غياب ملف مسرود، لكن رسالته غامضة وتأتي
+# بعد دقائق من التحليل. نفحص مقدمًا ونقول بالعربية ما الناقص
+# ومن أين يُجلب، لأن النماذج مستبعدة من git (انظر .gitignore)
+# فيجد المالك نفسه أمام مجلد نماذج فارغ بعد الاستنساخ.
+_missing_data = [src for src, _ in datas if not Path(src).exists()]
+if _missing_data:
+    raise SystemExit(
+        "\nفشل البناء: ملفات مطلوبة غير موجودة:\n  - "
+        + "\n  - ".join(_missing_data)
+        + "\n\nإن كانت نماذج .onnx: هي مستبعدة من git لحجمها، وتُجلب\n"
+        "بتشغيل البرنامج مرة واحدة (يُنزّلها تلقائيًا)، أو بنسخها يدويًا\n"
+        "إلى src/engine_v2/models/ .\n")
 
 datas += collect_data_files("openpyxl")
 
