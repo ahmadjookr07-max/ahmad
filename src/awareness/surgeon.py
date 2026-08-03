@@ -37,6 +37,7 @@ import ast
 import concurrent.futures as cf
 import contextlib
 import difflib
+import functools
 import hashlib
 import json
 import os
@@ -265,9 +266,13 @@ def _d_unguarded_optional_import(tree: ast.AST, text: str, lines: list[str],
     """استيراد حزمة اختيارية على مستوى الوحدة بلا حماية.
 
     غياب الحزمة يمنع استيراد الوحدة كلها فيسقط التطبيق عند الإقلاع، بدل أن
-    تتعطّل قدرة واحدة بلطف. قياسًا: 14 موضعًا لـ``cv2``.
+    تتعطّل قدرة واحدة بلطف.
+
+    لكن هذا يصحّ **للاختياري فعلًا** فقط. التبعيات الإلزامية
+    (المُعلنة في ``requirements.txt`` أو المنثورة في مئات المواضع)
+    تُستبعد: حمايتها تُبدل عطلًا واحدًا مفهومًا بأعطال غامضة مؤجّلة.
     """
-    optional = set(_OPTIONAL_PACKAGES)
+    optional = set(_optional_packages(str(identity.repo_root())))
     out: list[Issue] = []
     for node in getattr(tree, "body", []):          # المستوى الأعلى فقط
         names: list[str] = []
@@ -482,11 +487,109 @@ def _d_missing_close(tree: ast.AST, text: str, lines: list[str],
     return out
 
 
-#: الحزم التي يجب أن يبقى غيابها محتملًا (تعطيل قدرة لا انهيار).
-_OPTIONAL_PACKAGES = (
+#: مرشّحون للحماية: حزم ثقيلة أو مرتبطة بمحرك نطامٍ خارجي.
+#
+# تحذير من درس مدفوع الثمن: هذه **مرشّحون لا يقين**. كانت
+# ``cv2`` و``onnxruntime`` و``xlrd`` و``pytesseract`` مدرجة هنا كـ«اختيارية»
+# مع أنّها تبعيات إلزامية مُعلنة في ``requirements.txt``، و``cv2``
+# وحدها مستدعاة 270 مرة. حماية تبعية أساسية بـ``= None`` تحوّل
+# خطأ استيراد واضحًا عند الإقلاع إلى مئات انهيارات ``NoneType``
+# غامضة في منتصف معالجة صور المالك — وهي رقعة تجتاز كل بوابات
+# التحقق وتكون خاطئة («رقعة زائفة»).
+#
+# لذا الحكم النهائي لا يُؤخذ من هذه القائمة بل من
+# ``_required_packages()`` التي تقرأ المشروع نفسه.
+_OPTIONAL_CANDIDATES = (
     "cv2", "zxingcpp", "pyzbar", "pytesseract", "rembg", "onnxruntime",
     "skimage", "imagehash", "xlrd", "psutil", "scipy",
 )
+
+#: خريطة اسم التوزيعة ← اسم الوحدة (ليسا متطابقين دائمًا).
+_DIST_TO_MODULE = {
+    "opencv-python": "cv2",
+    "opencv-python-headless": "cv2",
+    "opencv-contrib-python": "cv2",
+    "scikit-image": "skimage",
+    "pillow": "PIL",
+    "imagehash": "imagehash",
+    "onnxruntime": "onnxruntime",
+    "onnxruntime-gpu": "onnxruntime",
+    "pytesseract": "pytesseract",
+    "xlrd": "xlrd",
+    "psutil": "psutil",
+    "scipy": "scipy",
+}
+
+#: عدد الاستدعاءات الذي يجعل الحزمة عمليًا غير قابلة للتعطيل بلطف.
+#
+# حتّى لو غابت عن ``requirements.txt``، حزمة موزّعة على مئات المواضع
+# لا يمكن أن تُحمى بسطر ``= None`` واحد؛ الحماية الصحيحة تحتاج
+# إعادة تصميم (طبقة تجريد) لا رقعة آلية.
+_HEAVY_USE_THRESHOLD = 40
+
+
+@functools.lru_cache(maxsize=8)
+def _required_packages(root: str) -> frozenset[str]:
+    """أسماء الوحدات لتبعيات إلزامية مُعلنة في ``requirements.txt``.
+
+    يستنبط الحقيقة من المشروع بدل قائمة مكتوبة يدويًا تتعفّن:
+    أي حزمة يطلبها التركيب ليست «اختيارية» بأي معنى، فحمايتها
+    تُخفي عطلًا واضحًا وراء أعطال غامضة مؤجّلة.
+
+    الأسطر الموسومة بـ``# optional`` أو «اختياري» تُستثنى احترامًا
+    لنيّة من كتب الملف صراحةً.
+    """
+    req = Path(root) / "requirements.txt"
+    mods: set[str] = set()
+    try:
+        raw = req.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return frozenset()
+    for line in raw.splitlines():
+        body, _, comment = line.partition("#")
+        body = body.strip()
+        if not body:
+            continue
+        low = comment.lower()
+        if "optional" in low or "اختياري" in comment:
+            continue                                   # موسوم صراحةً
+        name = re.split(r"[<>=!~\[;\s]", body, maxsplit=1)[0].strip().lower()
+        if not name:
+            continue
+        mods.add(_DIST_TO_MODULE.get(name, name.replace("-", "_")))
+    return frozenset(mods)
+
+
+@functools.lru_cache(maxsize=8)
+def _heavily_used(root: str) -> frozenset[str]:
+    """حزم يتجاوز استخدامها حدًّا يجعل حمايتها بـ``= None`` مضرّة.
+
+    معيار موضوعي مستقل عن ``requirements.txt``: حتّى حزمة غير مُعلنة
+    لو كانت منثورة في مئات المواضع فلا تصلح للتعطيل اللطيف.
+    """
+    counts: dict[str, int] = {}
+    base = Path(root)
+    for sub in ("src", "windows_app"):
+        d = base / sub
+        if not d.is_dir():
+            continue
+        for py in d.rglob("*.py"):
+            try:
+                txt = py.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for pkg in _OPTIONAL_CANDIDATES:
+                n = txt.count(pkg + ".")
+                if n:
+                    counts[pkg] = counts.get(pkg, 0) + n
+    return frozenset(p for p, n in counts.items()
+                     if n >= _HEAVY_USE_THRESHOLD)
+
+
+def _optional_packages(root: str) -> frozenset[str]:
+    """الحزم الاختيارية فعلًا: مرشّحة، غير إلزامية، غير منثورة بكثافة."""
+    return frozenset(_OPTIONAL_CANDIDATES) - _required_packages(root) \
+        - _heavily_used(root)
 
 DETECTORS = (
     _d_silent_except,
@@ -543,19 +646,47 @@ def _t_log_silent_except(text: str, issues: list[Issue]) -> tuple[str, str]:
         if "awareness" in first or "journal" in first:
             continue                                  # مُعالج سابقًا
         stripped = first.strip()
-        if stripped not in ("pass",) and not stripped.startswith("return"):
+        is_bare_pass = stripped == "pass"
+        if not is_bare_pass and not stripped.startswith("return"):
             continue
-        note = ("        # سُجّل تلقائيًا بواسطة الجرّاح الذاتي: عطل صامت "
-                "يجب أن يُرى في السجل.\n")
+
+        # التقط اسم المتغير الحامل للعطل إن وُجد (``except X as e``).
+        m_as = re.search(r"\bas\s+(\w+)\s*:", handler_line)
+        exc_var = m_as.group(1) if m_as else ""
+
+        # اسم الدالة الحاوية: أقرب ``def`` أعلاه بإزاحة أقل.
+        #
+        # بلاء هذا السياق يصير السجل عديم النفع: 35 سطرًا
+        # متطابقًا يقول «عطل صامت في native_app» لا يُميّز موضعًا
+        # من موضع، والغرض أن يتعلّم البرنامج من أعطاله لا أن يعدّها.
+        func = "?"
+        for k in range(idx - 1, -1, -1):
+            cand = lines[k]
+            st = cand.strip()
+            if st.startswith(("def ", "async def ")) and \
+                    len(_indent_of(cand)) < len(base):
+                mf = re.match(r"(?:async\s+)?def\s+(\w+)", st)
+                if mf:
+                    func = mf.group(1)
+                break
+
+        detail = (f"where=__name__, at='{func}:{ln}'"
+                  + (f", err=repr({exc_var})[:200]" if exc_var else ""))
         ins = (
             f"{body_indent}try:\n"
             f"{body_indent}    from awareness import journal as _j\n"
-            f"{body_indent}    _j.debug('swallowed_exception', where=__name__)\n"
+            f"{body_indent}    _j.debug('swallowed_exception', {detail})\n"
             f"{body_indent}except Exception:\n"
             f"{body_indent}    pass\n"
         )
-        del note                                      # نُبقي الشفرة نظيفة
-        lines.insert(body[0], ins)
+
+        if is_bare_pass:
+            # التسجيل يصير جسم المعالج، فـ``pass`` لم يبق له معنى.
+            # تركه يزرع مئات أسطر ميتة تُشوّه الملفات وتوحي
+            # بأن الجرّاح لا يفهم ما يفعل — وهي تجتاز كل البوابات.
+            lines[body[0]] = ins
+        else:
+            lines.insert(body[0], ins)                # قبل ``return`` المرتد
         changed += 1
     if not changed:
         return text, ""
@@ -882,6 +1013,13 @@ class Surgeon:
             if not same:
                 ok_all = False
 
+            # 2ب) المعنى: هل تغير تدفّق التحكّم أو القيم المُرجعة؟
+            kept, why2 = self._semantics_preserved(pt.old_text, pt.new_text)
+            checks.append({"gate": "semantics", "path": pt.path, "ok": kept,
+                           "message_ar": why2})
+            if not kept:
+                ok_all = False
+
         if not ok_all:
             return False, checks
 
@@ -918,6 +1056,76 @@ class Surgeon:
         if f2 - f1 or c2 - c1:
             return False, "أُضيفت دوال أو أصناف غير مقصودة."
         return True, "البنية محفوظة: نفس الدوال والأصناف والتوقيعات."
+
+    def _semantics_preserved(self, old: str, new: str) -> tuple[bool, str]:
+        """بوابة المعنى: تحمي من **الرقعة الزائفة**.
+
+        الرقعة الزائفة (`plausible/overfitting patch`) هي الخطر الأول
+        الموثّق في أدبيات الإصلاح الآلي: رقعة **تجتاز كل الاختبارات**
+        وتكون خاطئة. وبوابتا النحو والبنية لا ترصدانها: كلتاهما
+        تفحص الهيكل الخارجي (أسماء الدوال والتوقيعات) لا المعنى.
+
+        محوّلاتنا **أدّية الأثر** بحكم تصميمها: تُضيف تسجيلًا أو تضبط
+        ترميزًا أو تحمي استيرادًا. لذا يجب أن تبقى **هياكل القرار**
+        كما هي: لا يُحذف شرط، ولا تُبدل قيمة مُرجعة، ولا يُستحدث
+        ``raise`` يقلب مسارًا صامتًا مقصودًا إلى انهيار.
+
+        ثلاثة فحوص متكاملة:
+
+        1. **عدّ هياكل التحكّم**: عدد ``if``/``for``/``while``/``try``
+           والمقارنات لا ينقص (الزيادة مقبولة: ``try`` حول التسجيل).
+        2. **بصمة المُرجعات**: مجموعة القيم الثابتة المُرجعة لا تتغير.
+        3. **لا ``raise`` جديد**: محوّل التسجيل لا يجوز أن يرفع عطلًا.
+        """
+        def profile(src: str):
+            try:
+                t = ast.parse(src)
+            except Exception:
+                return None
+            ctrl = 0
+            raises = 0
+            returns: list[str] = []
+            for n in ast.walk(t):
+                if isinstance(n, (ast.If, ast.For, ast.While, ast.AsyncFor,
+                                  ast.IfExp, ast.Compare, ast.BoolOp)):
+                    ctrl += 1
+                elif isinstance(n, ast.Raise):
+                    raises += 1
+                elif isinstance(n, ast.Return):
+                    if n.value is None:
+                        returns.append("None")
+                    elif isinstance(n.value, ast.Constant):
+                        returns.append(repr(n.value.value))
+                    elif isinstance(n.value, (ast.Dict, ast.List, ast.Tuple,
+                                              ast.Set)):
+                        returns.append(type(n.value).__name__)
+            return ctrl, raises, sorted(returns)
+
+        p1, p2 = profile(old), profile(new)
+        if p1 is None or p2 is None:
+            return False, "تعذّر تحليل أحد النصين لمقارنة المعنى."
+        ctrl1, raise1, ret1 = p1
+        ctrl2, raise2, ret2 = p2
+
+        if ctrl2 < ctrl1:
+            return False, (
+                f"نقص في هياكل التحكّم ({ctrl1} ← {ctrl2}): الرقعة حذفت شرطًا "
+                "أو حلقة، وهذا يغيّر المنطق لا يُصلح عطلًا."
+            )
+        if raise2 > raise1:
+            return False, (
+                f"استُحدث رفع عطل جديد ({raise1} ← {raise2}): مسار كان صامتًا "
+                "سيصير انهيارًا أمام المالك."
+            )
+        if ret1 != ret2:
+            return False, (
+                "تغيّرت القيم المُرجعة الثابتة؛ دالة قد تُعيد شيئًا مختلفًا "
+                "عمّا يتوقّعه مُستدعوها."
+            )
+        return True, (
+            f"المعنى محفوظ: هياكل التحكّم {ctrl1}→{ctrl2} (لا نقص)، "
+            f"لا رفع عطل جديد، والقيم المُرجعة كما هي."
+        )
 
     def _verify_in_sandbox(self, patches: list[Patch]) -> tuple[bool, list[dict]]:
         """ينسخ المشروع إلى مجلد مؤقت، يطبّق الرقع، ثم يستورد ويشغّل الاختبارات.

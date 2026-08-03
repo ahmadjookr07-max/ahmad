@@ -1,0 +1,963 @@
+{
+  "total": 150,
+  "by_code": {
+    "unguarded_optional_import": 14,
+    "silent_except": 105,
+    "silent_fallback_return": 30,
+    "hardcoded_abs_path": 1
+  },
+  "by_severity": {
+    "high": 119,
+    "medium": 31
+  },
+  "by_file": {
+    "src/engine_v2/alignment_v2.py": 1,
+    "src/engine_v2/batch_refine_v2.py": 8,
+    "src/engine_v2/catalog_index_v2.py": 2,
+    "src/engine_v2/date_blur_v2.py": 3,
+    "src/engine_v2/edge_refine_v2.py": 2,
+    "src/engine_v2/enhancement_v2.py": 1,
+    "src/engine_v2/integration_v2.py": 4,
+    "src/engine_v2/learning_v2.py": 1,
+    "src/engine_v2/license_v2.py": 8,
+    "src/engine_v2/naming_v2.py": 2,
+    "src/engine_v2/nutrition_ocr_v2.py": 2,
+    "src/engine_v2/nutrition_render_v2.py": 1,
+    "src/engine_v2/nutrition_smart_v2.py": 4,
+    "src/engine_v2/nutrition_v2.py": 1,
+    "src/engine_v2/primary_image_v2.py": 1,
+    "src/engine_v2/processor_v2.py": 4,
+    "src/engine_v2/quality_v2.py": 3,
+    "src/engine_v2/runtime_deps_v2.py": 9,
+    "src/engine_v2/segmentation_v2.py": 5,
+    "src/engine_v2/shadow_v2.py": 1,
+    "src/engine_v2/source_vault_v2.py": 6,
+    "src/engine_v2/visual_match_v2.py": 2,
+    "windows_app/lazy_engine.py": 1,
+    "windows_app/license_ui.py": 5,
+    "windows_app/native_app.py": 39,
+    "windows_app/native_app_v2.py": 3,
+    "windows_app/nutrition_crop.py": 1,
+    "windows_app/photo_editor_v2.py": 7,
+    "windows_app/v2_ui.py": 17,
+    "src/engine_v2/awareness_bridge_v2.py": 2,
+    "src/engine_v2/legacy_folder_v2.py": 1,
+    "src/engine_v2/session_v2.py": 3
+  },
+  "auto_fixable": 0,
+  "transforms": [
+    "add_open_encoding",
+    "guard_optional_import",
+    "log_silent_except"
+  ],
+  "detail": {
+    "unguarded_optional_import": [
+      {
+        "file": "src/engine_v2/alignment_v2.py",
+        "line": 10,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 21,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/date_blur_v2.py",
+        "line": 23,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/edge_refine_v2.py",
+        "line": 15,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/enhancement_v2.py",
+        "line": 11,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_ocr_v2.py",
+        "line": 13,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_smart_v2.py",
+        "line": 24,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_v2.py",
+        "line": 16,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/processor_v2.py",
+        "line": 14,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/quality_v2.py",
+        "line": 21,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/segmentation_v2.py",
+        "line": 14,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/shadow_v2.py",
+        "line": 21,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/visual_match_v2.py",
+        "line": 14,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/nutrition_crop.py",
+        "line": 17,
+        "severity": "high",
+        "message": ""
+      }
+    ],
+    "silent_except": [
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 129,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 163,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 176,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 288,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 342,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 461,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/catalog_index_v2.py",
+        "line": 124,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/catalog_index_v2.py",
+        "line": 136,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/date_blur_v2.py",
+        "line": 136,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/date_blur_v2.py",
+        "line": 314,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/edge_refine_v2.py",
+        "line": 30,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/integration_v2.py",
+        "line": 166,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/integration_v2.py",
+        "line": 225,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/integration_v2.py",
+        "line": 269,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/learning_v2.py",
+        "line": 71,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 95,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 106,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 405,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 501,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 555,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/naming_v2.py",
+        "line": 543,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/naming_v2.py",
+        "line": 561,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_render_v2.py",
+        "line": 64,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_smart_v2.py",
+        "line": 121,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/primary_image_v2.py",
+        "line": 119,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/processor_v2.py",
+        "line": 183,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/processor_v2.py",
+        "line": 303,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/quality_v2.py",
+        "line": 246,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 130,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 179,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 194,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 241,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 256,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/segmentation_v2.py",
+        "line": 47,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/segmentation_v2.py",
+        "line": 82,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/segmentation_v2.py",
+        "line": 133,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 93,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 170,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 370,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/visual_match_v2.py",
+        "line": 106,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/lazy_engine.py",
+        "line": 307,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/license_ui.py",
+        "line": 105,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/license_ui.py",
+        "line": 512,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/license_ui.py",
+        "line": 538,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 106,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 372,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 396,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 404,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 473,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 560,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 692,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 810,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 2947,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 3065,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 3871,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 4612,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5319,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5326,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5337,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5437,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5541,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5794,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5958,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 6551,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 6934,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 6977,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7022,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7043,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7068,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7251,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7319,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7324,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7354,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7607,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7774,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7802,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7810,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7817,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 7826,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app_v2.py",
+        "line": 65,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app_v2.py",
+        "line": 276,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app_v2.py",
+        "line": 562,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 935,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 988,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 1122,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 1155,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 1252,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 1498,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 255,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 430,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 809,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 830,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 914,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1015,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1042,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1050,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1067,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1148,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1269,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1354,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1367,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1423,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1580,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1669,
+        "severity": "high",
+        "message": ""
+      },
+      {
+        "file": "windows_app/v2_ui.py",
+        "line": 1698,
+        "severity": "high",
+        "message": ""
+      }
+    ],
+    "silent_fallback_return": [
+      {
+        "file": "src/engine_v2/awareness_bridge_v2.py",
+        "line": 62,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/awareness_bridge_v2.py",
+        "line": 66,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/batch_refine_v2.py",
+        "line": 145,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/integration_v2.py",
+        "line": 340,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/legacy_folder_v2.py",
+        "line": 246,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 199,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 223,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/license_v2.py",
+        "line": 285,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_ocr_v2.py",
+        "line": 214,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_smart_v2.py",
+        "line": 133,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/nutrition_smart_v2.py",
+        "line": 157,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/processor_v2.py",
+        "line": 82,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/quality_v2.py",
+        "line": 199,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 101,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 113,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 125,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/runtime_deps_v2.py",
+        "line": 138,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/segmentation_v2.py",
+        "line": 107,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/session_v2.py",
+        "line": 128,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/session_v2.py",
+        "line": 139,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/session_v2.py",
+        "line": 146,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 53,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 60,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "src/engine_v2/source_vault_v2.py",
+        "line": 98,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/license_ui.py",
+        "line": 330,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/license_ui.py",
+        "line": 500,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 120,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 540,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/native_app.py",
+        "line": 5938,
+        "severity": "medium",
+        "message": ""
+      },
+      {
+        "file": "windows_app/photo_editor_v2.py",
+        "line": 102,
+        "severity": "medium",
+        "message": ""
+      }
+    ],
+    "hardcoded_abs_path": [
+      {
+        "file": "windows_app/native_app.py",
+        "line": 8044,
+        "severity": "medium",
+        "message": ""
+      }
+    ]
+  }
+}
