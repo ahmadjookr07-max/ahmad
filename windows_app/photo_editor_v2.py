@@ -12,9 +12,7 @@
 """
 from __future__ import annotations
 
-import os
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +26,6 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QBrush,
-    QIcon,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -52,10 +49,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
     QSplitter,
-    QStackedWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -1051,7 +1045,6 @@ class V2PhotoEditorDialog(QDialog):
             return
         self._push_history()
         from engine_v2.enhancement_v2 import auto_enhance
-        import cv2
         self.status_label.setText("جارٍ التحسين التلقائي…")
         QApplication.processEvents()
         if self._base is not None and self._cutout_applied:

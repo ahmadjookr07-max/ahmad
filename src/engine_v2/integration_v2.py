@@ -18,7 +18,7 @@ from .naming_v2 import (next_sequence, build_name, build_name_dash,
                         build_name_join_all, UNIT_POLICY_JOIN_ALL,
                         UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
                         load_saved_settings, parse_name, dedupe_units,
-                        unit_key)
+                        unit_key, NamingSettings)
 
 if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
     from .processor_v2 import ProcessorV2, ProcessOptionsV2
@@ -219,12 +219,31 @@ def set_naming_data_root(path: str | Path) -> None:
 
 
 def _current_naming_settings():
+    """سياسة التسمية الفاعلة — **لا تُرجع None أبدًا**.
+
+    العلة الجذرية التي أخفت نفسها (نمط النجاح الزائف على مستوى المحرّك):
+    كانت تُرجع ``None`` إن لم تكن الواجهة قد سجّلت ``NAMING_DATA_ROOT``
+    بعد (وهذا يقع في كل المسارات التي تستدعي المحرّك مباشرة، وفي
+    جهة المجلد المنجز). وكل مستعمليها يفحص ``settings is not None``
+    قبل تطبيق ``join_all_units`` ⇒ فارتداد صامت إلى الوحدة الواحدة
+    في **الجهتين**، فخرجت 992 صورة للمالك بوحدة ``حبه`` وحدها مع أن
+    74% من أصنافه لها أكثر من وحدة في الإكسل.
+
+    الإصلاح: إرجاع ``NamingSettings()`` الافتراضية (وافتراضها
+    ``join_all_units``) فيعمل البرنامج بالقاعدة الصحيحة بلا أي ضبط
+    يدوي من المالك، وفي أي بيئة ومن أي مسار استدعاء.
+    """
     if NAMING_DATA_ROOT:
         try:
-            return load_saved_settings(NAMING_DATA_ROOT)
+            saved = load_saved_settings(NAMING_DATA_ROOT)
+            if saved is not None:
+                return saved
         except Exception:
             pass
-    return None
+    try:
+        return NamingSettings()
+    except Exception:
+        return None
 
 
 # مرجع فهرس الإكسل الحي (CatalogIndex) — تسجله الواجهة عند تحميل الإكسل

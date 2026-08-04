@@ -211,15 +211,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         required_packages=(),
         fallback_ar="بلا التسمية الموحدة تفقد المخرجات قيمتها للمتجر.",
     ),
-    Capability(
-        key="visual_match",
-        title_ar="المطابقة البصرية",
-        purpose_ar="اقتراح الصنف المناسب لكل صورة بمقارنة بصمتها البصرية.",
-        module="engine_v2.visual_match_v2",
-        impact=Impact.OPTIONAL,
-        required_packages=("cv2", "numpy"),
-        fallback_ar="يربط المستخدم الصور بالأصناف يدويًا.",
-    ),
+    # 2.9.9 — حُذفت قدرة «المطابقة البصرية» من خريطة القدرات مع إلغاء نسبة
+    # التشابه بطلب المالك. إبقاءها كان سيوقع لوحة الوعي في خلل مزدوج:
+    # تفحص وحدة لم يبق لها أي مستخدم في التطبيق، وتعرض للمالك ميزة
+    # مُلغاة كأنها قائمة — وهو تقرير مُضلِّل عن الذات.
     Capability(
         key="barcode",
         title_ar="قراءة الباركود",
@@ -227,7 +222,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         module="engine_v2.integration_v2",
         impact=Impact.OPTIONAL,
         optional_packages=("zxingcpp",),
-        fallback_ar="تعتمد المطابقة على البصمة البصرية والاسم بدل الباركود.",
+        fallback_ar="تعتمد المطابقة على اسم الملف والربط اليدوي بدل الباركود.",
     ),
     Capability(
         key="license",

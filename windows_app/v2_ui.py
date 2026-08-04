@@ -31,7 +31,6 @@ from PySide6.QtCore import Qt, QPointF, QRectF, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -39,7 +38,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -52,11 +50,8 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -445,7 +440,6 @@ class NutritionDialog(QDialog):
         return "none"
 
     def _crop_image(self):
-        import cv2
         x1, y1, x2, y2 = self.crop_view.selection()
         h, w = self._image.shape[:2]
         crop = self._image[int(y1 * h):int(y2 * h), int(x1 * w):int(x2 * w)]
@@ -614,7 +608,7 @@ class NutritionReviewDialog(QDialog):
 
     def reviewed_data(self):
         _ensure_engine_path()
-        from engine_v2.nutrition_ocr_v2 import NutritionData, NutritionRow
+        from engine_v2.nutrition_ocr_v2 import NutritionRow
         rows = []
         for i in range(self.table.rowCount()):
             def _cell(c):
@@ -1326,7 +1320,7 @@ class UnitNamingDialog(QDialog):
             self.preview_lbl.setText(
                 "نظام التسمية معطّل — تبقى الأسماء كما هي دون تغيير.")
             return
-        scheme = self._current_scheme()
+        self._current_scheme()
         try:
             _ensure_engine_path()
             from engine_v2.naming_v2 import NamingSettings

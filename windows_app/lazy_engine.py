@@ -84,6 +84,7 @@ def load_engine() -> Any:
         from smart_catalog_vision import final_images as _final
 
         _apply_perspective_patch(_pipeline)
+        _apply_lossless_quality_patch(_final)
         _real_final_images = _final
         _real_pipeline = _pipeline
         return _real_pipeline
@@ -121,6 +122,93 @@ def _apply_perspective_patch(module: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ترقيع جودة WebP بلا فقدان (101)
+# ---------------------------------------------------------------------------
+# العلة التي يعالجها هذا الترقيع — علة حاجبة مقاسة، لا احتمالية:
+#
+#   الواجهة تعرض خيار «فائقة — بلا فقدان (lossless)» بقيمة 101، لكن
+#   ``FinalImageOptions.validated`` في المحرّك يشترط
+#   ``1 <= webp_quality <= 100`` فيرفع ``ValueError`` ويقتل الدفعة
+#   بأكملها قبل معالجة صورة واحدة. النتيجة عند المالك: صفر مخرجات.
+#
+#   أثر مأخوذ من سجل مهمة حقيقية:
+#     File "smart_catalog_vision/final_images.py", line 54, in validated
+#     ValueError: جودة WebP يجب أن تكون بين 1 و100
+#
+# لماذا 101 هي القيمة الصحيحة لا الخاطئة (قياس فعلي، صورة 800×700):
+#     q=94  →   524,444 بايت — ضغط مفقود
+#     q=100 →   623,552 بايت — ما زال مفقودًا
+#     q=101 → 1,679,222 بايت — مطابق بايت ببايت (lossless حقيقي)
+#
+# أي أن 100 لا تُحقّق «بلا فقدان» مطلقًا؛ 101 في OpenCV هي علم
+# lossless الحقيقي. ومسار الحفظ ``FinalImageProcessor._write_webp``
+# يمرّر القيمة إلى ``cv2.IMWRITE_WEBP_QUALITY`` مباشرة، فلا مانع تقني
+# من 101 في أي موضع. الخلل محصور في طبقة التحقق وحدها.
+#
+# لماذا الترقيع وليس تعديل المصدر: ``smart_catalog_vision`` يُسلَّم
+# مُصرَّفًا (``.pyc`` بلا ``.py``)، فالتعديل عند الحدّ الفاصل هو المسار
+# الوحيد المتاح — وهو نفس النمط المتبع أصلًا في ترقيع القص المنظوري.
+#
+# نطاق الترقيع مضبوط بإحكام: 101 فقط تُستثنى، وكل ما دون 1 أو فوق 101
+# يبقى مرفوضًا كما كان، فلا يضيع أي تحقق مشروع.
+LOSSLESS_WEBP_QUALITY = 101
+
+
+def _apply_lossless_quality_patch(module: Any) -> None:
+    """يجعل ``FinalImageOptions.validated`` يقبل الجودة 101 (lossless).
+
+    يُطبَّق مرة واحدة فقط، ويفشل بصمت آمن إن تغيّرت بنية المحرّك في
+    إصدار لاحق (مثلًا صار يقبل 101 أصلًا) فلا يتحوّل الترقيع نفسه إلى
+    مصدر عطب جديد.
+    """
+    if getattr(module, "_mis_lossless_patched", False):
+        return
+    options_class = getattr(module, "FinalImageOptions", None)
+    if options_class is None:
+        return
+    original = getattr(options_class, "validated", None)
+    if original is None:
+        return
+
+    def validated(self: Any) -> Any:
+        quality = getattr(self, "webp_quality", None)
+        if quality != LOSSLESS_WEBP_QUALITY:
+            return original(self)
+        # نُمرّر بقيمة مقبولة للتحقق ثم نُعيد 101 إلى الكائن الناتج،
+        # فيصل علم lossless سليمًا إلى مسار الحفظ.
+        probe = _replace_quality(self, 100)
+        checked = original(probe)
+        target = checked if checked is not None else self
+        return _replace_quality(target, LOSSLESS_WEBP_QUALITY)
+
+    validated.__name__ = "validated"
+    validated.__qualname__ = f"{options_class.__name__}.validated"
+    validated.__doc__ = (original.__doc__ or "") + \
+        "\n\nمُرقَّع: يقبل الجودة 101 (WebP بلا فقدان)."
+    options_class.validated = validated
+    module._mis_lossless_patched = True
+
+
+def _replace_quality(options: Any, quality: int) -> Any:
+    """نسخة من الخيارات بجودة مختلفة — تعمل مع dataclass أو بدونه."""
+    try:
+        import dataclasses
+
+        if dataclasses.is_dataclass(options):
+            return dataclasses.replace(options, webp_quality=quality)
+    except Exception:
+        pass
+    try:
+        import copy
+
+        clone = copy.copy(options)
+        object.__setattr__(clone, "webp_quality", quality)
+        return clone
+    except Exception:
+        return options
+
+
+# ---------------------------------------------------------------------------
 # الوكلاء
 # ---------------------------------------------------------------------------
 class _LazyModule:
@@ -143,10 +231,25 @@ pipeline = _LazyModule()
 
 
 def _lazy_callable(name: str) -> Callable[..., Any]:
-    """يُنشئ غلافًا لدالة في ``pipeline`` يُحمِّل عند أول استدعاء."""
+    """يُنشئ غلافًا لدالة في ``pipeline`` يُحمِّل عند أول استدعاء.
+
+    2.9.8: ``run_batch`` يمر أيضًا بطبقة تسمية المالك. السبب أن اسم
+    ناتج الدفعة يُبنى داخل المحرّك المُصرَّف (``final_images.pyc``)
+    بوحدة واحدة، فلا يرى سياسة ``join_all_units``. وهذه نقطة الاستيراد
+    الوحيدة لـ``run_batch`` في الواجهة، فالترقيع هنا يغطي كل المستدعين.
+    """
 
     def _call(*args: Any, **kwargs: Any) -> Any:
-        return getattr(load_engine(), name)(*args, **kwargs)
+        result = getattr(load_engine(), name)(*args, **kwargs)
+        if name == "run_batch":
+            try:
+                from batch_naming_patch import apply_join_all_units
+                result = apply_join_all_units(result)
+            except Exception as exc:  # لا تُسقط دفعة بسبب التسمية
+                import sys as _sys
+                print(f"[batch-naming] تعذر تطبيق قاعدة الوحدات: {exc}",
+                      file=_sys.stderr)
+        return result
 
     _call.__name__ = name
     _call.__qualname__ = name

@@ -38,6 +38,15 @@ datas = [
     (str(ROOT / "windows_app" / "assets" / "app_icon.png"), "windows_app/assets"),
     (str(ROOT / "windows_app" / "assets" / "app_icon.ico"), "windows_app/assets"),
     # legacy compiled pipeline (1.2.1 proven engine)
+    #
+    # `__init__.py` و`pipeline.pyc` كانا ناقصين حتى 2.9.8 فكان
+    # `from smart_catalog_vision import pipeline` يفشل في الحزمة
+    # المجمَّدة وحدها، فتُعطَّل تسريعات state_cache وmatch_speed
+    # بصمت («speedup unavailable») ويسقط معهما مسار المجلد
+    # المنجز الذي يستورد `_CatalogIndex` و`FinalImageOptions`.
+    # المجلد بلا `__init__.py` ليس حزمة فلا يُرى `pipeline` أصلًا.
+    (str(ROOT / "src" / "smart_catalog_vision" / "__init__.py"), "smart_catalog_vision"),
+    (str(ROOT / "src" / "smart_catalog_vision" / "pipeline.pyc"), "smart_catalog_vision"),
     (str(ROOT / "src" / "smart_catalog_vision" / "final_images.pyc"), "smart_catalog_vision"),
     (str(ROOT / "src" / "smart_catalog_vision" / "imaging.pyc"), "smart_catalog_vision"),
     (str(ROOT / "src" / "smart_catalog_vision" / "normalization.pyc"), "smart_catalog_vision"),

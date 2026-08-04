@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .naming_v2 import parse_name, clean_unit
 

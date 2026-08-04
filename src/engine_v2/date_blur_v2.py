@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -253,7 +253,6 @@ def detect_date_regions(img: np.ndarray,
     for bi, (x0, y0, x1, y1, in_protected, bh_) in enumerate(boxes):
         if len(regions) >= 4:
             break  # إيقاف مبكر — طمس 4 تواريخ يكفي لأي عبوة
-        crop = img[y0:y1, x0:x1]
         text, conf = "", 0.0
         if ocr is not None:
             try:

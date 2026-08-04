@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -214,19 +214,22 @@ class BatchRefiner:
                 from engine_v2.naming_v2 import build_name
                 new_stem = build_name(code, seq, unit)
         except Exception:
+            # 2.9.9 — مسار الطوارئ حين يتعذر استيراد دوال التسمية.
+            # كان `seq - 1` يُعطي الثانية `-1` فيتداخل مع الرئيسية؛
+            # قاعدة المالك: الأولى بلا رقم، الثانية `-2`، الثالثة `-3`.
             new_stem = (f"{code}_{unit}" if seq <= 1
-                        else f"{code}_{unit}-{seq - 1}")
+                        else f"{code}_{unit}-{seq}")
         return new_stem, note
 
     def _group_total(self, code: str, unit: str) -> int:
-        """عدد صور نفس (الصنف، الوحدة) في الدفعة — لتحديد التسلسل -1/-2 أو بدونه."""
+        """عدد صور نفس (الصنف، الوحدة) في الدفعة — لتحديد التسلسل -2/-3 أو بدونه."""
         totals = getattr(self, "_group_totals", None)
         if not totals:
             return 1
         return int(totals.get((str(code), str(unit or "")), 1) or 1)
 
     def _compute_group_totals(self, files: list[Path]) -> None:
-        """تمريرة مسبقة: تحصي صور كل (صنف، وحدة) ليعرف النمط dash متى يضيف -1/-2."""
+        """تمريرة مسبقة: تحصي صور كل (صنف، وحدة) ليعرف النمط dash متى يضيف -2/-3."""
         totals: dict[tuple[str, str], int] = {}
         try:
             from engine_v2.naming_v2 import normalize_stem, parse_name
@@ -420,7 +423,6 @@ class BatchRefiner:
             else:
                 x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
                 img = img[y0:y1 + 1, x0:x1 + 1]
-                rgb = None
         else:
             # صورة بخلفية بيضاء: اقتصاص حول غير الأبيض
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -429,7 +431,6 @@ class BatchRefiner:
             if len(xs) > 20:
                 x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
                 img = img[y0:y1 + 1, x0:x1 + 1]
-            rgb = img
 
         th, tw = o.height, o.width
         m = o.margin_ratio

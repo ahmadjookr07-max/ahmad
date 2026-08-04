@@ -43,7 +43,6 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from . import identity, journal
 from . import ledger as ledger_mod

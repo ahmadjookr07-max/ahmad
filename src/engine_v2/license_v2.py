@@ -30,7 +30,7 @@ import struct
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 # ---------------------------------------------------------------- ed25519
@@ -451,7 +451,6 @@ def activate_with_key(key: str,
 
 def check_license(public_key_b64: str | None = None) -> LicenseInfo:
     """يفحص الترخيص المخزن ويعيد الحالة الكاملة."""
-    pub = public_key_b64 or OWNER_PUBLIC_KEY_B64
     info = LicenseInfo(fingerprint=machine_fingerprint())
     if not _clock_check_and_update():
         info.status = "اكتُشف تلاعب بساعة النظام — أعد ضبط الوقت الصحيح"

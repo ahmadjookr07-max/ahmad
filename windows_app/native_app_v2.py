@@ -17,7 +17,7 @@ for p in (str(_SRC), str(_HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-APP_VERSION_V2 = "2.9.5"
+APP_VERSION_V2 = "2.9.9"
 
 _SPLASH = None  # مرجع شاشة البدء الفورية
 
@@ -77,6 +77,46 @@ def _activate_engine() -> None:
               file=sys.stderr)
 
 
+def _activate_speedups() -> dict[str, bool]:
+    """يفعّل تسريعَي البطء المقيسين عند المالك.
+
+    شكوى المالك كانت في موضعين مختلفين، ولكل واحد وحدة مستقلة:
+
+    | البطء | القياس | الوحدة |
+    |---|---|---|
+    | دفعة الزيت ~40 دقيقة | 9.7 ث/صورة، `difflib` عبر 50311 صنفًا | `match_speed_v2` |
+    | كل حفظ/تعديل يتجمّد | 0.85 ث/دورة، `job_state.json` = 10.6 م.ب | `state_cache_v2` |
+
+    **لماذا هنا؟** كانت `state_cache_v2` مكتوبة ومختبرة (18/18) لكن غير
+    موصولة بأي نقطة إقلاع، فلم تعمل عند المالك إطلاقًا رغم تسجيلها
+    "مغلقة". هذه الدالة تُوصل الاثنين من نقطة الدخول التي يستخدمها
+    المُثبِّت فعلًا (`AhmedAlFaifiMarketImageStudioV2.spec` → هذا الملف).
+
+    لا تحجب الإقلاع أبدًا: أي فشل يُسجَّل ويكمل التطبيق بالسلوك الأصلي.
+    """
+    status: dict[str, bool] = {"state_cache": False, "match_speed": False}
+
+    # 1) تسريع حالة المهمة (يعمل بالترقيع على وحدة الحزمة المصرَّفة)
+    try:
+        from engine_v2 import state_cache_v2
+        status["state_cache"] = bool(state_cache_v2.activate())
+    except Exception as exc:  # pragma: no cover
+        print(f"[V2] state cache speedup unavailable: {exc}", file=sys.stderr)
+
+    # 2) تسريع مطابقة أسماء الملفات مع الكتالوج
+    try:
+        from engine_v2 import match_speed_v2
+        from smart_catalog_vision import pipeline as _pipeline
+        status["match_speed"] = bool(match_speed_v2.install(_pipeline))
+    except Exception as exc:  # pragma: no cover
+        print(f"[V2] match speedup unavailable: {exc}", file=sys.stderr)
+
+    for name, ok in status.items():
+        mark = "on" if ok else "off"
+        print(f"[V2] speedup {name}: {mark}", file=sys.stderr)
+    return status
+
+
 def _fix_text_clipping(window) -> None:
     """إصلاح عام: يمنع قص نصوص كل الأزرار والشارات في النافذة."""
     try:
@@ -94,7 +134,7 @@ def _fix_text_clipping(window) -> None:
 
 def _patch_ui(native_app) -> None:
     """Extend MainWindow with V2 buttons/dialogs after it is constructed."""
-    from PySide6.QtWidgets import QPushButton, QDialog
+    from PySide6.QtWidgets import QPushButton
 
     import v2_ui
 
@@ -105,7 +145,6 @@ def _patch_ui(native_app) -> None:
         try:
             data_root = getattr(native_app, "DATA_ROOT", Path.home() / "Documents" / "SmartCatalogVision")
             v2_ui.install_v2(self, Path(data_root))
-            header_layout = self.header_frame.layout()
 
             # 2.9.5 — زر «أداة إعادة التسمية» حُذف مع نافذته نهائيًا.
             # قرار المالك: «الغِ مكان التعديل القديم... كل شيء في واجهة
@@ -184,7 +223,7 @@ def _patch_ui(native_app) -> None:
                 lambda: _open_nutrition_center(self, v2_ui))
 
             # إصلاح تداخل الهيدر: صف أدوات مستقل تحت الهيدر بدل حشر الأزرار فيه
-            from PySide6.QtWidgets import QWidget, QHBoxLayout, QSizePolicy
+            from PySide6.QtWidgets import QWidget, QHBoxLayout
             toolbar = QWidget()
             toolbar.setObjectName("v2Toolbar")
             tl = QHBoxLayout(toolbar)
@@ -210,15 +249,6 @@ def _patch_ui(native_app) -> None:
                 license_ui.install_license_badge(self)
             except Exception as exc:
                 print(f"[V2] license badge failed: {exc}", file=sys.stderr)
-
-            # ──── طبقة الوعي: شارة الصحة + لوحة الوعي والحوار ────
-            # تُدرج بعد بناء صف الأدوات لأنها تقرأ v2_toolbar_layout.
-            # فشلها لا يمنع التطبيق من العمل: الوعي مُكمّل لا شرط.
-            try:
-                import awareness_ui
-                awareness_ui.install(self)
-            except Exception as exc:
-                print(f"[V2] awareness UI failed: {exc}", file=sys.stderr)
 
             self.v2_nutrition_dialog_cls = v2_ui.NutritionDialog
             _attach_nutrition_button(self, native_app, v2_ui)
@@ -250,8 +280,8 @@ def _patch_ui(native_app) -> None:
                     " عند فتح البرنامج مرة أخرى (زر الجلسات).")
                 save_btn = box.addButton("حفظ الجلسة والإغلاق",
                                          QMessageBox.AcceptRole)
-                discard_btn = box.addButton("إغلاق بدون حفظ",
-                                            QMessageBox.DestructiveRole)
+                box.addButton("إغلاق بدون حفظ",
+                              QMessageBox.DestructiveRole)
                 cancel_btn = box.addButton("إلغاء والبقاء",
                                            QMessageBox.RejectRole)
                 box.setDefaultButton(save_btn)
@@ -269,12 +299,7 @@ def _patch_ui(native_app) -> None:
                               file=sys.stderr)
         except Exception as exc:  # pragma: no cover — never block closing
             print(f"[V2] close handler failed: {exc}", file=sys.stderr)
-        # إغلاق طبقة الوعي: تثبيت القياسات والذاكرة قبل الخروج
-        try:
-            import awareness_ui
-            awareness_ui.shutdown()
-        except Exception:
-            pass
+
         if callable(original_close):
             original_close(self, event)
         else:
@@ -540,33 +565,10 @@ def _gate_startup(native_app) -> None:
     native_app.MainWindow.__init__ = gated_init
 
 
-def _awake_awareness() -> None:
-    """إيقاظ طبقة الوعي قبل أي شيء آخر.
-
-    الترتيب مقصود: يُوقِظ قبل `_activate_engine` حتى يكون السجل
-    ومراقبة الاستثناءات جاهزًا لالتقاط أي عطل في الإقلاع نفسه —
-    فأعطال الإقلاع كانت أكثر ما أربك المستخدم في الإصدارات السابقة.
-    """
-    try:
-        from awareness import core as _aw
-        _aw.awake(deep=False, heal=True)   # إقلاع خفيف: الفحص العميق في النبضة
-    except Exception as exc:  # pragma: no cover — الوعي لا يعطّل الإقلاع
-        print(f"[V2] awareness awake failed: {exc}", file=sys.stderr)
-
-
-def _sleep_awareness() -> None:
-    """إغلاق نهائي: تثبيت القياسات والذاكرة وإغلاق قاعدة السجل."""
-    try:
-        from awareness import core as _aw
-        _aw.sleep()
-    except Exception:
-        pass
-
-
 def main() -> int:
-    _awake_awareness()          # أولًا: الوعي يراقب الإقلاع نفسه
     _show_splash()              # فورًا: شاشة بدء مرئية خلال أجزاء من الثانية
     _activate_engine()
+    _activate_speedups()        # تسريع المطابقة + حالة المهمة (بطء المالك)
     import native_app
     native_app.APP_VERSION = APP_VERSION_V2
     _gate_startup(native_app)   # أولاً: بوابة الترخيص (تلتف حول __init__ الأصلي)
@@ -574,7 +576,6 @@ def main() -> int:
     try:
         return native_app.main()
     finally:
-        _sleep_awareness()
         _close_splash()
 
 

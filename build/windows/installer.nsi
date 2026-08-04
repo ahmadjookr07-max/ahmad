@@ -8,7 +8,15 @@
 !define APP_GUID "{B7E4A9D2-5C31-4F8E-9A6B-2D7F0C4E8A15}"
 !define APP_NAME "Ahmed Al-Faifi Market Image Studio"
 !define APP_NAME_AR "استوديو صور المتجر — أحمد الفيفي"
-!define APP_VERSION "2.9.5"
+; ── الإصدار مصدره الوحيد ملف VERSION في جذر المشروع ─────────────
+; قاعدة «لا تكرار»: لا يُكتب رقم الإصدار في هذا الملف إطلاقًا، فلا
+; يتناقض المثبت مع التطبيق كما حدث في 2.9.8 (version_info.txt).
+; يفشل البناء صراحةً إن غاب VERSION — أفضل من مثبت بإصدار خاطئ.
+; __FILEDIR__ يضمن الحل من موضع هذا الملف لا من مجلد تشغيل البناء
+; (المسار النسبي المجرد يُحلّ من مجلد العمل فيخفق صامتًا).
+; ولا فرع احتياطي: غياب VERSION يُفشل البناء صراحةً بدل إنتاج
+; مثبت بإصدار كاذب. مُتحقَّق منه بـmakensis ⇒ [2.9.9].
+!searchparse /file "${__FILEDIR__}\..\..\VERSION" "" APP_VERSION "$\n"
 !define APP_PUBLISHER "Ahmed Al-Faifi"
 !define APP_EXE "AhmedAlFaifiMarketImageStudio.exe"
 !define APP_SOURCE "..\..\dist\windows\AhmedAlFaifiMarketImageStudio"
@@ -30,7 +38,7 @@ BrandingText "${APP_NAME} ${APP_VERSION}"
 Icon "..\..\windows_app\assets\app_icon.ico"
 UninstallIcon "..\..\windows_app\assets\app_icon.ico"
 
-VIProductVersion "2.9.5.0"
+VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=1033 "CompanyName" "${APP_PUBLISHER}"

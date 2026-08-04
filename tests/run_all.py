@@ -33,6 +33,12 @@ def discover(filt: str | None) -> list[Path]:
     return files
 
 
+# رمز خروج متفق عليه للتخطّي: الاختبار لم يُنفَّذ لغياب مدخلاته
+# (بيانات المالك مثلاً) — لا هو نجاح ولا فشل. الخلط بينه وبين النجاح
+# كان يُخفي أن نقاطًا كاملة لم تُفحص أصلاً («نجاح زائف»).
+SKIP_RC = 77
+
+
 def verdict(name: str, rc: int, out: str) -> tuple[str, str]:
     """يحدّد النتيجة من رمز الخروج ومن نصّ المخرجات معًا.
 
@@ -41,6 +47,10 @@ def verdict(name: str, rc: int, out: str) -> tuple[str, str]:
     """
     low = out.lower()
     import re
+
+    if rc == SKIP_RC:
+        m = re.search(r"^\s*SKIP\s*[:：]\s*(.+)$", out, re.M)
+        return ("SKIP", (m.group(1).strip() if m else "مدخلات غير متوفرة")[:40])
 
     # ملخص «N passed / M failed»
     m = re.search(r"(\d+)\s*passed\s*/\s*(\d+)\s*failed", low)
@@ -92,17 +102,25 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             out, status, detail = "", "TIMEOUT", f">{TIMEOUT}s"
         dt = time.time() - t0
-        mark = {"PASS": "✓", "FAIL": "✗", "TIMEOUT": "⏱"}[status]
+        mark = {"PASS": "✓", "FAIL": "✗", "TIMEOUT": "⏱",
+                "SKIP": "−"}[status]
         print(f"  {mark} {path.name:<38} {detail:<22} {dt:6.1f}s")
         results.append({"test": path.name, "status": status,
                         "detail": detail, "seconds": round(dt, 1),
-                        "tail": out[-4000:] if status != "PASS" else ""})
+                        "tail": out[-4000:]
+                        if status not in ("PASS", "SKIP") else ""})
 
     ok = sum(1 for r in results if r["status"] == "PASS")
-    bad = [r for r in results if r["status"] != "PASS"]
+    skipped = [r for r in results if r["status"] == "SKIP"]
+    bad = [r for r in results if r["status"] not in ("PASS", "SKIP")]
     print("=" * 62)
     print(f"الإجمالي: {ok}/{len(results)} نجح — "
+          f"متخطّى: {len(skipped)} — فاشل: {len(bad)} — "
           f"الزمن {time.time() - t_all:.0f}s")
+    if skipped:
+        print("\nمتخطّى (لم يُفحص — مدخلاته غير متوفرة، ليس نجاحًا):")
+        for r in skipped:
+            print(f"  − {r['test']}: {r['detail']}")
     if bad:
         print("\nالإخفاقات:")
         for r in bad:

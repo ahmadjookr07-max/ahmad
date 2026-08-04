@@ -124,7 +124,7 @@ def test_makensis_simulation() -> None:
 
 def test_regression_guard() -> None:
     """يتأكد أن الاختبار نفسه قادر على كشف العطب لو عاد."""
-    sample = NSI_DIR / "installer_v295.nsi"
+    sample = NSI_DIR / "installer.nsi"
     if not sample.is_file():
         return
     raw = sample.read_bytes()

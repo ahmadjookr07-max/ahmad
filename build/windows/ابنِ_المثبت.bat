@@ -79,7 +79,7 @@ if defined NO_NSIS (
     exit /b 0
 )
 if not exist "dist\installer" mkdir "dist\installer"
-makensis "build\windows\installer_v295.nsi"
+makensis "build\windows\installer.nsi"
 if errorlevel 1 (
     echo.
     echo   فشل بناء المُثبِّت. راجع الرسائل أعلاه.

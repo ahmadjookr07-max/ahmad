@@ -1,7 +1,7 @@
 ﻿; ============================================================
-;  مثبّت استوديو المالك — Ahmed Al-Faifi Owner Studio 2.9.5
+;  مثبّت استوديو المالك — Ahmed Al-Faifi Owner Studio
 ;  سري: للمالك وحده. لا يوزع على العملاء إطلاقًا.
-;  الترجمة:  makensis build/windows/installer_owner_v295.nsi
+;  الترجمة:  makensis build/windows/installer_owner.nsi
 ; ============================================================
 
 Unicode true
@@ -12,7 +12,10 @@ Unicode true
 !define APP_NAME      "Ahmed Al-Faifi Owner Studio"
 !define APP_NAME_AR   "استوديو المالك"
 !define APP_ID        "AhmedAlFaifiOwnerStudio"
-!define APP_VERSION   "2.9.5"
+; الإصدار مصدره الوحيد ملف VERSION. __FILEDIR__ يضمن الحل من موضع
+; هذا الملف لا من مجلد تشغيل البناء، ولا فرع احتياطي: غياب VERSION
+; يُفشل البناء صراحةً بدل إنتاج مُثبِّت بإصدار كاذب.
+!searchparse /file "${__FILEDIR__}\..\..\VERSION" "" APP_VERSION "$\n"
 !define APP_PUBLISHER "Ahmed Al-Faifi"
 !define APP_EXE       "AhmedAlFaifiOwnerStudio.exe"
 !define SECRETS_DIR   "بيانات_المالك"
@@ -25,12 +28,12 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 BrandingText "${APP_PUBLISHER} — ${APP_NAME} ${APP_VERSION}"
 
-VIProductVersion "2.9.5.0"
+VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey /LANG=1033 "ProductName"     "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "CompanyName"     "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=1033 "FileDescription" "Owner Studio Installer"
-VIAddVersionKey /LANG=1033 "FileVersion"     "2.9.5.0"
-VIAddVersionKey /LANG=1033 "ProductVersion"  "2.9.5.0"
+VIAddVersionKey /LANG=1033 "FileVersion"     "${APP_VERSION}.0"
+VIAddVersionKey /LANG=1033 "ProductVersion"  "${APP_VERSION}.0"
 VIAddVersionKey /LANG=1033 "LegalCopyright"  "Copyright (c) 2026 ${APP_PUBLISHER}"
 
 !define MUI_ICON   "..\..\windows_app\assets\app_icon.ico"

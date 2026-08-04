@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """اختبار التوقيع الهجين Ed25519 + ML-DSA-65 المقاوم للكم."""
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
+# مسار مطلق من بيئة جلسة قديمة محذوفة كان يُسقط الملف
+# فورًا؛ الجذر يُستنبط الآن من موقع الملف ليعمل في أي بيئة.
+_ROOT = Path(__file__).resolve().parent.parent
+for _extra in (_ROOT / "src", _ROOT / "windows_app"):
+    if _extra.is_dir() and str(_extra) not in sys.path:
+        sys.path.insert(0, str(_extra))
 
-from engine_v2 import license_v2 as lv
+from engine_v2 import license_v2 as lv  # noqa: E402
 
 PASS, FAIL = [], []
 

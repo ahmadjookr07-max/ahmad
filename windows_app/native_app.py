@@ -13,10 +13,10 @@ import re
 import shutil
 import sys
 import threading
+import time
 import traceback
 import unicodedata
 import uuid
-from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -210,7 +210,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.9.5"
+APP_VERSION = "2.9.9"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -585,41 +585,10 @@ class BatchWorker(QThread):
                             f" — {workers} مسارات متوازية")
 
 
-class VisualSignatureWorker(QThread):
-    """2.9.6 — يبني البصمات البصرية خارج خيط الواجهة.
-
-    بناء البصمة يقرأ الصورة من القرص ويفكّ ترميزها (~47ms للصورة الواحدة
-    على صور اختبار، وأضعاف ذلك على صور الكاميرا الحقيقية). تنفيذه على خيط
-    الواجهة لـ109 صورة كان يُجمّد النافذة ثوانٍ طويلة ويجعل ويندوز يرسمها بيضاء
-    مع «لا يستجيب». هذا العامل ينقل العمل كله إلى الخلفية ويُرسل النتيجة دفعة واحدة.
-    """
-
-    ready = Signal(object)
-
-    def __init__(self, paths: Iterable[str]) -> None:
-        super().__init__()
-        self.paths = tuple(dict.fromkeys(str(p) for p in paths if str(p)))
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:  # pragma: no cover - يُغطّى عبر اختبار التكامل
-        built: dict[str, object] = {}
-        try:
-            from engine_v2 import visual_match_v2 as _vm
-        except Exception as exc:
-            print(f"[link] visual signature engine unavailable: {exc}", file=sys.stderr)
-            self.ready.emit(built)
-            return
-        for path in self.paths:
-            if self._cancelled:
-                break
-            try:
-                built[path] = _vm.build_signature(path)
-            except Exception:
-                built[path] = None
-        self.ready.emit(built)
+# 2.9.9 — حُذف `VisualSignatureWorker` نهائيًا مع إلغاء نسبة التشابه بطلب المالك.
+# كان يبني بصمة بصرية لكل صورة في الخلفية (~47ms للصورة، وأضعافها لصور
+# الكاميرا) لمجرد عرض نسبة مئوية لم تكن دقيقة ولا مفيدة. إزالته توفّر قراءة
+# وفكّ ترميز كامل لكل صور الدفعة، فيصبح الربط أسرع وأخف على الذاكرة.
 
 
 class ManualLinkWorker(QThread):
@@ -1890,20 +1859,10 @@ class MainWindow(QMainWindow):
         self._manual_reference_source_name = ""
         self._result_items_by_name: dict[str, BatchItemResult] = {}
         self._result_thumbnail_cache: dict[str, QIcon] = {}
-        self._visual_signature_cache: dict[str, tuple[float, ...]] = {}
-        # 2.9.6 — إصلاح تجمّد الواجهة عند اختيار صف في استوديو المراجعة.
-        # بناء البصمة البصرية يكلّف ~47ms للصورة الواحدة (قراءة القرص + فك
-        # الترميز). كان يُنفَّذ على خيط الواجهة لكل صور الدفعة ⇒ 5 ثوانٍ فأكثر
-        # تجمّدًا كاملًا («لا يستجيب») مع 109 صنف. الآن: كاش LRU + عامل خلفي.
-        self._visual_sig_lru: "OrderedDict[str, object]" = OrderedDict()
-        self._visual_sig_capacity = 2000
-        self._visual_sig_worker: "VisualSignatureWorker | None" = None
-        self._visual_sig_pending: set[str] = set()
-        self._visual_sig_failed: set[str] = set()
-        self._visual_warm_timer = QTimer(self)
-        self._visual_warm_timer.setSingleShot(True)
-        self._visual_warm_timer.setInterval(120)
-        self._visual_warm_timer.timeout.connect(self._flush_visual_signature_queue)
+        # 2.9.9 — أُلغيت نسبة التشابه من جذورها بطلب المالك، فحُذفت معها كل
+        # منطقة البصمات البصرية: كاش LRU بسعة 2000، العامل الخلفي، مؤقّت
+        # التسخين، ومجموعات المنتظر/الفاشل. الربط الآن بالباركود والاسم
+        # والجيرة واليد وحدها — أدق وأسرع وبلا أي قراءة أقراص زائدة.
         self._individual_edit_source_name = ""
         self._individual_crop_box: tuple[float, ...] | None = None
         self._preview_timer = QTimer(self)
@@ -2365,7 +2324,11 @@ class MainWindow(QMainWindow):
         self.catalog_edit.setPlaceholderText("لم يتم اختيار ملف Excel")
         self.catalog_status_label = QLabel("سيظهر اسم الملف هنا بعد اختياره")
         self.catalog_status_label.setObjectName("catalogStatus")
-        catalog_button = QPushButton("اختيار ملف Excel")
+        # 2.9.7: أزرار الإعداد كانت متغيرات محلية بلا مرجع على self،
+        # فلم يكن لفحص الأزرار الآلي أي سبيل للوصول إليها — فكان يتخطّاها
+        # بصمت ويُعلن نجاحًا، مع أنّها أول ما يلمسه المستخدم.
+        catalog_button = self.select_catalog_button = QPushButton(
+            "اختيار ملف Excel")
         catalog_button.setObjectName("secondaryButton")
         catalog_button.clicked.connect(self._select_catalog)
         catalog_layout.addWidget(self.catalog_edit)
@@ -2396,7 +2359,7 @@ class MainWindow(QMainWindow):
         self.open_legacy_button.setToolTip(
             "افتح مجلد صور منجزة سابقًا في نفس استوديو المراجعة:\n"
             "تُجمّع الصور برقم الصنف، وتُصحّح التسميات من الإكسل فورًا\n"
-            "(الواجهة بلا رقم، والبقية -1 ،-2 ،-3)، ثم تضغط ★ على أي صورة\n"
+            "(الواجهة بلا رقم، والبقية -2 ،-3 ،-4)، ثم تضغط ★ على أي صورة\n"
             "لتجعلها صورة الواجهة. حمّل الإكسل أولاً لتصحيح الوحدات.")
         self.open_legacy_button.clicked.connect(self._open_legacy_folder)
         self._register_metric(self.open_legacy_button, "min_height", 34)
@@ -2409,10 +2372,10 @@ class MainWindow(QMainWindow):
         images_group = QGroupBox("2. صور المنتجات")
         images_layout = QVBoxLayout(images_group)
         buttons = QHBoxLayout()
-        add_images = QPushButton("إضافة صور")
+        add_images = self.select_images_button = QPushButton("إضافة صور")
         add_images.setObjectName("secondaryButton")
         add_images.clicked.connect(self._select_images)
-        add_folder = QPushButton("إضافة مجلد")
+        add_folder = self.select_folder_button = QPushButton("إضافة مجلد")
         add_folder.setObjectName("secondaryButton")
         add_folder.clicked.connect(self._select_folder)
         buttons.addWidget(add_images)
@@ -2431,10 +2394,11 @@ class MainWindow(QMainWindow):
         images_layout.addWidget(self.image_list, 1)
         list_footer = QHBoxLayout()
         self.image_count_label = QLabel("0 صورة")
-        remove_selected = QPushButton("حذف المحدد")
+        remove_selected = self.remove_images_button = QPushButton(
+            "حذف المحدد")
         remove_selected.setObjectName("textButton")
         remove_selected.clicked.connect(self._remove_selected_images)
-        clear_all = QPushButton("مسح الكل")
+        clear_all = self.clear_images_button = QPushButton("مسح الكل")
         clear_all.setObjectName("textButton")
         clear_all.clicked.connect(self._clear_images)
         list_footer.addWidget(self.image_count_label, 1)
@@ -3210,7 +3174,7 @@ class MainWindow(QMainWindow):
         self.suggest_group_button = QPushButton("اقتراح قريب")
         self.suggest_group_button.setObjectName("suggestNearbyButton")
         self.suggest_group_button.setToolTip(
-            "يحدد الصور غير المرتبطة المتجاورة والمتشابهة للمراجعة فقط"
+            "يحدد الصور غير المرتبطة المجاورة للمرجع أو المشتركة معه في اسم الملف، للمراجعة فقط"
         )
         self.suggest_group_button.clicked.connect(self._suggest_high_confidence_group)
         self.reference_group_link_button = QPushButton("ربط بالمرجع")
@@ -3667,7 +3631,7 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(8)
         heading = QVBoxLayout()
         heading.setSpacing(1)
-        self.individual_editor_product_label = QLabel("اختر صفًا مرتبطًا ثم اضغط «تحرير احترافي»")
+        self.individual_editor_product_label = QLabel("اختر أي صف ثم اضغط «تحرير احترافي»")
         self.individual_editor_product_label.setObjectName("editorProductLabel")
         self.individual_editor_product_label.setWordWrap(False)
         self.individual_editor_meta_label = QLabel("رقم الصنف: —  •  الوحدة: —")
@@ -3761,7 +3725,6 @@ class MainWindow(QMainWindow):
 
         self.individual_editor_hint.resizeEvent = _elide_hint  # type: ignore[method-assign]
 
-        _orig_set_text = self.individual_editor_hint.setText
 
         def _set_hint_text(text: str) -> None:
             self._hint_full_text = text
@@ -4406,7 +4369,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 APP_NAME,
-                "حدد صفًا مرتبطًا واحدًا فقط. اربط الصف برقم الصنف أولاً إذا كان للمراجعة.",
+                "حدد صفًا واحدًا فقط لفتح محرر الصورة.",
             )
             return
         source = self._result_path(item.source_path)
@@ -4658,14 +4621,101 @@ class MainWindow(QMainWindow):
         self.output_preview.viewer.setFocus(Qt.OtherFocusReason)
 
     def _individual_editable_item(self) -> BatchItemResult | None:
+        """الصف القابل للتحرير — **لا يشترط الربط برقم صنف**.
+
+        العلة التي رصدها المالك («المحرر يرفض ولا يحفظ»): كان الشرط
+        ``if not item.item_code`` يرفض كل صورة غير مرتبطة، وعند المالك
+        104 من 109 صورة بلا باركود مقروء ⇒ المحرر مرفوض عمليًا على
+        معظم عمله. والواقع معكوس: يحتاج **تعديل الصورة أولًا** (قص/
+        تحسين/تنظيف) ثم يربطها بالصنف.
+
+        الآن يكفي: صف واحد محدَّد + ملف مصدر موجود. أما الربط فيبقى
+        شرطًا لمسار المحرك ``apply_individual_image_edit`` وحده (وهو
+        يرفع «اربط الصورة برقم صنف صحيح قبل تحسينها»)، ولذلك يوجَّه
+        غير المرتبط إلى مسار الحفظ المستقل ``_save_editor_draft``.
+        """
         selected = self._selected_result_items()
         if len(selected) != 1:
             return None
         item = selected[0]
         source = self._result_path(item.source_path)
-        if not item.item_code or source is None or not source.is_file():
+        if source is None or not source.is_file():
             return None
         return item
+
+    def _individual_linked_item(self) -> BatchItemResult | None:
+        """الصف المرتبط فعلًا — لمسار المحرك الذي يشترط رقم الصنف."""
+        item = self._individual_editable_item()
+        if item is None or not item.item_code:
+            return None
+        return item
+
+    def _editor_draft_path(self, source_name: str) -> Path | None:
+        """مسار حفظ مسوّدة المحرر لصورة غير مرتبطة.
+
+        تُحفظ داخل مجلد المهمة إن وُجد، وإلا بجوار الصورة الأصلية —
+        فجهة «المجلد المنجز» قد تعمل بلا ``current_workspace``.
+        """
+        base = self.current_workspace
+        if base is None:
+            item = self._individual_editable_item()
+            source = self._result_path(item.source_path) if item is not None else None
+            if source is None:
+                return None
+            base = source.parent
+        draft_dir = Path(base) / "editor_drafts"
+        try:
+            draft_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return None
+        return draft_dir / f"{Path(source_name).stem}.edited.png"
+
+    def _save_editor_draft(self, *, silent: bool = False) -> Path | None:
+        """حفظ تعديلات المحرر **أثناء العمل** بلا اشتراط الربط.
+
+        هذا هو إصلاح علة المالك: التعديل يُحفظ فورًا على القرص، فلا
+        يُفقد عند الانتقال إلى صورة أخرى أو إغلاق الصفحة، وعند الربط
+        لاحقًا يُعالج المصدر **المعدَّل** لا الأصلي.
+        """
+        item = self._individual_editable_item()
+        editor = getattr(self, "unified_editor", None)
+        if item is None or editor is None or not editor.has_image():
+            if not silent:
+                QMessageBox.information(
+                    self, APP_NAME,
+                    "حدد صفًا واحدًا وحمّل صورته في المحرر قبل الحفظ.")
+            return None
+        result_bgr = editor.get_result_bgr()
+        if result_bgr is None:
+            if not silent:
+                QMessageBox.warning(self, APP_NAME, "تعذر قراءة ناتج المحرر.")
+            return None
+        target = self._editor_draft_path(item.source_name)
+        if target is None:
+            if not silent:
+                QMessageBox.warning(self, APP_NAME, "تعذر تحديد مكان حفظ المسودة.")
+            return None
+        try:
+            import cv2 as _cv2
+
+            ok, buffer = _cv2.imencode(".png", result_bgr)
+            if not ok:
+                raise RuntimeError("imencode فشل")
+            buffer.tofile(str(target))
+        except Exception as exc:
+            if not silent:
+                QMessageBox.warning(self, APP_NAME, f"تعذر حفظ التعديل: {exc}")
+            return None
+        drafts = getattr(self, "_editor_drafts", None)
+        if drafts is None:
+            drafts = {}
+            self._editor_drafts = drafts
+        drafts[item.source_name] = target
+        self._individual_editor_dirty = False
+        label = getattr(self, "individual_editor_state_label", None)
+        if label is not None:
+            label.setText(f"✓ حُفظ التعديل — {target.name}")
+        return target
 
     def _choose_individual_auto_crop(self, _checked: bool = True) -> None:
         self.individual_auto_crop_button.setChecked(True)
@@ -4705,7 +4755,7 @@ class MainWindow(QMainWindow):
         item = self._individual_editable_item()
         if item is None:
             self.individual_manual_crop_button.setChecked(False)
-            self.status_label.setText("حدد صفًا مرتبطًا واحدًا أولاً لاستخدام القص اليدوي.")
+            self.status_label.setText("حدد صفًا واحدًا أولاً لاستخدام القص اليدوي.")
             return
         source = self._result_path(item.source_path)
         if source is None:
@@ -4802,7 +4852,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 APP_NAME,
-                "حدد صفًا مرتبطًا واحدًا فقط لتعديل صورته. اربط الصف برقم الصنف أولاً إذا كان للمراجعة.",
+                "حدد صفًا واحدًا فقط لتعديل صورته.",
             )
             return
         manual_crop_enabled = self.individual_manual_crop_button.isChecked()
@@ -4813,8 +4863,22 @@ class MainWindow(QMainWindow):
                 "اسحب إطارًا أوليًا ثم ضع الزوايا الأربع على أركان المنتج، أو اختر القص الذكي التلقائي.",
             )
             return
-        if self.current_workspace is None:
-            QMessageBox.warning(self, APP_NAME, "مجلد المهمة الحالية غير متاح.")
+        # إصلاح علة المالك: الصورة **غير المرتبطة** لم تكن تُحفظ إطلاقًا
+        # (المحرك يرفع «اربط الصورة برقم صنف صحيح قبل تحسينها»). الآن
+        # تُحفظ تعديلاتها كمسوّدة على القرص فورًا، فلا يُفقد العمل،
+        # ويُعالج المصدر المعدَّل عند الربط لاحقًا.
+        if not item.item_code or self.current_workspace is None:
+            if preview_only:
+                self._invalidate_individual_preview()
+                return
+            saved = self._save_editor_draft()
+            if saved is not None and not getattr(self, "_headless_mode", False):
+                QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "حُفظ التعديل. الصورة غير مرتبطة برقم صنف بعد، فعند ربطها"
+                    " ستُعالَج الصورة المعدَّلة لا الأصلية.",
+                )
             return
 
         self._pending_individual_position = self._capture_results_position()
@@ -4850,6 +4914,20 @@ class MainWindow(QMainWindow):
                     f"تعذر تجهيز ناتج المحرر الموحد: {exc}",
                 )
                 return
+
+        # إكمال إصلاح علة المالك: إن لم توجد تعديلات حيّة في المحرر
+        # لكن هناك **مسوّدة محفوطة** لهذه الصورة (حُفِظت قبل الربط)،
+        # فالمعالجة تعتمد المسوّدة لا الأصل — وهذا يمنع فقد العمل
+        # اليدوي الذي كان يضيع سابقًا.
+        if edited_source_path is None:
+            drafts = getattr(self, "_editor_drafts", None) or {}
+            draft = drafts.get(item.source_name)
+            if draft is None:
+                candidate = self._editor_draft_path(item.source_name)
+                if candidate is not None and candidate.is_file():
+                    draft = candidate
+            if draft is not None and Path(draft).is_file():
+                edited_source_path = Path(draft)
 
         if edited_source_path is not None:
             # التعديلات طُبقت داخل المحرر — نعطل المعالجات المكررة في الـ pipeline
@@ -5472,6 +5550,11 @@ class MainWindow(QMainWindow):
         self._legacy_folder = folder
         self.current_workspace = folder
         self.current_result = self._legacy_result(plan, folder)
+        # 2.9.7 (يغلق A1 + A4): يجب أن يصير المجلد المنجز مساحة
+        # عمل كاملة الصلاحية. بدون حالة مهمة على القرص يفشل
+        # تعديل الباركود بـFileNotFoundError ويُعلن فاحص السلامة
+        # فقدانًا زائفًا لأنه لا يجد حالة يقارن بها.
+        legacy_state = self._persist_legacy_state(folder)
         position = self._capture_results_position() if keep_position else None
         self._populate_results(restore_position=position)
         self._show_results_page()
@@ -5509,6 +5592,14 @@ class MainWindow(QMainWindow):
             if applied["errors"]:
                 lines.append(f"أخطاء: {len(applied['errors'])} — "
                              f"{applied['errors'][0]}")
+            # 2.9.7: لا نصمت إن تعذر تثبيت الحالة، لأن المالك
+            # سيكتشف ذلك متأخرًا عند فشل تعديل الباركود.
+            if not legacy_state.get("state_written"):
+                detail = legacy_state.get("error") or "سبب غير معروف"
+                lines.append(
+                    "تنبيه: تعذر حفظ حالة المهمة في هذا المجلد، فقد لا "
+                    "يعمل تعديل الباركود. تأكد من صلاحية الكتابة في "
+                    f"المجلد.\nالتفاصيل: {detail}")
             lines.append("\nاضغط ★ على أي صورة لتجعلها صورة الواجهة للصنف.")
             QMessageBox.information(self, APP_NAME, "\n".join(lines))
 
@@ -5567,6 +5658,47 @@ class MainWindow(QMainWindow):
             report_csv="",
         )
 
+    def _persist_legacy_state(self, folder: Path) -> dict:
+        """يثبّت حالة مهمة حقيقية للمجلد المنجز ويودع مصادره.
+
+        2.9.7 — يغلق A1 (إعلان فقدان زائف) وA4 (تعذر تعديل
+        الباركود للملفات السابقة). القياس قبل الإصلاح على 12
+        صورة من مخرجات المالك: لا job_state.json ولا خزانة،
+        و`_load_state` ترفع FileNotFoundError فورًا.
+
+        لا ترفع استثناءً: فتح المجلد للعرض يجب أن ينجح حتى على
+        قرص للقراءة فقط؛ يُعاد تقرير ويُكمل العرض.
+        """
+        empty = {"state_written": False, "vault_deposited": False,
+                 "images": 0, "error": ""}
+        result = getattr(self, "current_result", None)
+        if result is None:
+            return empty
+        try:
+            from engine_v2.legacy_folder_v2 import ensure_legacy_job_state
+        except Exception as exc:  # pragma: no cover - حزمة بلا المحرك
+            empty["error"] = str(exc)
+            return empty
+
+        catalog_path = ""
+        cp = getattr(self, "catalog_path", None)
+        if cp:
+            catalog_path = str(cp)
+        options = None
+        try:
+            options = self._final_image_options()
+        except Exception:
+            options = None
+        try:
+            return ensure_legacy_job_state(
+                folder, result,
+                index=getattr(self, "v2_catalog_index", None),
+                catalog_path=catalog_path,
+                options=options)
+        except Exception as exc:  # pragma: no cover - دفاع أخير
+            empty["error"] = str(exc)
+            return empty
+
     # 2.9.5 — _open_bulk_rename حُذفت مع BulkRenameDialog نهائيًا.
     # قرار المالك: لا تكرار — مكان واحد للوظيفة. المجلدات
     # المنجزة تُفتح بـ_open_legacy_folder داخل جدول المراجعة نفسه.
@@ -5588,6 +5720,55 @@ class MainWindow(QMainWindow):
             self.catalog_status_label.setToolTip(str(self.catalog_path))
             self._register_catalog_index(self.catalog_path)
             self._update_controls()
+
+    def _ensure_catalog_index(self, timeout: float = 180.0) -> bool:
+        """يضمن توفر فهرس الإكسل **قبل** أي تسمية؛ يعيد نجاحه.
+
+        2.9.7 — علة توقيت حقيقية تُفقد الوحدات:
+        ``_register_catalog_index`` يحمل الفهرس في خيط خلفي، وكتالوج
+        المالك (22,087 صنفًا) يستغرق ثوانٍ. فإن بدأت الدفعة قبل
+        انتهائه كان ``_CATALOG_REF["index"] is None``، فتُرجع
+        ``_units_from_catalog()`` قائمة فارغة، فيسقط ``join_all_units``
+        إلى وحدة واحدة: ``10001043_حبه`` بدل ``10001043_حبه_كرتون``.
+
+        ولأنها علة **توقيت**، تظهر وتختفي بحسب سرعة الجهاز
+        وحجم الإكسل — وهذا أخطر من علة ثابتة لأنها تمر بالاختبار
+        على جهاز سريع وتفسد أسماء المالك على جهازه.
+
+        الحل: قبل كل دفعة ننتطر الفهرس الجاري، وإن لم يكن قد بدأ
+        نحمله متزامنًا — مع إبقاء الواجهة حية بـ``processEvents``.
+        """
+        from engine_v2 import integration_v2 as _integ
+        if getattr(self, "v2_catalog_index", None) is not None:
+            _integ.set_catalog_index(self.v2_catalog_index)
+            _integ.set_naming_data_root(str(DATA_ROOT))
+            return True
+        path = getattr(self, "catalog_path", None)
+        if path is None or not Path(path).is_file():
+            return False
+        thread = getattr(self, "_catalog_index_thread", None)
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        if thread is not None and thread.is_alive():
+            # التحميل جارٍ بالخلفية: انتطره بلا تجميد الواجهة.
+            while thread.is_alive() and time.monotonic() < deadline:
+                thread.join(0.05)
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+            if getattr(self, "v2_catalog_index", None) is not None:
+                return True
+        # لم يبدأ أو أخفق: حمّل متزامنًا — التسمية أولى من الاستجابة.
+        try:
+            from engine_v2.catalog_index_v2 import CatalogIndex
+            idx = CatalogIndex()
+            idx.load_excel(str(path))
+            self.v2_catalog_index = idx
+            _integ.set_catalog_index(idx)
+            _integ.set_naming_data_root(str(DATA_ROOT))
+            return True
+        except Exception as exc:  # pragma: no cover - دفاعي
+            print(f"[catalog] sync index load failed: {exc}", file=sys.stderr)
+            return False
 
     def _register_catalog_index(self, path: Path) -> None:
         """تحميل فهرس الإكسل وتسجيله لمحرك التسمية (join_all_units)
@@ -5612,7 +5793,11 @@ class MainWindow(QMainWindow):
                     self.legacy_recheck_requested.emit()
             except Exception as exc:
                 print(f"[catalog] index load failed: {exc}", file=sys.stderr)
-        threading.Thread(target=_load, daemon=True).start()
+        # 2.9.7: نحفظ مقبض الخيط ليقدر `_ensure_catalog_index`
+        # أن ينتطره بدل إعادة تحميل الإكسل مرة ثانية.
+        thread = threading.Thread(target=_load, daemon=True)
+        self._catalog_index_thread = thread
+        thread.start()
 
     def _refresh_legacy_after_catalog(self) -> None:
         """يعيد تصحيح المجلد المنجز المفتوح بعد وصول الإكسل."""
@@ -5719,6 +5904,10 @@ class MainWindow(QMainWindow):
             return
         # لا تستبدل نتيجة ناجحة قبل أن تكتمل المهمة الجديدة. تبقى القائمة
         # ومساحة العمل السابقة متاحتين إذا فشل Excel أو تعذرت الكتابة.
+        # 2.9.7: لا تبدأ دفعة قبل توفر فهرس الإكسل، وإلا سقطت
+        # سياسة join_all_units إلى وحدة واحدة ففُقدت وحدات الأسماء.
+        self.status_label.setText("تهيئة فهرس الأصناف قبل المعالجة...")
+        self._ensure_catalog_index()
         pending_workspace = self._new_workspace()
         self._pending_batch_workspace = pending_workspace
         self._set_busy(True)
@@ -5763,9 +5952,8 @@ class MainWindow(QMainWindow):
         self._show_results_page()
         self._set_busy(False)
         self._update_controls()
-        # 2.9.6 — تسخين البصمات البصرية في الخلفية فور انتهاء الدفعة،
-        # ليكون أول اختيار صف في لوحة الربط فوريًا بلا تجمّد.
-        QTimer.singleShot(0, self._warm_visual_signatures)
+        # 2.9.9 — أُلغي تسخين البصمات البصرية مع إلغاء نسبة التشابه:
+        # كان يقرأ كل صور الدفعة من القرص لبناء بصمات لم يبق لها فائدة.
         QMessageBox.information(
             self,
             APP_NAME,
@@ -6264,36 +6452,10 @@ class MainWindow(QMainWindow):
                 return row
         return -1
 
-    def _image_signature(self, item: BatchItemResult) -> tuple[float, ...]:
-        """Small centre-focused visual signature used only to propose, never to auto-link."""
-        path = self._result_path(item.source_path)
-        if path is None or not path.is_file():
-            return ()
-        cache_key = f"{path}:{path.stat().st_mtime_ns}:{path.stat().st_size}"
-        cached = self._visual_signature_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return ()
-        image = pixmap.toImage().scaled(36, 36, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        values: list[float] = []
-        # ستة عشر موضعاً في مركز الصورة تقلل أثر الخلفية والحواف الخارجية.
-        for y in (8, 14, 20, 26):
-            for x in (8, 14, 20, 26):
-                color = image.pixelColor(x, y)
-                values.extend((float(color.red()), float(color.green()), float(color.blue())))
-        signature = tuple(values)
-        self._visual_signature_cache[cache_key] = signature
-        return signature
-
-    def _visual_similarity(self, left: BatchItemResult, right: BatchItemResult) -> float:
-        first = self._image_signature(left)
-        second = self._image_signature(right)
-        if not first or len(first) != len(second):
-            return 0.0
-        mean_error = sum(abs(a - b) for a, b in zip(first, second)) / len(first)
-        return max(0.0, 1.0 - mean_error / 255.0)
+    # 2.9.9 — حُذفت `_image_signature` و`_visual_similarity` مع إلغاء نسبة
+    # التشابه. كانتا تقرأان الصورة من القرص وتقيسانها إلى 36×36 وتقارنان
+    # 16 نقطة مركزية فقط — مقياس هش يتأثر بأقل فرق إضاءة، لذلك لم يكن
+    # يعطي نتائج موثوقة. الربط الآن على عائلة الاسم والجيرة والباركود.
 
     @staticmethod
     def _filename_family(source_name: str) -> str:
@@ -6362,7 +6524,14 @@ class MainWindow(QMainWindow):
             item for item in all_items
             if item.source_name != reference.source_name and self._is_high_confidence_reference(item)
         ]
+        # 2.9.9 — بعد إلغاء نسبة التشابه، الاقتراح أصبح مبنيًا على دليلين
+        # موضوعيين لا على تخمين بصري: تطابق عائلة اسم الملف (الكاميرا
+        # تسمي صور المنتج الواحد بجذر مشترك) والتجاور المباشر في الترتيب.
+        # القرار يبقى يدويًا: هذا تحديد للمراجعة لا ربط تلقائي.
         family = self._filename_family(reference.source_name)
+        competing_families = {
+            self._filename_family(other.source_name) for other in competing
+        } - {family}
         proposed: list[tuple[float, int, BatchItemResult]] = []
         for row in range(max(0, anchor_row - 2), min(self.results_table.rowCount(), anchor_row + 3)):
             if row == anchor_row:
@@ -6373,28 +6542,30 @@ class MainWindow(QMainWindow):
             candidate = self._result_items_by_name.get(str(cell.data(Qt.UserRole) or ""))
             if candidate is None or candidate.status not in {"review", "error"}:
                 continue
-            similarity = self._visual_similarity(reference, candidate)
-            same_family = bool(family and family == self._filename_family(candidate.source_name))
-            required = 0.88 if same_family else 0.92
-            if similarity < required:
+            candidate_family = self._filename_family(candidate.source_name)
+            same_family = bool(family and family == candidate_family)
+            # لا نقترح مرشحًا ينتمي لعائلة صنف موثوق آخر — حماية من خلط الأصناف.
+            if candidate_family and candidate_family in competing_families:
                 continue
-            nearest_competitor = max(
-                (self._visual_similarity(other, candidate) for other in competing),
-                default=0.0,
-            )
-            if nearest_competitor and similarity < nearest_competitor + 0.06:
+            distance = abs(row - anchor_row)
+            if same_family:
+                score = 2.0 - (distance * 0.1)
+            elif distance == 1:
+                # مجاور مباشر بلا عائلة متعارضة: اقتراح أضعف لكن مفيد.
+                score = 1.0
+            else:
                 continue
-            proposed.append((similarity + (0.04 if same_family else 0.0), row, candidate))
+            proposed.append((score, row, candidate))
         proposed.sort(reverse=True, key=lambda entry: entry[0])
         proposed = proposed[:2]
         if not proposed:
             self.status_label.setText(
-                "لم يصل اقتراح الصور إلى حد الثقة العالي؛ استخدم Ctrl أو Shift لتحديدها يدويًا، ثم اربطها بالمرجع."
+                "لا يوجد مرشح واضح مجاور للمرجع; استخدم Ctrl أو Shift لتحديد الصور يدويًا، ثم اربطها بالمرجع."
             )
             QMessageBox.information(
                 self,
                 APP_NAME,
-                "لم يُحدَّد شيء تلقائيًا لأن الثقة غير كافية. بقي الربط اليدوي الجماعي متاحًا وآمنًا.",
+                "لم يُحدَّد شيء تلقائيًا: لا توجد صورة مجاورة تشترك مع المرجع في اسم الملف أو الترتيب. بقي الربط اليدوي الجماعي متاحًا وآمنًا.",
             )
             return
         selection = self.results_table.selectionModel()
@@ -6406,7 +6577,7 @@ class MainWindow(QMainWindow):
         selection.setCurrentIndex(anchor_index, QItemSelectionModel.NoUpdate)
         self._update_manual_selection_context()
         self.status_label.setText(
-            f"اقتراح محافظ: {len(proposed)} صورة. راجع التحديد ثم اضغط ربط الصور المحددة بصنف المرجع."
+            f"اقتراح محافز: {len(proposed)} صورة (حسب اسم الملف والترتيب). راجع التحديد ثم اضغط ربط الصور المحددة بصنف المرجع."
         )
         self._update_controls()
 
@@ -6434,187 +6605,42 @@ class MainWindow(QMainWindow):
             self.manual_reference_badge.setText(f"المرجع: {reference.item_code}")
             self.manual_reference_badge.setToolTip(reference_name)
 
-    def _visual_suggestion_for(self, unresolved: list) -> tuple["BatchItemResult | None", float]:
-        """يرشح بصريًا أفضل صورة مرتبطة تشبه الصور المحددة (لأن الصور
-        قد تأتي غير متتالية بعد الرفع). يرجع (المرشح، نسبة التشابه)."""
-        if self.current_result is None or not unresolved:
-            return None, 0.0
-        linked_items = [
-            item for item in self.current_result.items
-            if item.item_code
-            and item.source_name not in {t.source_name for t in unresolved}
-        ]
-        if not linked_items:
-            return None, 0.0
-        try:
-            from engine_v2 import visual_match_v2 as _vm
-            # 2.9.6 — لا يُبنى أي شيء هنا على خيط الواجهة. نقرأ من الكاش فقط،
-            # وما ينقص يُجدول للعامل الخلفي ثم يُحدّث الزر تلقائيًا عند الجاهزية.
-            missing: list[str] = []
-            tgt_sigs = []
-            for t in unresolved:
-                path = getattr(t, "source_path", "") or ""
-                if not path:
-                    continue
-                sig = self._visual_sig_lookup(path, missing)
-                if sig is not None and sig.ok:
-                    tgt_sigs.append(sig)
-            best_item, best_score = None, 0.0
-            for item in linked_items:
-                ref_sig = self._visual_sig_lookup(item.source_path, missing)
-                if not tgt_sigs:
-                    continue
-                if ref_sig is None or not ref_sig.ok:
-                    continue
-                score = max(_vm.pair_similarity(ts, ref_sig) for ts in tgt_sigs)
-                if score > best_score:
-                    best_item, best_score = item, score
-            if missing:
-                self._queue_visual_signatures(missing)
-            if not tgt_sigs:
-                return None, 0.0
-            return best_item, best_score
-        except Exception as exc:
-            print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
-            return None, 0.0
-
-    # ------------------------------------------------------------------
-    # 2.9.6 — البصمات البصرية: كاش LRU + بناء في الخلفية
-    # ------------------------------------------------------------------
-    def _visual_sig_lookup(self, path: str, missing: list[str] | None = None):
-        """يقرأ البصمة من الكاش فقط — ولا يبنيها أبدًا على خيط الواجهة.
-
-        إن لم تكن جاهزة، يُضاف المسار إلى `missing` ليُبنى في الخلفية."""
-        if not path:
-            return None
-        key = str(path)
-        lru = self._visual_sig_lru
-        if key in lru:
-            lru.move_to_end(key)
-            return lru[key]
-        if missing is not None and key not in self._visual_sig_failed:
-            missing.append(key)
-        return None
-
-    def _queue_visual_signatures(self, paths: Iterable[str]) -> None:
-        """يجدول بناء بصمات في الخلفية دون تعطيل الواجهة إطلاقًا."""
-        added = False
-        for path in paths:
-            key = str(path or "")
-            if not key or key in self._visual_sig_lru:
-                continue
-            if key in self._visual_sig_pending or key in self._visual_sig_failed:
-                continue
-            self._visual_sig_pending.add(key)
-            added = True
-        if added and not self._visual_warm_timer.isActive():
-            self._visual_warm_timer.start()
-
-    def _flush_visual_signature_queue(self) -> None:
-        """يشغّل عاملًا خلفيًا واحدًا لبناء كل البصمات المنتظرة."""
-        if not self._visual_sig_pending:
-            return
-        worker = self._visual_sig_worker
-        if worker is not None and worker.isRunning():
-            # العامل مشغول — أعد المحاولة بعد قليل بدل إنشاء عامل ثانٍ.
-            self._visual_warm_timer.start()
-            return
-        batch = sorted(self._visual_sig_pending)
-        self._visual_sig_pending.clear()
-        try:
-            worker = VisualSignatureWorker(batch)
-        except Exception as exc:
-            print(f"[link] visual signature worker failed to start: {exc}", file=sys.stderr)
-            return
-        self._visual_sig_worker = worker
-        worker.ready.connect(self._on_visual_signatures_ready)
-        self._track_worker(worker)
-        worker.start()
-
-    def _on_visual_signatures_ready(self, built: object) -> None:
-        """يستقبل البصمات الجاهزة ويحدّث الاقتراح مرة واحدة فقط."""
-        if not isinstance(built, dict):
-            return
-        lru = self._visual_sig_lru
-        for key, sig in built.items():
-            if sig is None or not getattr(sig, "ok", False):
-                self._visual_sig_failed.add(key)
-                continue
-            lru[key] = sig
-            lru.move_to_end(key)
-        while len(lru) > self._visual_sig_capacity:
-            lru.popitem(last=False)
-        if self._visual_sig_pending and not self._visual_warm_timer.isActive():
-            self._visual_warm_timer.start()
-        try:
-            self._refresh_smart_link_button()
-        except Exception:
-            pass
-
-    def _warm_visual_signatures(self) -> None:
-        """تسخين مسبق: يبني بصمات كل صور الدفعة في الخلفية فور انتهائها،
-        فيكون أول اختيار صف فوريًا بدل أن ينتظر المستخدم ثوانٍ."""
-        result = self.current_result
-        if result is None:
-            return
-        paths = [
-            getattr(item, "source_path", "") or ""
-            for item in getattr(result, "items", []) or []
-        ]
-        self._queue_visual_signatures([p for p in paths if p])
-
-    def _visual_sig_cached(self, path: str):
-        """متوافق مع الإصدارات السابقة — يقرأ من الكاش، ولا يبني إلا عند
-        الاستدعاء الصريح خارج مسار الواجهة التفاعلية."""
-        sig = self._visual_sig_lookup(path)
-        if sig is not None:
-            return sig
-        try:
-            from engine_v2 import visual_match_v2 as _vm
-            sig = _vm.build_signature(path)
-        except Exception:
-            sig = None
-        if sig is not None and getattr(sig, "ok", False):
-            self._visual_sig_lru[str(path)] = sig
-            self._visual_sig_lru.move_to_end(str(path))
-            while len(self._visual_sig_lru) > self._visual_sig_capacity:
-                self._visual_sig_lru.popitem(last=False)
-        return sig
+    # 2.9.9 — حُذفت منظومة البصمات البصرية بالكامل مع إلغاء نسبة التشابه:
+    # `_visual_suggestion_for` و`_visual_sig_lookup` و`_queue_visual_signatures`
+    # و`_flush_visual_signature_queue` و`_on_visual_signatures_ready`
+    # و`_warm_visual_signatures` و`_visual_sig_cached`. كانت تقرأ كل صورة من
+    # القرص وتفكّ ترميزها لبناء بصمة، ثم تعرض نسبة مئوية لم تكن موثوقة.
+    # الربط الآن بالباركود والاسم والجيرة واليد — أسرع وأدق وبلا حسابات زائدة.
 
     def _refresh_smart_link_button(self) -> None:
-        """يُحدّث الزر الذكي: الترشيح البصري أولًا (الصور قد تكون غير
-        متتالية)، ثم أقرب مرتبطة أعلى القائمة كخيار احتياطي.
+        """يُحدّث الزر الذكي: يقترح صنف أقرب صورة مرتبطة أعلى القائمة.
+
+        2.9.9 — أُلغي الترشيح البصري ونسبة التشابه بطلب المالك. الزر الآن
+        يعتمد دليلاً واحداً واضحاً ومفهوماً للمستخدم: أقرب صورة مرتبطة فوق
+        الصور المحددة — وهو ترتيب التصوير الطبيعي. ولأنه لم يبق أي حساب
+        بصري، أصبح تحديث الزر فوريًا تمامًا بلا أي قراءة من القرص.
         القرار يبقى يدويًا بالكامل — الزر يقترح ولا يربط إلا بضغطة المستخدم."""
         if not hasattr(self, "smart_link_button"):
             return
         unresolved, nearest_item = self._nearest_link_context()
-        if not unresolved:
+        if not unresolved or nearest_item is None:
             self.smart_link_button.setVisible(False)
             self._smart_link_target_code = ""
             return
-        visual_item, visual_score = self._visual_suggestion_for(unresolved)
-        # الترشيح البصري يتقدم عند تشابه موثوق (≥62%)، وإلا نقترح الأقرب فوقها.
-        if visual_item is not None and visual_score >= 0.62:
-            reference_item, badge = visual_item, f" ★ تشابه {visual_score:.0%}"
-        elif nearest_item is not None:
-            reference_item, badge = nearest_item, ""
-        else:
-            self.smart_link_button.setVisible(False)
-            self._smart_link_target_code = ""
-            return
+        reference_item = nearest_item
         self._smart_link_target_code = reference_item.item_code
         display_name = reference_item.product_name or reference_item.item_code
         # اسم مختصر للزر — الاسم الكامل في التلميح وبطاقة الصنف أعلى المعاينة.
         short = display_name if len(display_name) <= 30 else display_name[:28] + "…"
         count_txt = "صورة" if len(unresolved) == 1 else f"{len(unresolved)} صور"
         self.smart_link_button.setText(
-            f"✔ اربط {count_txt} بـ: {short} ({reference_item.item_code}){badge}")
+            f"✔ اربط {count_txt} بـ: {short} ({reference_item.item_code})")
         self.smart_link_button.setToolTip(
             f"ضغطة واحدة تربط {count_txt} بالصنف:\n"
             f"{display_name}\n"
             f"رقم الصنف: {reference_item.item_code}"
             + (f" • الباركود: {reference_item.barcode}" if reference_item.barcode else "")
-            + (f"\nالترشيح بصري — نسبة التشابه {visual_score:.0%} (الصور لا يلزم أن تكون متتالية)." if badge else "\nالترشيح حسب أقرب صورة مرتبطة أعلى القائمة.")
+            + "\nالترشيح حسب أقرب صورة مرتبطة أعلى القائمة."
             + "\nالتسمية النهائية (-1، -2…) تُطبّق تلقائيًا — والتراجع متاح من الجدول،\n"
             "وإن لم يكن هذا هو الصنف الصحيح استخدم (ربط بصورة أخرى) أو اكتب الصنف في (ربط الآن)."
         )
@@ -6803,43 +6829,20 @@ class MainWindow(QMainWindow):
                 self, APP_NAME, "لا توجد صور مرتبطة بعد لاختيار الصنف منها.")
             return
 
-        # اقتراح بصري تلقائي: المنتج نفسه من زوايا أخرى (أمام/جنب/خلف).
-        # 2.9.6 — لا نبني أي بصمة هنا على خيط الواجهة؛ فتح الحوار يجب أن
-        # يكون فوريًا. نقرأ من الكاش المُسخَّن، وما ينقص يُجدول للخلفية
-        # فيستفيد منه الفتح التالي؛ وإن لم تتوفر بصمات بقي الترتيب الطبيعي.
-        similarity: dict[str, float] = {}
-        try:
-            from engine_v2 import visual_match_v2 as _vm
-            missing: list[str] = []
-            tgt_sigs = []
-            for t in targets:
-                path = getattr(t, "source_path", "") or ""
-                if not path:
-                    continue
-                sig = self._visual_sig_lookup(path, missing)
-                if sig is not None and sig.ok:
-                    tgt_sigs.append(sig)
-            if tgt_sigs:
-                for item in linked_items:
-                    ref_sig = self._visual_sig_lookup(item.source_path, missing)
-                    if ref_sig is None or not ref_sig.ok:
-                        continue
-                    best = max(_vm.pair_similarity(ts, ref_sig)
-                               for ts in tgt_sigs)
-                    similarity[item.source_name] = best
-            else:
-                for item in linked_items:
-                    self._visual_sig_lookup(item.source_path, missing)
-            if missing:
-                self._queue_visual_signatures(missing)
-        except Exception as exc:
-            print(f"[link] visual suggestion failed: {exc}", file=sys.stderr)
+        # 2.9.9 — أُلغي الترتيب البصري ونسبة التشابه بطلب المالك. الترتيب
+        # الآن بالقرب في الجدول من الصور المحددة: أقرب صورة مرتبطة تأتي أولاً،
+        # وهو ترتيب التصوير الطبيعي ومفهوم للمستخدم بلا أرقام غامضة.
+        # وفتح الحوار أصبح فوريًا تمامًا: لا قراءة أقراص ولا فكّ ترميز إطلاقًا.
+        target_rows = [self._row_for_source_name(t.source_name) for t in targets]
+        target_rows = [r for r in target_rows if r >= 0]
 
-        def _sim_of(item) -> float:
-            return similarity.get(item.source_name, 0.0)
+        def _row_distance(item) -> tuple[int, str]:
+            row = self._row_for_source_name(item.source_name)
+            if row < 0 or not target_rows:
+                return (10**6, item.source_name)
+            return (min(abs(row - tr) for tr in target_rows), item.source_name)
 
-        # رتب القائمة: الأقرب بصريًا أولاً
-        linked_items = sorted(linked_items, key=_sim_of, reverse=True)
+        linked_items = sorted(linked_items, key=_row_distance)
 
         from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QListWidget,
                                        QListWidgetItem, QVBoxLayout, QLineEdit,
@@ -6872,15 +6875,9 @@ class MainWindow(QMainWindow):
                 hay = f"{item.product_name} {item.item_code} {item.barcode}"
                 if needle and needle not in hay:
                     continue
-                sim = _sim_of(item)
-                sim_txt = ""
-                if sim >= 0.85:
-                    sim_txt = f" ★ تطابق بصري عالٍ جدًا {sim:.0%}"
-                elif sim >= 0.74:
-                    sim_txt = f" ★ تطابق بصري عالٍ {sim:.0%}"
-                elif sim >= 0.62:
-                    sim_txt = f" • تشابه محتمل {sim:.0%}"
-                label = (f"{item.product_name or 'صنف'}{sim_txt}\n"
+                # 2.9.9 — لا شارات نسبة تشابه بعد الآن: الاسم والرقم والباركود
+                # والمصغرة هي الدليل الموثوق، والترتيب بالقرب في الجدول.
+                label = (f"{item.product_name or 'صنف'}\n"
                          f"{item.item_code} • {item.barcode or 'بلا باركود'}")
                 li = QListWidgetItem(self._result_thumbnail_icon(item), label)
                 li.setData(Qt.UserRole, item.item_code)
@@ -6892,18 +6889,8 @@ class MainWindow(QMainWindow):
         _fill()
 
         buttons = QDialogButtonBox()
-        best_sim = _sim_of(linked_items[0]) if linked_items else 0.0
-        if best_sim >= 0.62:
-            auto_btn = buttons.addButton(
-                f"ربط بالأقرب بصريًا ({best_sim:.0%})",
-                QDialogButtonBox.AcceptRole)
-            auto_btn.setMinimumHeight(40)
-            auto_btn.setStyleSheet(
-                "background:#1a7a4a; color:white; font-weight:700;")
-
-            def _pick_best():
-                lst.setCurrentRow(0)
-            auto_btn.clicked.connect(_pick_best)
+        # 2.9.9 — حُذف زر "ربط بالأقرب بصريًا" مع إلغاء نسبة التشابه.
+        # القائمة مرتّبة بالقرب والأول محدد مسبقًا، فـ"ربط الآن" يكفي.
         ok_btn = buttons.addButton("ربط الآن", QDialogButtonBox.AcceptRole)
         buttons.addButton("إلغاء", QDialogButtonBox.RejectRole)
         ok_btn.setMinimumHeight(40)
@@ -6929,7 +6916,7 @@ class MainWindow(QMainWindow):
             for t in targets:
                 _lrn.record_link_decision(
                     source=t.source_name, item_code=reference,
-                    visual_score=similarity.get(t.source_name, 0.0),
+                    visual_score=0.0,  # 2.9.9 — أُلغيت نسبة التشابه
                     accepted=True)
         except Exception:
             pass
@@ -6984,7 +6971,7 @@ class MainWindow(QMainWindow):
 
     def _smart_link_clicked(self) -> None:
         """تنفيذ اقتراح الزر الذكي — يربط بالصنف المعروض على الزر نفسه
-        (المرشح بصريًا أو الأقرب أعلى القائمة). القرار يدوي: لا ربط إلا بهذه الضغطة."""
+        (صنف أقرب صورة مرتبطة أعلى القائمة). القرار يدوي: لا ربط إلا بهذه الضغطة."""
         unresolved, nearest_item = self._nearest_link_context()
         if not unresolved:
             QMessageBox.information(
@@ -6994,13 +6981,9 @@ class MainWindow(QMainWindow):
             )
             return
         target_code = str(getattr(self, "_smart_link_target_code", "") or "")
-        visual_score = 0.0
-        if not target_code:
-            visual_item, visual_score = self._visual_suggestion_for(unresolved)
-            if visual_item is not None and visual_score >= 0.62:
-                target_code = visual_item.item_code
-            elif nearest_item is not None:
-                target_code = nearest_item.item_code
+        # 2.9.9 — أُلغي المسار البصري: الاحتياط الوحيد هو أقرب صورة مرتبطة.
+        if not target_code and nearest_item is not None:
+            target_code = nearest_item.item_code
         if not target_code:
             QMessageBox.information(
                 self,
@@ -7016,7 +6999,7 @@ class MainWindow(QMainWindow):
                 _lrn.record_link_decision(
                     source=t.source_name,
                     item_code=target_code,
-                    visual_score=visual_score,
+                    visual_score=0.0,  # 2.9.9 — أُلغيت نسبة التشابه
                     accepted=True,
                 )
         except Exception:
@@ -7386,9 +7369,95 @@ class MainWindow(QMainWindow):
                 return unresolved, candidate
         return unresolved, None
 
+    @staticmethod
+    def _norm_path_key(path: Path | str) -> str:
+        """مفتاح مسار موحّد للمقارنة بين المنصّات (2.9.9).
+
+        ويندوز لا يفرق بين حالات الأحرف ويقبل الفاصلين معًا،
+        فمقارنة النصوص الخام تفشل بصمت ويبقى `output_path`
+        مشيرًا لملف أُعيدت تسميته ⇒ تختفي الصورة. يُحلّ الرابط
+        الرمزي إن أمكن، ويُوحّد الفاصل وحالة الأحرف.
+        """
+        text = str(path)
+        try:
+            text = os.path.realpath(text)
+        except Exception:
+            text = os.path.abspath(text)
+        return os.path.normcase(os.path.normpath(text))
+
+    def _recover_output_path(self, item: BatchItemResult,
+                             code: str) -> Path | None:
+        """يبحث عن ملف إخراج الصورة حين يموت المسار المحفوظ (2.9.9).
+
+        أبلغ المالك أن ضغط ★ يُنتج «ملف الإخراج غير موجود» ثم
+        تُخفى الصورة. يحدث هذا متى تغير الملف على القرص دون أن
+        يتبعه السجل (ضغطة سابقة، أو تعديل يدوي في مستكشف
+        الملفات). بدل إعلان الفقد، نبحث في مجلد الإخراج بثلاث
+        محاولات متدرجة حسب الدقة.
+
+        ترجع المسار الموجود فعلًا أو ``None``.
+        """
+        exts = (".webp", ".png", ".jpg", ".jpeg")
+        # مجلدات مرشّحة للبحث: مجلد المسار المحفوظ، ثم مجلد المصدر،
+        # ثم مساحة العمل ومجلد `output` فيها.
+        dirs: list[Path] = []
+        for raw in (item.output_path, item.review_path, item.source_path):
+            p = self._result_path(raw) if raw else None
+            if p is not None and p.parent.is_dir() and p.parent not in dirs:
+                dirs.append(p.parent)
+        if self.current_workspace is not None:
+            for extra in (self.current_workspace,
+                          self.current_workspace / "output"):
+                if extra.is_dir() and extra not in dirs:
+                    dirs.append(extra)
+        if not dirs:
+            return None
+
+        stored = Path(str(item.output_path or "")).name
+        stem = Path(stored).stem if stored else ""
+        for folder in dirs:
+            # محاولة 1 — نفس الجذع بامتداد مختلف (webp ⇒ png…)
+            if stem:
+                for ext in exts:
+                    cand = folder / f"{stem}{ext}"
+                    if cand.is_file():
+                        return cand
+        # محاولة 2 — مطابقة رقم الصنف: أي ملف يبدأ بـ`{code}_`
+        # ولم يُستهلَك من صف آخر في الجدول.
+        if not code:
+            return None
+        taken = set()
+        result = getattr(self, "current_result", None)
+        if result is not None:
+            for other in result.items:
+                if other is item or not other.output_path:
+                    continue
+                q = self._result_path(other.output_path)
+                if q is not None and q.is_file():
+                    taken.add(self._norm_path_key(q))
+        for folder in dirs:
+            try:
+                pool = sorted(folder.glob(f"{code}_*"))
+            except OSError:
+                continue
+            for cand in pool:
+                if not cand.is_file() or cand.suffix.lower() not in exts:
+                    continue
+                if self._norm_path_key(cand) in taken:
+                    continue
+                return cand
+        return None
+
     def _set_primary_image(self) -> None:
         """يجعل الصورة المحددة صورة الواجهة الرئيسية للصنف (بلا رقم)،
-        ويعيد ترقيم بقية صور الصنف -1، -2… على القرص وفي الجدول."""
+        ويعيد ترقيم بقية صور الصنف -2، -3… على القرص وفي الجدول.
+
+        2.9.9 — أُغلقت مشكلة المالك «بعد ضغط ★ يتعذر على البرنامج
+        العثور على الصورة ويخفيها» بثلاثة إصلاحات مجتمعة:
+        استرجاع المسار الميت من مجلد الإخراج، وتطبيع مفاتيح
+        `renames` قبل المطابقة، وترجمة `source_name` القديم إلى
+        الجديد عند استعادة موقع الجدول.
+        """
         selected = self._selected_result_item()
         if selected is None or not selected.item_code or self.current_result is None:
             QMessageBox.information(
@@ -7409,15 +7478,40 @@ class MainWindow(QMainWindow):
             key=lambda it: (it.source_name != selected.source_name,
                             self._row_for_source_name(it.source_name)),
         )
+        # 2.9.9 — استرجاع ذكي بدل الإجهاض: كان غياب ملف واحد
+        # يُوقف العملية كلها بـ«ملف الإخراج غير موجود»، وهي أكثر
+        # شكوى المالك. المسار قد يقدم لأن ضغطة سابقة أعادت
+        # التسمية، أو لأن الملف نُقل يدويًا. الآن يُبحث عنه في
+        # مجلد الإخراج بمطابقة رقم الصنف، ولا يُجهَض إلا إن بقيت
+        # أقل من صورتين قابلتين للترقيم.
         paths = []
+        recovered: list[str] = []
+        skipped: list[str] = []
+        selected_path: Path | None = None
         for it in group_sorted:
             p = self._result_path(it.output_path)
             if p is None or not p.is_file():
-                QMessageBox.warning(
-                    self, APP_NAME,
-                    f"ملف الإخراج غير موجود للصورة: {it.source_name}")
-                return
+                p = self._recover_output_path(it, code)
+                if p is not None:
+                    recovered.append(it.source_name)
+            if p is None or not p.is_file():
+                skipped.append(it.source_name)
+                continue
+            if it.source_name == selected.source_name:
+                selected_path = p
             paths.append(p)
+        if selected_path is None:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "تعذر العثور على ملف الإخراج للصورة المحددة:\n"
+                f"{selected.source_name}\n\n"
+                "أعد تشغيل الدفعة أو افتح المجلد من جديد ثم أعد المحاولة.")
+            return
+        if len(paths) < 2:
+            QMessageBox.information(
+                self, APP_NAME,
+                "لم يُوجد سوى ملف إخراج واحد للصنف — هو الرئيسي بالفعل.")
+            return
         try:
             from engine_v2 import integration_v2 as _iv
             from engine_v2.primary_image_v2 import renumber_item_images
@@ -7436,12 +7530,23 @@ class MainWindow(QMainWindow):
         # مُعاد التسمية والجدول قديمًا — ولذلك يُستبدل العنصر
         # بنسخة معدّلة عبر dataclasses.replace داخل قائمة جديدة.
         import dataclasses as _dc
+        # 2.9.9 — تطبيع المسارات قبل المطابقة. مقارنة `str(old)`
+        # الخام تفشل بصمت على ويندوز متى اختلفت حالة الأحرف أو
+        # الفواصل أو وجد رابط رمزي — فيُعاد التسمية على القرص
+        # ويبقى `output_path` قديمًا ⇒ الصورة تختفي. هذا أحد وجوه
+        # مشكلة «ملف الإخراج غير موجود» التي أبلغ عنها المالك.
+        renames_norm = {self._norm_path_key(k): v
+                        for k, v in res.renames.items()}
         updated: dict[int, BatchItemResult] = {}
+        renamed_names: dict[str, str] = {}   # source_name القديم ⇒ الجديد
         for it in group:
             old = self._result_path(it.output_path)
-            if old is None or str(old) not in res.renames:
+            if old is None:
                 continue
-            new_path = Path(res.renames[str(old)])
+            target = renames_norm.get(self._norm_path_key(old))
+            if target is None:
+                continue
+            new_path = Path(target)
             rel = str(new_path)
             if self.current_workspace is not None:
                 try:
@@ -7463,21 +7568,56 @@ class MainWindow(QMainWindow):
                     unit_txt = " — الوحدة: " + base[0].split(
                         " — الوحدة: ", 1)[1]
                 fields["explanation"] = f"مجلد منجز — {star}{unit_txt}{tail}"
+                renamed_names[it.source_name] = new_path.name
             updated[id(it)] = _dc.replace(it, **fields)
+        # 2.9.9 — يُلتقط الموقع **قبل** إعادة بناء الجدول، ويُترجم
+        # `source_name` القديم إلى الجديد. كان التقاطه بلا ترجمة يجعل
+        # `_restore_results_position` يبحث عن اسم لم يعد موجودًا فيقع على
+        # `fallback_row` أو يُلغي التحديد ⇒ تُفرّغ المعاينة وتختفي
+        # الصورة من أمام المالك بعد ضغط ★ مباشرة.
+        position = self._capture_results_position()
+        if position is not None and position[0] in renamed_names:
+            position = (renamed_names[position[0]], position[1], position[2])
+        # البحث النشط قد يُخفي الصف بعد تغير الاسم (الاسم الجديد لا
+        # يطابق نص البحث) ⇒ تختفي الصورة. نُنبّه ونُفرغ البحث
+        # لأن أولوية المالك أن يرى الصورة لا أن يُحفظ المُرشّح.
+        search_cleared = False
+        if renamed_names and self.result_search_edit.text().strip():
+            self.result_search_edit.blockSignals(True)
+            self.result_search_edit.clear()
+            self.result_search_edit.blockSignals(False)
+            search_cleared = True
         if updated:
             new_items = [updated.get(id(it), it)
                          for it in self.current_result.items]
             self.current_result = _dc.replace(self.current_result,
                                               items=new_items)
-        position = self._capture_results_position()
         self._populate_results(restore_position=position)
+        extra = len(paths) - 1
+        note = []
+        if recovered:
+            note.append(f"استُرجع مسار {len(recovered)} صورة تلقائيًا")
+        if skipped:
+            note.append(f"تُجاوزت {len(skipped)} صورة مفقودة")
+        if search_cleared:
+            note.append("أُفرغ مرشّح البحث لتبقى الصورة مرئية")
+        note_txt = (" — " + "، ".join(note)) if note else ""
         self.status_label.setText(
             f"تم تعيين الصورة الرئيسية للصنف {code} وإعادة ترقيم "
-            f"{len(group_sorted) - 1} صورة إضافية (-1، -2…).")
+            f"{extra} صورة إضافية (-2، -3…){note_txt}.")
+        detail = ""
+        if recovered:
+            detail += ("\n\nملاحظة: استُرجع مسار "
+                       f"{len(recovered)} صورة تلقائيًا من مجلد الإخراج.")
+        if skipped:
+            detail += ("\n\nتُجاوزت صور لم يُعثر على ملفات إخراجها: "
+                       + "، ".join(skipped[:5])
+                       + (" …" if len(skipped) > 5 else ""))
         QMessageBox.information(
             self, APP_NAME,
             "تم التعيين بنجاح — الصورة المحددة أصبحت واجهة الصنف بلا رقم،\n"
-            f"وأعيد ترقيم بقية صور الصنف تلقائيًا.\nالملف الرئيسي: {Path(res.primary_path).name}")
+            f"وأعيد ترقيم بقية صور الصنف تلقائيًا (-2، -3…).\n"
+            f"الملف الرئيسي: {Path(res.primary_path).name}{detail}")
 
     def _begin_manual_links(
         self,
@@ -7561,9 +7701,8 @@ class MainWindow(QMainWindow):
         else:
             message = f"تم تعديل/ربط {count} صور وتحديث أرقام الأصناف النهائية."
         self.status_label.setText(f"{message} تم تحديث التقارير وحزمة ZIP في الخلفية.")
-        # 2.9.6 — الربط يُغيّر مسارات المخرجات؛ سخّن البصمات الناقصة
-        # في الخلفية ليبقى انتقال المراجعة بين الأصناف فوريًا.
-        QTimer.singleShot(0, self._warm_visual_signatures)
+        # 2.9.9 — أُلغي تسخين البصمات البصرية مع إلغاء نسبة التشابه:
+        # كان يقرأ كل صور الدفعة من القرص لبناء بصمات لم يبق لها فائدة.
 
     def _open_results_folder(self) -> None:
         if self.current_workspace and self.current_workspace.is_dir():
@@ -7817,8 +7956,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         # مؤقتات الواجهة: إيقافها يمنع نبضات بعد التدمير
-        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer",
-                     "_visual_warm_timer"):
+        # 2.9.9 — حُذف `_visual_warm_timer` مع إلغاء نسبة التشابه.
+        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer"):
             timer = getattr(self, attr, None)
             if timer is not None:
                 try:
@@ -8325,8 +8464,30 @@ def main() -> int:
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
+
+    # حصانة الخروج: ``closeEvent`` وحده لا يكفي. إن انتهى التطبيق بمسار
+    # آخر (``app.quit()`` من قائمة النظام، إشارة SIGTERM، أو إغلاق آخر
+    # نافذة بلا حدث إغلاق) تُدمَّر ``MainWindow`` وخيوطها لا تزال تعمل
+    # ⇒ «QThread: Destroyed while thread is still running» ⇒ SIGABRT
+    # فيختفي التطبيق بلا رسالة ويفقد المالك عمله. ربط ``aboutToQuit``
+    # يضمن إيقافًا منظمًا في **كل** مسارات الخروج لا في الإغلاق اليدوي وحده.
+    def _quit_guard() -> None:
+        try:
+            window._shutdown_workers()
+        except Exception:
+            pass
+
+    try:
+        app.aboutToQuit.connect(_quit_guard)
+    except Exception:
+        pass
+
     window.show()
-    return int(app.exec())
+    exit_code = int(app.exec())
+    # حزام أمان ثانٍ: إن لم تُطلق ``aboutToQuit`` (مسارات خروج شاذّة)
+    # نوقف الخيوط هنا قبل أن يجمع بايثون النافذة.
+    _quit_guard()
+    return exit_code
 
 
 if __name__ == "__main__":

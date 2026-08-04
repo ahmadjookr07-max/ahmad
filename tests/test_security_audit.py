@@ -9,11 +9,19 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/src")
-sys.path.insert(0, "/home/ubuntu/v2_project/app_v2/windows_app")
+# كان هذا الملف يحقن مسارين مطلقين من بيئة جلسة قديمة
+# (`/home/ubuntu/v2_project/app_v2/...`) فكان يسقط فورًا بـ
+# ModuleNotFoundError في أي بيئة أخرى — أي أن التدقيق الأمني
+# لم يكن يُنفَّذ فعليًا. الأصوب استنباط الجذر من موقع الملف
+# كما تفعل بقية الحزمة، فيصير محمولًا على أي بيئة.
+_ROOT = Path(__file__).resolve().parent.parent
+for _extra in (_ROOT / "src", _ROOT / "windows_app"):
+    if _extra.is_dir() and str(_extra) not in sys.path:
+        sys.path.insert(0, str(_extra))
 
-from engine_v2 import license_v2 as lv
+from engine_v2 import license_v2 as lv  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -150,7 +158,8 @@ os.makedirs("/tmp/sec_imgs", exist_ok=True)
 with open("/tmp/sec_imgs/fake.webp", "wb") as f:
     f.write(b"garbage-image-bytes")
 try:
-    r = BatchRefiner("/home/ubuntu/v2_project/models_v2",
+    from engine_v2.paths_v2 import models_dir
+    r = BatchRefiner(str(models_dir()),
                      RefineOptions(recut=False, enhance=True, frame=True,
                                    fix_names=False, workers=1))
     res = r.run("/tmp/sec_imgs", "/tmp/sec_out", progress=None)

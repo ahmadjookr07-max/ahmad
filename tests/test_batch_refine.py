@@ -116,8 +116,11 @@ try:
         # التسمية من الإكسل بنمط dash: الأولى بلا لاحقة ثم -2
         check("naming_primary", "10012345_حبه.webp" in outs,
               str([o for o in outs if o.startswith("10012345")]))
-        # نمط dash: الرئيسية بلا رقم، والإضافية تبدأ من -1
-        check("naming_dash_seq", "10012345_حبه-1.webp" in outs,
+        # 2.9.9 — الإضافية تحمل ترتيبها الحقيقي فتبدأ من -2؛
+        # كان -1 يوهم أنها الأولى فيتداخل مع الواجهة.
+        check("naming_dash_seq", "10012345_حبه-2.webp" in outs,
+              str([o for o in outs if o.startswith("10012345")]))
+        check("naming_no_dash_one", "10012345_حبه-1.webp" not in outs,
               str([o for o in outs if o.startswith("10012345")]))
         check("unit_literal_kees",
               any(o.startswith("10021777_كيس") for o in outs),

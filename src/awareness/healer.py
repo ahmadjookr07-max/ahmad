@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import identity, journal, ledger as ledger_mod, vitals
-from .vitals import Finding, HealthReport, Severity
+from .vitals import Finding, HealthReport
 
 __all__ = [
     "Risk",

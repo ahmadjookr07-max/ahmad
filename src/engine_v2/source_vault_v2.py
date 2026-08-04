@@ -100,12 +100,37 @@ def _link_or_copy(source: Path, target: Path) -> bool:
 
 
 # ------------------------------------------------------------------ الخزانة
+def entry_key(path: str | Path) -> str:
+    r"""مفتاح المدخل: المسار المطلق المُطبّع لا اسم الملف.
+
+    2.9.7 (إصلاح فقد صور): كان المفتاح اسم الملف، فصورتان
+    مختلفتان تتشاركان الاسم من مجلدين (``A/PHOTO-1.png``
+    و ``B/PHOTO-1.png``) تتصادمان في المانيفست وتُطمَس إحداهما
+    — فيفقد المالك صورة بلا إنذار. المسار المُطبّع يميّزهما.
+
+    ``normcase`` لأن الويندوز لا يفرق بين حالة الأحرف ويقبل ``/`` و ``\``.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        resolved = str(Path(text).resolve())
+    except (OSError, ValueError, RuntimeError):
+        resolved = os.path.abspath(text)
+    return os.path.normcase(os.path.normpath(resolved))
+
+
 @dataclass
 class VaultEntry:
     name: str
     vault_name: str
     fingerprint: str
     original_path: str
+
+    @property
+    def key(self) -> str:
+        """مفتاح هذا المدخل في الخزانة (المسار المُطبّع)."""
+        return entry_key(self.original_path)
 
 
 @dataclass
@@ -151,8 +176,12 @@ class SourceVault:
                     original_path=str(raw.get("original_path") or ""))
             except (TypeError, ValueError):
                 continue
-            if entry.name:
-                vault.entries[entry.name] = entry
+            if not entry.name:
+                continue
+            # 2.9.7: المفتاح المسار المُطبّع. مانيفست قديم بلا مسار
+            # أصلي يُفترض بالاسم للتوافق الخلفي فلا تضيع خزانة قديمة.
+            key = entry.key or entry.name
+            vault.entries[key] = entry
         return vault
 
     def save(self) -> None:
@@ -180,15 +209,24 @@ class SourceVault:
             if not source.is_file():
                 continue
             name = source.name
-            vault_name = self._unique_vault_name(name)
-            target = self.root / vault_name
-            existing = self.entries.get(name)
+            key = entry_key(source)
+            existing = self.entries.get(key)
+            if existing is None:
+                # توافق خلفي: مدخل قديم مفتوح بالاسم وله المسار نفسه
+                legacy = self.entries.get(name)
+                if legacy is not None and entry_key(
+                        legacy.original_path) == key:
+                    self.entries.pop(name, None)
+                    self.entries[key] = legacy
+                    existing = legacy
             if existing and (self.root / existing.vault_name).is_file():
                 # مودَع مسبقًا؛ حدّث المسار الأصلي فقط
                 existing.original_path = str(source)
                 continue
+            vault_name = self._unique_vault_name(name, key)
+            target = self.root / vault_name
             if _link_or_copy(source, target):
-                self.entries[name] = VaultEntry(
+                self.entries[key] = VaultEntry(
                     name=name, vault_name=vault_name,
                     fingerprint=fingerprint(source),
                     original_path=str(source))
@@ -196,7 +234,7 @@ class SourceVault:
         self.save()
         return stored
 
-    def _unique_vault_name(self, name: str) -> str:
+    def _unique_vault_name(self, name: str, key: str = "") -> str:
         """اسم فريد داخل الخزانة (صورتان بنفس الاسم من مجلدين مختلفين)."""
         candidate = name
         stem = Path(name).stem
@@ -204,7 +242,7 @@ class SourceVault:
         index = 1
         used = {e.vault_name for e in self.entries.values()}
         while candidate in used or (self.root / candidate).exists():
-            existing = self.entries.get(name)
+            existing = self.entries.get(key or name)
             if existing and existing.vault_name == candidate:
                 return candidate
             candidate = f"{stem}~{index}{suffix}"
@@ -242,7 +280,19 @@ class SourceVault:
         if recorded_path and Path(recorded_path).is_file():
             return str(recorded_path)
         name = str(source_name or "").strip()
-        entry = self.entries.get(name)
+        # 2.9.7: المفتاح المسار المُطبّع؛ والمستدعون قد يمررون
+        # اسمًا فقط — فالبحث تدريجي: المسار المسجل ⇐ الاسم
+        # ⇐ مفتاح قديم مباشر، لكي يعمل مع النوعين.
+        entry = None
+        if recorded_path:
+            entry = self.entries.get(entry_key(recorded_path))
+        if entry is None and name:
+            entry = self.entries.get(name)
+        if entry is None and name:
+            for candidate_entry in self.entries.values():
+                if candidate_entry.name == name:
+                    entry = candidate_entry
+                    break
         if entry:
             candidate = self.root / entry.vault_name
             if candidate.is_file():

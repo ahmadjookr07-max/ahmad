@@ -15,3 +15,12 @@ models_v2/
 
 # تقرير مُشغّل الاختبارات (يُولَّد محليًا)
 tests/_run_all_report.json
+tests/_editor_ws/
+tests/_*_ws/
+
+# مخرجات البناء المؤقتة
+build/_work/
+build/_workwin/
+
+# ملاحظات عمل مؤقتة — مصدر الحقيقة هو SESSION_HANDOFF.md
+notes_analysis.md

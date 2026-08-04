@@ -14,7 +14,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional, Tuple
 
 import numpy as np
@@ -136,7 +136,6 @@ def make_drop_shadow(alpha: np.ndarray, opts: ShadowOptions,
         return shadow
     x0, y0, x1, y1 = bbox
     prod_h = y1 - y0 + 1
-    prod_w = x1 - x0 + 1
 
     sil = (alpha > 30).astype(np.uint8) * 255
     # تحويل منظوري: القاعدة تبقى مكانها، القمة تنزاح باتجاه زاوية الظل وتنضغط

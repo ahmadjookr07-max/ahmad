@@ -16,7 +16,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,

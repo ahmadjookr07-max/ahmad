@@ -4,8 +4,9 @@
 Two ready-made schemes plus a custom template:
 
 1. ``dash`` (الجديد — الافتراضي بطلب المستخدم):
-       صورة واحدة فقط -> {item}_{unit}
-       أكثر من صورة   -> {item}_{unit}-1 , {item}_{unit}-2 ...
+       الواجهة (الأولى) -> {item}_{unit}          بلا رقم
+       الإضافية        -> {item}_{unit}-2 , {item}_{unit}-3 ...
+       (2.9.9: كانت الثانية تأخذ -1 فيتداخل مع الواجهة)
 2. ``classic`` (نمط 2.1):
        الصورة الأولى  -> {item}_{unit}
        الثانية        -> {item}_2_{unit} ...
@@ -19,9 +20,8 @@ old folders keeps working.
 from __future__ import annotations
 
 import json
-import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 UNIT_SUFFIX_DEFAULT = "حبه"
@@ -191,10 +191,20 @@ def build_name(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT) -> str:
 
 def build_name_dash(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT,
                     total: int = 1) -> str:
-    """النمط الجديد (2.3) بالشرطة — بطلب المالك:
-    - الصورة الرئيسية (الأولى/الواجهة) دائمًا بلا رقم: {item}_{unit}
-    - الصور الإضافية تبدأ من -1: {item}_{unit}-1 ثم -2 ثم -3 ...
-    (seq=1 للرئيسية، seq=2 تعطي -1، seq=3 تعطي -2 ...)
+    """النمط الجديد بالشرطة — القاعدة النهائية المعتمدة (2.9.9):
+
+    - الصورة الرئيسية (الأولى/الواجهة) دائمًا بلا رقم: ``{item}_{unit}``
+    - الصور الإضافية تحمل **ترتيبها الحقيقي**: الثانية ``-2``
+      ثم الثالثة ``-3`` ثم ``-4`` … (seq=2 تعطي -2، seq=3 تعطي -3)
+    - الرقم في **نهاية الاسم دائمًا** بعد الوحدة، بشرطة، ولا شيء بعده.
+
+    نص المالك (2.9.9): «التسمية النهائية يجب أن تضبطها بدون لخبطة،
+    لا أريد تداخل … لا تضع الرقم بالخلف أو الوسط وهكذا» + «الصورة
+    الأولى بدون رقم … رقم الصنف_الوحدة-2 … رقم الصنف_الوحدة-3».
+
+    كانت الصيغة القديمة ``seq - 1`` تُعطي الثانية ``-1``، فيخرج في
+    مجلد واحد ``10001102_حبه`` و``10001102_حبه-1`` وكأنهما صورتان
+    للترتيب الأول ⇒ وهو التداخل الذي رفضه المالك.
     """
     item = sanitize_item(item)
     unit = clean_unit(sanitize_item(str(unit))) if unit else ""
@@ -202,7 +212,7 @@ def build_name_dash(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT,
     base = normalize_stem(f"{item}_{unit}")
     if seq <= 1:
         return base
-    return f"{base}-{seq - 1}"
+    return f"{base}-{seq}"
 
 
 def parse_name(stem: str) -> ParsedName | None:
@@ -214,9 +224,13 @@ def parse_name(stem: str) -> ParsedName | None:
     stem = normalize_stem(stem)
     m = DASH_NAME_RE.match(stem)
     if m and not m.group("unit").isdigit():
-        # في نمط dash الرقم الظاهر -1 يعني الصورة الثانية (الرئيسية بلا رقم)
-        # فنخزّن seq الداخلي = الرقم الظاهر + 1 ليبقى round-trip متسقًا.
-        return ParsedName(m.group("item"), int(m.group("seq")) + 1,
+        # 2.9.9: الرقم الظاهر في نمط dash هو **الترتيب الحقيقي**
+        # للصورة (الرئيسية بلا رقم، والثانية -2) فيُقرأ كما هو
+        # ليبقى round-trip متسقًا مع ``build_name_dash``.
+        # الرقم 1 يأتي من مجلدات قديمة (كانت الثانية تأخذ -1)
+        # ويُقبل للقراءة وإعادة التسمية فيُرقّى إلى 2.
+        shown = int(m.group("seq"))
+        return ParsedName(m.group("item"), 2 if shown <= 1 else shown,
                           m.group("unit"))
     m = NAME_RE.match(stem)
     if m and not m.group("unit").isdigit():
@@ -395,23 +409,32 @@ def build_name_join_all(item: str, units: list[str] | tuple[str, ...],
                         default_unit: str = UNIT_SUFFIX_DEFAULT) -> str:
     """اسم الصورة بسياسة جمع كل الوحدات (حسب الإكسل بالضبط):
 
-    - الصورة الرئيسية (الأولى): {item}_{u1}_{u2}_{u3} بلا رقم
-    - الصور الإضافية: {item}_{u1}_{u2}_{u3}-1 ثم -2 ...
+    - الصورة الرئيسية (الأولى/الواجهة): ``{item}_{u1}_{u2}_{u3}`` بلا رقم
+    - الصور الإضافية بترتيبها الحقيقي: ``…-2`` ثم ``…-3`` ثم ``…-4``
+    - الرقم في **نهاية الاسم دائمًا** بعد كل الوحدات.
+
+    مثال (الصنف 10011205 وله في الإكسل حبه/شدة/كرتون)::
+
+        10011205_حبه_شدة_كرتون        ← الأولى بلا رقم
+        10011205_حبه_شدة_كرتون-2      ← الثانية
+        10011205_حبه_شدة_كرتون-3      ← الثالثة
+
+    2.9.9: كانت ``seq - 1`` تُعطي الثانية ``-1`` ⇒ تداخل مع الرئيسية.
     """
     item = sanitize_item(item)
     joined = join_units(units, default_unit)
     base = normalize_stem(f"{item}_{joined}")
     if seq <= 1:
         return base
-    # الصورة الثانية تأخذ -1، الثالثة -2 ... (الرئيسية بلا رقم)
-    return f"{base}-{seq - 1}"
+    # الرئيسية بلا رقم، والثانية -2، والثالثة -3 … (ترتيب حقيقي بلا فجوة)
+    return f"{base}-{seq}"
 
 
 TEMPLATE_DASH = "{item}_{unit}-{seq}"
 TEMPLATE_CLASSIC = "{item}_{seq}_{unit}"
 
 SCHEME_LABELS_AR = {
-    SCHEME_DASH: "النمط الجديد (موصى به): رقم الصنف_الوحدة-1 / -2 — وبلا رقم للصورة الوحيدة",
+    SCHEME_DASH: "النمط الجديد (موصى به): الواجهة رقم الصنف_الوحدة بلا رقم، ثم -2 / -3",
     SCHEME_CLASSIC: "النمط الكلاسيكي 2.1: رقم الصنف_الوحدة ثم رقم الصنف_2_الوحدة",
     SCHEME_CUSTOM: "قالب مخصص أكتبه بنفسي أو أختاره من القوالب الجاهزة",
 }
@@ -420,7 +443,7 @@ SCHEME_LABELS_AR = {
 # المتغيرات المتاحة: {item} {unit} {seq} {barcode} {name}
 STORE_TEMPLATES: list[tuple[str, str]] = [
     ("رقم الصنف_الوحدة-رقم الصورة (الموصى به)", "{item}_{unit}-{seq}"),
-    ("رقم الصنف_كل الوحدات من الإكسل (حبة_شدة_كرتون) — الرئيسية بلا رقم والبقية -1/-2", "{item}_{units}-{seq}"),
+    ("رقم الصنف_كل الوحدات من الإكسل (حبة_شدة_كرتون) — الرئيسية بلا رقم والبقية -2/-3", "{item}_{units}-{seq}"),
     ("رقم الصنف_رقم الصورة_الوحدة (كلاسيكي 2.1)", "{item}_{seq}_{unit}"),
     ("رقم الصنف فقط (مواقع تطلب رقم الصنف فقط)", "{item}-{seq}"),
     ("الباركود فقط (مواقع تطلب الباركود)", "{barcode}-{seq}"),
@@ -453,7 +476,35 @@ class NamingSettings:
     always_number_single: bool = False  # رقّم حتى الصورة الوحيدة
 
     def _fmt_seq(self, seq: int) -> str:
-        n = max(0, seq - 1) + max(0, int(self.seq_start))
+        """رقم الصورة الإضافية — القاعدة النهائية المعتمدة (2.9.9).
+
+        قاعدة المالك: الرئيسية ``seq=1`` بلا رقم، والإضافية تحمل
+        **ترتيبها الحقيقي**: ``seq=2`` ⇒ ``-2`` و``seq=3`` ⇒ ``-3``…
+        فيطابق القالب المخصص ``build_name_dash`` تمامًا، ولا تخرج
+        مجموعة الصنف بصيغتين مختلفتين في مجلد واحد.
+
+        كانت الصيغة القديمة ``(seq-1) + seq_start - 1`` تُعطي الإضافية
+        الأولى ``-1`` ⇒ فيخرج في مجلد المالك ``10001102_حبه`` و
+        ``10001102_1-حبه`` وكأنهما صورتان للترتيب الأول (تداخل).
+
+        ``seq_start`` يبقى محترمًا كإزاحة: 1 = القاعدة المعيارية
+        (الرقم = الترتيب الحقيقي)، وقيمة أخرى تُزيح العدّ.
+        """
+        n = max(0, seq) + int(self.seq_start) - 1
+        if n < 0:
+            n = 0
+        return str(n).zfill(int(self.seq_pad)) if self.seq_pad else str(n)
+
+    def _fmt_seq_single(self, seq: int) -> str:
+        """رقم الصورة الوحيدة حين يطلب المالك ترقيمها قسرًا.
+
+        هنا لا توجد «رئيسية بلا رقم» تُقاس عليها الإضافية، فالعدّ
+        يبدأ من ``seq_start`` مباشرة (1 افتراضيًا ، أو 0 إن اختاره).
+        فصلها عن ``_fmt_seq`` يمنع خروج الصورة الوحيدة بالرقم ``-0``.
+        """
+        n = max(0, seq - 1) + int(self.seq_start)
+        if n < 0:
+            n = 0
         return str(n).zfill(int(self.seq_pad)) if self.seq_pad else str(n)
 
     def render(self, item: str, seq: int, unit: str, total: int = 0,
@@ -464,18 +515,29 @@ class NamingSettings:
         if self.scheme == SCHEME_DASH:
             if self.always_number_single and total <= 1 and seq <= 1:
                 return normalize_stem(f"{item}_{unit}") + \
-                    f"-{self._fmt_seq(seq)}"
+                    f"-{self._fmt_seq_single(seq)}"
             return build_name_dash(item, seq, unit, total=total or seq)
         if self.scheme == SCHEME_CLASSIC:
             return build_name(item, seq, unit)
         # custom template — يدعم {item} {unit} {seq} {barcode} {name}
         safe_name = sanitize_item(str(name or "")).replace(" ", "-")
+        # الصورة الوحيدة المُرقّمة قسرًا تأخذ عدًّا يبدأ من seq_start،
+        # وغيرها يتبع قاعدة الشرطة (الإضافية الأولى = 1).
+        lone_numbered = (self.always_number_single and total <= 1
+                         and seq <= 1)
+        seq_text = (self._fmt_seq_single(seq) if lone_numbered
+                    else self._fmt_seq(seq))
         values = {"item": item, "unit": unit,
-                  "seq": self._fmt_seq(seq),
+                  "seq": seq_text,
                   "barcode": sanitize_item(str(barcode or "")),
                   "name": safe_name}
-        single = (total <= 1 and seq <= 1
-                  and not self.always_number_single)
+        # 2.9.9 — قاعدة المالك تسري على القالب المخصص أيضًا:
+        # **الرئيسية بلا رقم** والإضافية -2، -3… كان الشرط
+        # مقيّدًا بـ`total <= 1` فقط، فصنف له ثلاث صور يُخرج
+        # `900_حبه-1` للرئيسية خلافًا للقاعدة، فيخرج المجلد
+        # بصيغتين مختلفتين حسب النمط المختار. الأولى الآن
+        # بلا رقم مطلقًا إلا إن طلب المالك الترقيم القسري.
+        single = seq <= 1 and not self.always_number_single
         if single and "{seq}" in self.template:
             tpl = self.template.replace("-{seq}", "").replace("_{seq}", "") \
                                .replace("{seq}_", "").replace("{seq}", "")

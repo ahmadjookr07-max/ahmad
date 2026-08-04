@@ -4,8 +4,16 @@ import os
 import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, "/home/ubuntu/market-image-studio-v2/src")
-sys.path.insert(0, "/home/ubuntu/market-image-studio-v2/windows_app")
+
+# مساران مطلقان إلى موضع استنساخ بعينه كانا يُسقطان الملف
+# فورًا بـ ModuleNotFoundError في أي مسار مختلف؛ الجذر يُستنبط
+# الآن من موقع الملف ليعمل في أي بيئة.
+from pathlib import Path  # noqa: E402
+
+_ROOT = Path(__file__).resolve().parent.parent
+for _extra in (_ROOT / "src", _ROOT / "windows_app"):
+    if _extra.is_dir() and str(_extra) not in sys.path:
+        sys.path.insert(0, str(_extra))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 

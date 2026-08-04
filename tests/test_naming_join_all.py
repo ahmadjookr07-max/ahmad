@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
-"""اختبار سياسة join_all_units (2.3):
-الرئيسية {item}_حبة_شدة_كرتون بلا رقم، الإضافية -1/-2/-3 —
-الوحدات حرفيًا من الإكسل وبنفس الترتيب."""
+"""اختبار سياسة join_all_units.
+
+2.9.9 — قاعدة المالك النهائية: الرئيسية
+``{item}_حبة_شدة_كرتون`` بلا رقم، والإضافية تحمل ترتيبها
+الحقيقي ``-2`` ثم ``-3`` ثم ``-4`` — لا ``-1`` إطلاقًا (كان
+يتداخل مع الرئيسية في نفس المجلد)، ولا تكرار لرقم واحد.
+الوحدات حرفيًا من الإكسل وبنفس الترتيب.
+"""
 import json
 import os
 import sys
@@ -25,18 +30,24 @@ def test_join_units():
 def test_build_name_join_all():
     u = ["حبة", "شدة", "كرتون"]
     assert build_name_join_all("10001102", u, 1) == "10001102_حبة_شدة_كرتون"
-    assert build_name_join_all("10001102", u, 2) == "10001102_حبة_شدة_كرتون-1"
-    assert build_name_join_all("10001102", u, 4) == "10001102_حبة_شدة_كرتون-3"
+    assert build_name_join_all("10001102", u, 2) == "10001102_حبة_شدة_كرتون-2"
+    assert build_name_join_all("10001102", u, 4) == "10001102_حبة_شدة_كرتون-4"
     assert build_name_join_all("10001102", ["حبة"], 1) == "10001102_حبة"
-    assert build_name_join_all("10001102", ["حبة"], 2) == "10001102_حبة-1"
+    assert build_name_join_all("10001102", ["حبة"], 2) == "10001102_حبة-2"
 
 
 def test_plan_names_for_item():
     s = NamingSettings(unit_policy=UNIT_POLICY_JOIN_ALL)
     plans = plan_names_for_item("10001102", 3, ["حبة", "شدة"], s)
+    # 2.9.9 — تسلسل متصل بلا تكرار: الرئيسية ثم -2 ثم -3.
+    # كان التوقع القديم يكرر -2 مرتين — وهو التصادم
+    # الذي اشتكى منه المالك (صورتان بنفس الاسم).
     assert plans == [["10001102_حبة_شدة"],
-                     ["10001102_حبة_شدة-1"],
-                     ["10001102_حبة_شدة-2"]], plans
+                     ["10001102_حبة_شدة-2"],
+                     ["10001102_حبة_شدة-3"]], plans
+    flat = [n for grp in plans for n in grp]
+    assert len(flat) == len(set(flat)), f"تكرار أسماء: {flat}"
+    assert not any(n.endswith("-1") for n in flat), flat
 
 
 def test_from_dict():
@@ -69,10 +80,12 @@ def test_build_output_stem_join_all():
             assert n1 == "10001102_حبة_شدة_كرتون", n1
             open(os.path.join(out, n1 + ".webp"), "wb").close()
             n2 = integ.build_output_stem(out, "10001102", "حبة")
-            assert n2 == "10001102_حبة_شدة_كرتون-1", n2
+            assert n2 == "10001102_حبة_شدة_كرتون-2", n2
             open(os.path.join(out, n2 + ".webp"), "wb").close()
             n3 = integ.build_output_stem(out, "10001102", "حبة")
-            assert n3 == "10001102_حبة_شدة_كرتون-2", n3
+            # 2.9.9 — الثالثة تأخذ -3 لا -2؛ فالاسم -2 مشغول
+            # على القرص فعلًا وإرجاعه يطمس صورة المالك.
+            assert n3 == "10001102_حبة_شدة_كرتون-3", n3
             # صنف خارج الكتالوج → يعتمد وحدة الاستدعاء
             n4 = integ.build_output_stem(out, "999", "باكت")
             assert n4 == "999_باكت", n4

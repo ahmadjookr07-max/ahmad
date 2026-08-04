@@ -39,9 +39,48 @@ def t_imports():
 
 
 def t_engine_imports():
+    # 2.9.9 — حُذف `visual_match_v2` من قائمة الاستيراد: أُزيلت الوحدة
+    # من المشروع مع إلغاء نسبة التشابه بطلب المالك.
     from engine_v2 import (naming_v2, batch_refine_v2, cleanup_v2,  # noqa
                            platform_profiles_v2, learning_v2, edge_refine_v2,
-                           visual_match_v2, nutrition_smart_v2, license_v2)
+                           nutrition_smart_v2, license_v2)
+
+
+def t_no_similarity_feature():
+    """2.9.9 — نسبة التشابه البصري أُلغيت من جذورها.
+
+    قرار المالك: الميزة لم تكن تعمل ولا فائدة منها. هذا الاختبار
+    يحرس القرار: أي عودة للوحدة أو لدوال البصمات تُفشله.
+    """
+    import importlib
+    import inspect
+    import native_app
+
+    try:
+        importlib.import_module("engine_v2.visual_match_v2")
+    except ImportError:
+        pass
+    else:
+        raise AssertionError("visual_match_v2 عادت للوجود — أُلغيت بطلب المالك")
+
+    for gone in ("_image_signature", "_visual_similarity", "_visual_suggestion_for",
+                 "_warm_visual_signatures", "_queue_visual_signatures",
+                 "_visual_sig_lookup", "VisualSignatureWorker"):
+        assert not hasattr(native_app.MainWindow, gone) and not hasattr(native_app, gone), \
+            f"{gone} عاد للوجود — نسبة التشابه مُلغاة"
+
+    # 2.9.9 — نفحص الشفرة الفعلية فقط، لا التعليقات. فالتعليق
+    # التوثيقي الذي يشرح ما حُذف مفيد لمنع إعادة إضافته
+    # مستقبلًا، ولا يعني أن الميزة عادت للواجهة.
+    src_lines = []
+    for line in inspect.getsource(native_app).splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue          # تعليق كامل — يُتجاهل
+        src_lines.append(line.split("  #", 1)[0])
+    src = "\n".join(src_lines)
+    for phrase in ("تطابق بصري عالٍ", "تشابه محتمل", "ربط بالأقرب بصريًا"):
+        assert phrase not in src, f"نص «{phrase}» عاد للواجهة — نسبة التشابه مُلغاة"
 
 
 def t_license_trial():
@@ -138,6 +177,7 @@ check("license_trial_3days", t_license_trial)
 check("mainwindow_buttons", t_mainwindow)
 check("editor_new_tools", t_editor)
 check("no_rename_duplicate", t_no_rename_duplicate)
+check("no_similarity_feature", t_no_similarity_feature)
 check("batch_refine_options", t_batch_refine_options)
 check("platform_profiles", t_platform_profiles)
 

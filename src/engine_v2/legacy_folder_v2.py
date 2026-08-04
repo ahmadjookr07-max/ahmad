@@ -26,7 +26,6 @@
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -185,7 +184,17 @@ def parse_legacy_stem(stem: str) -> tuple[str, str, int, str] | None:
         return (m.group("item"), m.group("unit"), max(1, n - 1), "underscore")
     m = _RE_PLAIN.match(s)
     if m:
-        return (m.group("item"), m.group("unit"), 0, "plain")
+        unit = m.group("unit")
+        # 2.9.7 — إصلاح اسم مشوّه: ملفات بالنمط البائد
+        # `{رقم}_{تسلسل}` (مثل `10000121_4`) كانت تُقرأ وكأن
+        # `4` **وحدة**، فتُلحَق بها الوحدة الحقيقية فينتج
+        # `10000121_4_حبه` — وهو اسم لا وجود لوحدته `4` في
+        # كتالوج المالك (وحدة الصنف `حبه` فقط، مفحوصًا).
+        # الأرقام المحضة لا تكون وحدة قطعًا، فهي تسلسل.
+        if unit.strip().isdigit():
+            return (m.group("item"), "", max(1, int(unit.strip())),
+                    "underscore")
+        return (m.group("item"), unit, 0, "plain")
     m = _RE_BARE.match(s)
     if m:
         return (m.group("item"), "", 0, "bare")
@@ -212,6 +221,14 @@ def scan_legacy_folder(folder: str | Path,
         if not path.is_file() or path.suffix.lower() not in suffixes:
             continue
         if path.name.startswith("__primary_tmp_"):
+            continue
+        # مسودات المحرر ``*.edited.png`` ليست مخرجات نهائية بل
+        # نسخ عمل جانبية يحفظها المحرر بجوار الأصل. لو دخلت
+        # خطة التسمية لعُدَّت صورة ثانية للصنف (فتختل الأرقام)
+        # ولأن لاحقتها مزدوجة يبقى ``.edited`` في الجذع فتفشل
+        # إعادة التسمية بخطأ مسار غير موجود. نتجاوزها في
+        # المحرك نفسه لا في الواجهة وحدها، لتسلم كل مسارات الاستدعاء.
+        if path.name.lower().endswith(".edited.png"):
             continue
         stem = path.stem
         if stem in seen_stems:
@@ -278,7 +295,7 @@ def _units_for_group(item: str, index, unit_in_name: str) -> list[str]:
 def _target_stems(item: str, unit: str, count: int,
                   units: list[str] | None = None,
                   join_all: bool = False) -> list[str]:
-    """أسماء المجموعة وفق قاعدة المالك: الواجهة بلا رقم ثم -1، -2…
+    """أسماء المجموعة وفق قاعدة المالك: الواجهة بلا رقم ثم -2، -3…
 
     2.9.6: يمر عبر `build_name_join_all` — **نفس دالة الدفعة
     الجديدة** — لا بناء يدوي، فيتطابق المخرجان حرفًا بحرف.
@@ -300,8 +317,13 @@ def _target_stems(item: str, unit: str, count: int,
     # لتكتسب clean_unit وnormalize_stem بدل الوصل النصي الخام.
     u = clean_unit(unit)
     if not u:
+        # 2.9.9 — مسار الطوارئ (لا وحدة في الإكسل ولا في اسم
+        # الملف). كان `f"{base}-{i}"` يُعطي الثانية `-1` خلافًا
+        # لقاعدة المالك المقرّرة (الأولى بلا رقم، الثانية `-2`)،
+        # وهو مسار المجلد المنجز الذي يستخدمه المالك فعلًا.
         base = str(item)
-        return [base if i == 0 else f"{base}-{i}" for i in range(count)]
+        return [base if i == 0 else f"{base}-{i + 1}"
+                for i in range(count)]
     return [build_name_join_all(item, [u], seq=i + 1, total=count)
             for i in range(count)]
 
@@ -417,3 +439,149 @@ def apply_legacy_plan(plan: LegacyPlan,
                 im.path = Path(new)
 
     return {"renames": renames, "errors": errors, "items_done": done}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 2.9.7 — تثبيت حالة المهمة للمجلد المنجز  (يغلق A1 + A4)
+# ═══════════════════════════════════════════════════════════════════
+# العلة المقيسة: `_load_legacy_folder` كان يبني `BatchRunResult` في
+# الذاكرة فقط ولا يكتب `job_state.json` ولا يودع المصادر. فكانت
+# النتيجة عرضين لعلة واحدة:
+#
+#   A4 — تعديل الباركود/التسمية على الملفات السابقة يفشل فورًا:
+#        `_load_state` ترفع
+#        `FileNotFoundError: ملف حالة المهمة غير موجود`.
+#   A1 — «إعلان فقدان زائف»: `repair_job_state` لا تجد حالة فتُبلّغ
+#        عن فقدان والصور موجودة سليمة على القرص.
+#
+# القياس قبل الإصلاح (12 صورة من مخرجات المالك، 5 أصناف):
+#   job_state.json: غير موجود ✗ | .mis_sources: غير موجودة ✗
+#   _load_state:    FileNotFoundError ✗
+#
+# الإصلاح يمر عبر `pipeline._write_state` **نفسها** التي تستخدمها
+# الدفعة الجديدة، فيكون ملف الحالة مطابقًا حرفًا بحرف لما ينتجه
+# المسار الطبيعي، وتقرأه كل الوظائف الموجودة بلا أي تعديل فيها.
+#
+# صمَّمناها لا ترفع استثناءً أبدًا: فتح المجلد لعرض الصور يجب أن
+# ينجح حتى إن كان القرص للقراءة فقط، فتُعاد رسالة سبب لا انهيار.
+
+__all__ += ["ensure_legacy_job_state"]
+
+
+def _records_from_result(result):
+    """يبني سجلات كاتالوج من الصور نفسها عند غياب الإكسل.
+
+    قرار المالك: «الملف الرئيسي يجب أن يكون مرنًا لأي تعديل
+    مهما كان مصدر المعلومة» — فلا يُشلّ التعديل لمجرد أن
+    الإكسل لم يُحمّل. أرقام الأصناف موجودة أصلاً في أسماء
+    الملفات المنجزة، فتكفي لبناء فهرس عامل.
+
+    يُزال التكرار برقم الصنف لأن للصنف عدة صور.
+    """
+    from smart_catalog_vision.pipeline import _CatalogRecord
+
+    seen: dict[str, _CatalogRecord] = {}
+    row = 0
+    for it in getattr(result, "items", ()) or ():
+        code = str(getattr(it, "item_code", "") or "").strip()
+        if not code or code in seen:
+            continue
+        row += 1
+        name = str(getattr(it, "product_name", "") or "").strip()
+        unit = ""
+        # الوحدة مدوّنة في الشرح بصيغة «— الوحدة: حبه»
+        expl = str(getattr(it, "explanation", "") or "")
+        if " الوحدة: " in expl:
+            unit = expl.split(" الوحدة: ", 1)[1].split("\n", 1)[0].strip()
+        seen[code] = _CatalogRecord(
+            item_code=code,
+            product_name=name or f"الصنف {code}",
+            barcode=str(getattr(it, "barcode", "") or "").strip(),
+            unit=unit,
+            sheet="legacy_folder",
+            row=row)
+    return tuple(seen.values())
+
+
+def _legacy_catalog_for_state(index, result=None):
+    """يعيد كاتالوجًا **غير فارغ** لـ`_write_state`.
+
+    علة مقيسة (الحاجز الثاني تحت A4): بعد كتابة الحالة
+    بكاتالوج فارغ ترفع `_load_state`
+    `ValueError: فهرس الكتالوج في المهمة فارغ` فيبقى تعديل
+    الباركود متعطلًا. فإن غاب الإكسل نبني الفهرس من أرقام
+    الأصناف المستخرجة من أسماء الصور نفسها.
+    """
+    from smart_catalog_vision.pipeline import _CatalogIndex
+
+    if index is not None:
+        records = getattr(index, "records", None)
+        if records:
+            return index
+    records = _records_from_result(result) if result is not None else ()
+    return _CatalogIndex(
+        records=records,
+        summary={"source": "legacy_folder", "rows": len(records),
+                 "origin": "مستخرج من أسماء الصور المنجزة"})
+
+
+def ensure_legacy_job_state(folder, result, index=None, catalog_path="",
+                            options=None,
+                            profile_name="كتالوج برنامج Windows") -> dict:
+    """يكتب `job_state.json` حقيقيًا لمجلد منجز ويودع مصادره.
+
+    يُستدعى مرة واحدة عقب فتح المجلد المنجز، فيصبح المجلد مساحة عمل
+    كاملة الصلاحية: تعديل الباركود يعمل، وفاحص السلامة يجد حالته
+    فلا يُعلن فقدانًا زائفًا.
+
+    يعيد تقريرًا: {"state_written": bool, "vault_deposited": bool,
+    "images": int, "error": str}. ولا يرفع استثناءً أبدًا.
+    """
+    report = {"state_written": False, "vault_deposited": False,
+              "images": 0, "error": ""}
+    try:
+        folder = Path(folder)
+    except Exception as exc:  # pragma: no cover - مسار غير صالح
+        report["error"] = f"مسار غير صالح: {exc}"
+        return report
+    if result is None:
+        report["error"] = "لا نتيجة لكتابتها"
+        return report
+
+    # ── 1) إيداع الصور في الخزانة ──────────────────────────────────
+    # في المجلد المنجز الملف نفسه هو المصدر وهو المخرج، فإيداعه
+    # يحمي التعديل اللاحق إن نُقل المجلد أو حُذف أصله.
+    image_paths: list[str] = []
+    for it in getattr(result, "items", ()) or ():
+        sp = getattr(it, "source_path", "") or ""
+        if sp:
+            image_paths.append(str(sp))
+    report["images"] = len(image_paths)
+    if image_paths:
+        try:
+            from .source_vault_v2 import deposit_job_sources
+            deposit_job_sources(folder, image_paths, catalog_path or "")
+            report["vault_deposited"] = True
+        except Exception as exc:
+            # الإيداع تحسين للمتانة لا شرط لعمل التعديل.
+            report["error"] = f"تعذّر إيداع الخزانة: {exc}"
+
+    # ── 2) كتابة حالة المهمة بنفس دالة الدفعة الجديدة ─────────────
+    try:
+        from smart_catalog_vision.pipeline import (FinalImageOptions,
+                                                   _write_state)
+        opts = options
+        if opts is None:
+            # افتراضات المالك المعتمدة: 800×700 بخلفية بيضاء.
+            opts = FinalImageOptions(width=800, height=700)
+        cat_p = Path(catalog_path) if catalog_path else folder / "catalog.xlsx"
+        _write_state(folder,
+                     catalog_path=cat_p,
+                     catalog=_legacy_catalog_for_state(index, result),
+                     result=result,
+                     profile_name=profile_name,
+                     options=opts)
+        report["state_written"] = (folder / "job_state.json").is_file()
+    except Exception as exc:
+        report["error"] = f"تعذّر كتابة حالة المهمة: {exc}"
+    return report

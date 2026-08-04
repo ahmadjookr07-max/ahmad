@@ -155,17 +155,36 @@ def t_installer_current() -> None:
         return
     ver = ver_file.read_text(encoding="utf-8").strip()
 
-    nsis = sorted((ROOT / "build" / "windows").glob("installer_v*.nsi"))
+    nsis_dir = ROOT / "build" / "windows"
+    nsis = sorted(nsis_dir.glob("*.nsi"))
     check(bool(nsis), "توجد ملفات مُثبِّت", f"{len(nsis)} ملفًا")
 
-    # مُثبِّت بنسخة قديمة يعني تسليم بناء لا يطابق الكود
-    matching = []
+    # قاعدة «لا تكرار»: مُثبِّت لكل برنامج لا نسخة لكل إصدار. كانت ثماني
+    # النسخ تستر أن ورشة GitHub تبني مُثبِّت 2.0.0 لتطبيق 2.9.9.
+    # المسموح اثنان فقط لأنهما برنامجان مختلفان: مُثبِّت المستخدم،
+    # ومُثبِّت المالك (admin + HKLM + مجلد أسرار، لا يوزع على العملاء).
+    expected = {"installer.nsi", "installer_owner.nsi"}
+    names = {f.name for f in nsis}
+    check(names == expected, "مُثبِّت لكل برنامج لا نسخة لكل إصدار",
+          f"{sorted(names)}")
+
+    # لا إصدار مثبّت نصيًا في أيٍّ منهما: مصدر الإصدار الوحيد هو VERSION
     for f in nsis:
-        txt = f.read_text(encoding="utf-8", errors="ignore")
-        if re.search(rf'APP_VERSION\s+"{re.escape(ver)}"', txt):
-            matching.append(f.name)
-    check(bool(matching), f"مُثبِّت يطابق النسخة {ver}",
-          f"{matching}" if matching else "لا مُثبِّت بهذه النسخة!")
+        body = f.read_text(encoding="utf-8", errors="ignore")
+        h = re.search(r'!define\s+APP_VERSION\s+"\d', body)
+        check(h is None, f"{f.name}: لا إصدار مثبّت نصيًا",
+              h.group(0) if h else "")
+        check("__FILEDIR__" in body and "searchparse" in body,
+              f"{f.name}: يقرأ الإصدار من VERSION")
+
+    main_nsi = nsis_dir / "installer.nsi"
+    check(main_nsi.is_file(), "installer.nsi موجود")
+    if not main_nsi.is_file():
+        return
+    txt = main_nsi.read_text(encoding="utf-8", errors="ignore")
+
+    _ = ver  # الإصدار يُتحقَّق منه أعلاه لكل مُثبِّت
+    matching = [main_nsi.name]
 
     # الاتفاقية وبيانات الدعم شرط تعاقدي لا تفصيل
     eula = ROOT / "build" / "windows" / "EULA_ar.txt"
@@ -173,8 +192,6 @@ def t_installer_current() -> None:
           "الاتفاقية العربية موجودة وغير فارغة",
           f"{eula.stat().st_size if eula.is_file() else 0} بايت")
     if matching:
-        txt = (ROOT / "build" / "windows" / matching[-1]).read_text(
-            encoding="utf-8", errors="ignore")
         check("ahmadjookr06@gmail.com" in txt, "بريد الدعم مضمّن")
         check("0582381000" in txt, "هاتف الدعم مضمّن")
         check("MUI_PAGE_LICENSE" in txt, "صفحة الاتفاقية إلزامية في التثبيت")
