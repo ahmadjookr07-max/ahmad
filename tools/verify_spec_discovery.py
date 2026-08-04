@@ -13,6 +13,10 @@
 from __future__ import annotations
 
 import ast
+import glob
+import importlib.util
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -80,7 +84,14 @@ def main() -> int:
         seg = ast.get_source_segment(src, node) or ""
         if any(k in seg for k in ("Analysis(", "PYZ(", "EXE(", "COLLECT(",
                                   "_hidden", "collect_all",
-                                  "collect_data_files")):
+                                  "collect_data_files",
+                                  # حاجز إضافات Qt يطلب `qwindows.dll` وهي ملف
+                                  # ويندوز لا يوجد في عجلة لينكس. تنفيذه هنا
+                                  # يُسقط الفحص دائمًا على لينكس فيُقرأ أن
+                                  # المستودع معطوب وهو سليم. وQt محروسة أصلًا
+                                  # داخل الـspec نفسه عند البناء الحقيقي.
+                                  "_QT_PLUGIN_GROUPS", "_pyside_spec",
+                                  "_qwindows_found", "_qt_plugin_files")):
             break
         keep.append(node)
 
@@ -90,8 +101,15 @@ def main() -> int:
 
     mod = ast.Module(body=keep, type_ignores=[])
     code = compile(mod, filename=str(SPEC), mode="exec")
+    # المجال يحتاج ما يستورده الـspec في رأسه (قبل `_discover`)، لأن
+    # الاقتطاع يبدأ من `_discover` فيُسقط الاستيرادات. وإن نقصت
+    # واحدة سقط الفحص بـNameError فـيُقرأ كأن الـspec معطوب وهو سليم —
+    # إنذار كاذب يمنع كل بناء وهو أسوأ من غياب الفحص رأسًا.
     ns: dict[str, object] = {"ROOT": ROOT, "Path": Path,
-                             "SystemExit": SystemExit}
+                             "SystemExit": SystemExit,
+                             "ast": ast, "sys": sys, "os": os,
+                             "importlib": importlib, "glob": glob,
+                             "shutil": shutil, "print": print}
     try:
         exec(code, ns)
     except SystemExit as exc:

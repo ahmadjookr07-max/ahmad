@@ -224,8 +224,35 @@ def probe_import(module: str, *, deep: bool = False) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {str(exc)[:280]}"
 
 
+def _bundled_tesseract() -> str:
+    """محرك OCR محمول مشحون داخل الحزمة نفسها.
+
+    **لماذا يُقدّم على كل شيء؟** لأن المُستخدم لا يُلزم بتركيب Tesseract
+    بنفسه. فإن شُحن المحرك مع البرنامج فهو الموثوق: إصداره معروف
+    ولغاته مضمونة (العربية والإنجليزية). أما المحرك المُركّب على الجهاز
+    فقد يكون قديمًا أو بلا بيانات عربية، فتقرأ الجداول خطأ بلا سبب مفهوم.
+    """
+    bases = []
+    mei = getattr(sys, "_MEIPASS", "")
+    if mei:
+        bases.append(Path(mei))
+    with contextlib.suppress(Exception):
+        bases.append(Path(sys.executable).resolve().parent)
+    name = "tesseract.exe" if os.name == "nt" else "tesseract"
+    for base in bases:
+        with contextlib.suppress(Exception):
+            cand = base / "tesseract" / name
+            if cand.is_file():
+                return str(cand)
+    return ""
+
+
 def find_tesseract() -> str:
-    """يبحث عن محرك Tesseract في PATH ثم في مسارات ويندوز المعتادة ثم السجل."""
+    """يبحث عن محرك Tesseract: المحمول داخل الحزمة أولًا، ثم PATH، ثم
+    مسارات ويندوز المعتادة، ثم السجل."""
+    bundled = _bundled_tesseract()
+    if bundled:
+        return bundled
     p = shutil.which("tesseract")
     if p:
         return p

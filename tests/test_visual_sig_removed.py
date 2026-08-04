@@ -51,7 +51,21 @@ REMOVED_NAMES = (
 )
 
 # عبارات نسبة التشابه التي كانت تُعرض في الواجهة.
-REMOVED_TEXTS = ("نسبة التشابه", "تشابه بصري", "التشابه البصري")
+# 2.9.10 — أُضيف «الأقرب بصريًا»: كان نصًا معروضًا للمستخدم يزعم أن
+# الترتيب بصري بينما المنطق محذوف فعلًا — فيوهم المالك ببقائه.
+REMOVED_TEXTS = ("نسبة التشابه", "تشابه بصري", "التشابه البصري",
+                 "الأقرب بصريًا", "الثقة:")
+
+# 2.9.10 — ما أُزيل من **الجذر** (نموذج التعلّم لا الواجهة وحدها).
+# في 2.9.9 حُذفت البصمات من الواجهة لكن بقي معامل الدرجة ومجموعه
+# في `learning_v2` يستقبل 0.0 دائمًا — شفرة ميتة تدعو لإعادة الإحياء.
+LEARNING = ROOT / "src" / "engine_v2" / "learning_v2.py"
+REMOVED_ROOT_NAMES = (
+    "visual_score",
+    "suggest_link_threshold",
+    "score_sum",
+    "score_n",
+)
 
 # الدوال الساخنة: تُنفَّذ عند كل نقرة صف فيجب أن تبقى خفيفة بلا قرص.
 HOT_METHODS = (
@@ -122,7 +136,7 @@ def calls_in(node: ast.AST) -> set[str]:
 
 
 def main() -> int:
-    say("=== حراسة إزالة البصمات البصرية ونسبة التشابه (2.9.9) ===")
+    say("=== حراسة إزالة التشابه البصري ونسبته من الجذر (2.9.9 + 2.9.10) ===")
 
     say("\n[1] الملف المصدر متاح للتفتيش")
     if not check("native_app.py موجود", APP.is_file(), str(APP)):
@@ -178,7 +192,24 @@ def main() -> int:
         check(f"{name} لا تفكّ ترميز صورة", not img_read,
               str(sorted(heavy)) if heavy and img_read else "")
 
-    say("\n[6] الواجهة تُقلع فعلًا بعد الحذف (لا مرجع معلّق)")
+    say("\n[6] الجذر: لا درجة تشابه في نموذج التعلّم (2.9.10)")
+    if check("learning_v2.py موجود", LEARNING.is_file(), str(LEARNING)):
+        lrn_code = executable_code(LEARNING.read_text(encoding="utf-8"))
+        for name in REMOVED_ROOT_NAMES:
+            hits = lrn_code.count(name)
+            # `pop("score_sum")` مسموحة: هي تنقية للملفات القديمة لا إنتاج لها.
+            allowed = lrn_code.count(f'pop("{name}"')
+            check(f"{name} مُزال من الجذر", hits == allowed,
+                  f"{hits} ورودًا ({allowed} تنقية)" if hits != allowed else "")
+        check("لا يزال يسجل قرارات الربط (قُبل/رُفض)",
+              "record_link_decision" in lrn_code)
+    # الواجهة لا تمرر المعامل المحذوف ولا تعرض أي نسبة مئوية.
+    check("الواجهة لا تمرر visual_score", "visual_score" not in code,
+          str(code.count("visual_score")))
+    pct = re.findall(r"\{[^{}]*:\.\d?%\}", code)
+    check("لا نسبة مئوية منسّقة في الواجهة", not pct, ", ".join(pct[:4]))
+
+    say("\n[7] الواجهة تُقلع فعلًا بعد الحذف (لا مرجع معلّق)")
     try:
         import importlib
         mod = importlib.import_module("native_app")
@@ -198,7 +229,7 @@ def main() -> int:
     say("\n" + "═" * 62)
     say(f"===== {OK} passed / {FAIL} failed =====")
     if FAIL:
-        say("أُعيدت شفرة محذوفة أو انكسر الزر الذكي — راجع قرار المالك 2.9.9")
+        say("أُعيدت شفرة محذوفة أو انكسر الزر الذكي — راجع قرار المالك 2.9.9/2.9.10")
     else:
         say("ALL_VISUAL_SIG_REMOVED_TESTS_OK")
     return 1 if FAIL else 0

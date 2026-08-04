@@ -61,6 +61,30 @@
 خالفها ويُترك إن طابقها (الشرط التالي يكفل ذلك بلا إعادة تسمية
 عابثة).
 
+## تغطية السياستين (2.9.10 — علة انكشفت بتغيير الافتراضي)
+
+كانت الرقعة تنسحب إن لم يكن الدمج مفعّلًا::
+
+    active, default_unit = _policy_active()
+    if not active:
+        return result          # ← مسار الوحدة الواحدة بلا تصحيح
+
+وهذا مقبول حين كان الدمج **هو الافتراضي** (حتى 2.9.9). ولمّا نُقل
+الافتراضي إلى الوحدة الواحدة بأمر المالك («الوحدة تكون حبه كما
+السابق» + خيار تفعيل/إلغاء) صار المسار الافتراضي — الذي سيستعمله
+المالك فعلًا — بلا أي طبقة تصحيح، فعادت علة 2.9.9 نفسها:
+صنفٌ وحدته ``كيس`` أو ``كرتون`` يخرج ``10010033_حبه``.
+
+المقياس على بيئة المالك: **4 من 17 صورة (23.5%)** بوحدة لا يملكها
+الصنف. والآن تعمل الرقعة في الحالتين:
+
+- الدمج مُفعّل ⇒ ``build_name_join_all`` بكل الوحدات بترتيب الإكسل
+- الدمج مُلغى ⇒ ``build_name_dash`` بـ``units[0]`` (وحدة العبوة=1
+  متصدرة) — نفس ما تكتبه ``integration_v2.build_output_stem``
+
+وتنسحب فقط إذا كانت التسمية المخصّصة **معطّلة كليًا**، فلا نفرض
+قاعدة لم يطلبها المستخدم.
+
 ## الكائنات مُجمّدة (علة اكتُشفت بالتشخيص)
 
 ``BatchItemResult`` و``BatchRunResult`` كلاهما
@@ -95,17 +119,21 @@ def _log(msg: str) -> None:
     print(f"[batch-naming] {msg}", file=sys.stderr)
 
 
-def _units_for(item: str) -> list[str]:
-    """وحدات الصنف من فهرس الإكسل المسجَّل — عبر ``integration_v2``.
+def _units_for(item: str, join: bool) -> list[str]:
+    """وحدات الصنف من فهرس الإكسل المسجَل — عبر ``integration_v2``.
 
-    2.9.10: ``excel_order=True`` لأن هذه الرقعة تعمل في مسار
-    الدمج وحده، وأمر المالك فيه «بنفس ترتيبها». لو بقيت
-    تأخذ الترتيب المُعاد (وحدة العبوة=1 متصدرة) لأعادت تسمية
-    ما كتبته ``build_output_stem`` بترتيب مخالف له، فتتصارع
-    الطبقتان على الملف نفسه في كل دفعة.
+    2.9.10 — الترتيب يتبع السياسة الفعّالة، ومخالفته تجعل
+    الطبقتين تتصارعان على الملف نفسه في كل دفعة:
 
-    يُمرَّر الوسيط بمحاولة/استثناء حتى تبقى الرقعة عاملة مع
-    نسخة محرّك أقدم لا تعرف الوسيط.
+    - ``join=True`` (الدمج): ``excel_order=True`` — أمر المالك
+      «بنفس ترتيبها»، فلا إعادة ترتيب إطلاقًا.
+    - ``join=False`` (الوحدة الواحدة): ``excel_order=False`` —
+      وحدة العبوة=1 تتصدر، لأن ``units[0]`` هي المكتوبة
+      وصورة الصنف هي صورة الوحدة المفردة لا الكرتون،
+      وهو نفس اختيار ``integration_v2.build_output_stem``.
+
+    يُمرَر الوسيط بمحاولة/استثناء حتى تبقى الرقعة عاملة مع
+    نسخة محرك أقدم لا تعرف الوسيط.
     """
     try:
         from engine_v2 import integration_v2 as integ
@@ -113,49 +141,73 @@ def _units_for(item: str) -> list[str]:
         if fn is None:
             return []
         try:
-            return list(fn(str(item), excel_order=True) or [])
+            return list(fn(str(item), excel_order=bool(join)) or [])
         except TypeError:
             return list(fn(str(item)) or [])
     except Exception:
         return []
 
 
-def _policy_active() -> tuple[bool, str]:
-    """هل سياسة ``join_all_units`` مفعّلة؟ ومعها الوحدة الافتراضية."""
+def _policy_active() -> tuple[bool, bool, str]:
+    """السياسة الفعّالة: (التصحيح مطلوب؟، الدمج؟، الوحدة الافتراضية).
+
+    2.9.10 — الرقعة تعمل في **السياستين**، وليس في الدمج وحده.
+    كانت تنسحب إن لم يكن الدمج مفعّلًا، فبقي مسار الوحدة
+    الواحدة بلا أي طبقة تصحيح: المحرك المُصرَف يسمّي
+    بـ``record.unit``، وعندما تصل فارغة يسقط إلى ``حبة``، فصنفٌ
+    وحدته ``كيس`` أو ``كرتون`` يخرج ``10010033_حبه`` — وحدة
+    لا يملكها الصنف إطلاقًا فينكسر ربط المتجر.
+
+    العلة مُقاسة على بيئة المالك: 4 من 17 صورة (23.5%).
+    ولم تظهر قبل 2.9.10 لأن الدمج كان الافتراضي، فلمّا صار
+    الافتراضي وحدة واحدة بأمر المالك انكشف أن المسار
+    الجديد غير مغطّى.
+    """
     try:
         from engine_v2 import integration_v2 as integ
         from engine_v2.naming_v2 import UNIT_POLICY_JOIN_ALL
         fn = getattr(integ, "_current_naming_settings", None)
         if fn is None:
-            return False, "حبه"
+            return True, False, "حبه"
         s = fn()
         if s is None or not getattr(s, "enabled", False):
-            return False, "حبه"
-        active = getattr(s, "unit_policy", "") == UNIT_POLICY_JOIN_ALL
-        return active, getattr(s, "default_unit", "حبه")
+            # التسمية المخصّصة معطّلة: لا نفرض قاعدة لم تُطلب.
+            return False, False, "حبه"
+        join = getattr(s, "unit_policy", "") == UNIT_POLICY_JOIN_ALL
+        return True, join, getattr(s, "default_unit", "حبه")
     except Exception:
-        return False, "حبه"
+        return False, False, "حبه"
 
 
 def _target_stem(item: str, units: list[str], seq: int,
-                 default_unit: str) -> str:
-    """الاسم المطلوب وفق قاعدة المالك — من ``engine_v2`` نفسها."""
-    from engine_v2.naming_v2 import build_name_join_all
-    return build_name_join_all(item, units, seq, total=seq,
-                               default_unit=default_unit)
+                 default_unit: str, join: bool) -> str:
+    """الاسم المطلوب وفق قاعدة المالك — من ``engine_v2`` نفسها.
+
+    الدمج: ``build_name_join_all`` بكل الوحدات.
+    الوحدة الواحدة: ``build_name_dash`` بـ``units[0]`` — وهي نفس
+    الدالة التي تستدعيها ``integration_v2.build_output_stem``،
+    فلا تتباعد القاعدتان.
+    """
+    if join:
+        from engine_v2.naming_v2 import build_name_join_all
+        return build_name_join_all(item, units, seq, total=seq,
+                                   default_unit=default_unit)
+    from engine_v2.naming_v2 import build_name_dash
+    unit = (units[0] if units else "") or default_unit
+    return build_name_dash(item, seq, unit, total=seq)
 
 
 def _free_path(folder: Path, item: str, units: list[str],
                default_unit: str, ext: str,
-               taken: set[str]) -> tuple[Path, str]:
-    """أول مسار حر للصنف: الرئيسي بلا رقم ثم -1، -2 ...
+               taken: set[str], join: bool) -> tuple[Path, str]:
+    """أول مسار حر للصنف: الرئيسي بلا رقم ثم -2، -3 ...
 
     ``taken`` يمنع تصادم دفعة واحدة تكتب عدة صور للصنف نفسه قبل أن
     تظهر على القرص.
     """
     seq = 1
     while True:
-        stem = _target_stem(item, units, seq, default_unit)
+        stem = _target_stem(item, units, seq, default_unit, join)
         cand = folder / f"{stem}{ext}"
         key = str(cand).casefold()
         if key not in taken and not cand.exists():
@@ -220,12 +272,16 @@ def _set_output_path(items: Any, idx: int, item: Any, new_path: str) -> bool:
 
 
 def apply_join_all_units(result: Any) -> Any:
-    """يعيد تسمية نواتج الدفعة وفق كل وحدات الصنف. يعيد النتيجة نفسها.
+    """يعيد تسمية نواتج الدفعة وفق وحدات الإكسل. يعيد النتيجة نفسها.
+
+    يغطّي السياستين (الاسم محفوظ للتوافق الخلفي):
+    الدمج ⇒ كل الوحدات؛ والوحدة الواحدة ⇒ وحدة الإكسل
+    الصحيحة بدل الافتراضية العمياء ``حبه``.
 
     لا يرفع استثناءً أبدًا: أي إخفاق يُترك معه الاسم الأصلي، لأن فقدان
     قاعدة تسمية أهون من فقدان دفعة معالجة كاملة.
     """
-    active, default_unit = _policy_active()
+    active, join, default_unit = _policy_active()
     if not active:
         return result
     items = getattr(result, "items", None)
@@ -249,15 +305,16 @@ def apply_join_all_units(result: Any) -> Any:
                     src = Path(ws) / out
             if not src.is_file() or src.suffix.casefold() not in _OUT_EXTS:
                 continue
-            units = _units_for(str(item_code))
+            units = _units_for(str(item_code), join)
             if not units:
                 # لا كتالوج للصنف: لا مرجع نصحّح إليه.
                 continue
-            want_stem = _target_stem(str(item_code), units, 1, default_unit)
+            want_stem = _target_stem(str(item_code), units, 1,
+                                     default_unit, join)
             if src.stem == want_stem or src.stem.startswith(want_stem + "-"):
                 continue  # مطابق للقاعدة سلفًا
             dst, _stem = _free_path(src.parent, str(item_code), units,
-                                    default_unit, src.suffix, taken)
+                                    default_unit, src.suffix, taken, join)
             os.replace(src, dst)
             # حدّث النتيجة لتشير للملف الجديد. العناصر مُجمّدة
             # (frozen dataclass) فلا ينفع setattr — نستبدل العنصر.
@@ -277,7 +334,8 @@ def apply_join_all_units(result: Any) -> Any:
             _log(f"تعذرت إعادة تسمية عنصر: {exc}")
 
     if renamed:
-        _log(f"طُبِّقت قاعدة كل الوحدات على {renamed} ملفًا")
+        _mode = "كل الوحدات" if join else "وحدة الإكسل الواحدة"
+        _log(f"طُبِّقت قاعدة {_mode} على {renamed} ملفًا")
         ws = getattr(result, "workspace", None)
         if ws:
             _rewrite_state(Path(ws), mapping)

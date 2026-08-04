@@ -125,19 +125,22 @@ def record_compression(level: str) -> None:
 
 
 def record_link_decision(source: str = "", item_code: str = "",
-                         visual_score: float = 0.0,
                          accepted: bool = True) -> None:
-    """يتعلم من قرارات ربط الصور بلا باركود: كلما قبل المستخدم
-    اقتراحًا بدرجة معينة، تُضبط عتبة الاقتراح البصري مستقبلاً."""
+    """يتعلم من قرارات ربط الصور بلا باركود: كم اقتراحًا قُبل
+    وكم رُفض، لا أكثر.
+
+    2.9.10 — أُزيل المعامل `visual_score` ومجموعه المحفوز من
+    **الجذر** بأمر المالك: لا درجة تشابه ولا نسبة مئوية في أي
+    موضع. كان المعامل يأتيه الرقم 0.0 دائمًا من الواجهة بعد 2.9.9،
+    فكان شفرة ميتة توهم أن المنطق باقٍ وتدعو لإعادة إحيائه."""
     d = _load()
-    slot = d.setdefault("link_decisions",
-                        {"accepted": 0, "rejected": 0,
-                         "score_sum": 0.0, "score_n": 0})
+    slot = d.setdefault("link_decisions", {"accepted": 0, "rejected": 0})
+    # تنقية الملفات المحفوزة من إصدار أقدم: مجاميع الدرجات لم يبقَ
+    # لها مستهلك، فتُطرح من الملف أول مرة يُكتب فيها.
+    slot.pop("score_sum", None)
+    slot.pop("score_n", None)
     slot["accepted" if accepted else "rejected"] = \
         slot.get("accepted" if accepted else "rejected", 0) + 1
-    if visual_score > 0:
-        slot["score_sum"] = slot.get("score_sum", 0.0) + float(visual_score)
-        slot["score_n"] = slot.get("score_n", 0) + 1
     d["events_count"] += 1
     _save(d)
 
@@ -152,15 +155,10 @@ def record_naming_choice(scheme: str, enabled: bool = True) -> None:
     _save(d)
 
 
-def suggest_link_threshold(default: float = 0.62) -> float:
-    """عتبة الاقتراح البصري المتعلمة من قرارات المستخدم."""
-    slot = _load().get("link_decisions") or {}
-    n = slot.get("score_n", 0)
-    if n < 5:
-        return default
-    avg = slot.get("score_sum", 0.0) / n
-    # اجعل العتبة أقل بقليل من متوسط ما يقبله المستخدم
-    return round(min(0.85, max(0.5, avg - 0.08)), 2)
+# 2.9.10 — حُذفت `suggest_link_threshold` من الجذر بأمر المالك.
+# كانت تحسب عتبة لـ«الاقتراح البصري» من متوسط درجات التشابه،
+# ولم يكن لها مستدعٍ واحد في المشروع بعد حذف البصمات البصرية في
+# 2.9.9 — فشفرة ميتة تحمل مفهومًا ألغاه المالك صراحة.
 
 
 def suggest_naming_scheme(default: str = "dash") -> str:

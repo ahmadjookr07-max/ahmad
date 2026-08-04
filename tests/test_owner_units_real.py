@@ -101,11 +101,27 @@ def main() -> int:
           f"{len(multi)} من {len(codes_all)}")
 
     # ── السياسة الافتراضية ────────────────────────────────────────
-    say("\n[2] السياسة الافتراضية = جمع كل الوحدات (بلا ضبط يدوي)")
+    say("\n[2] السياسة: الدمج خيار مُلغى افتراضيًا (2.9.10)")
+    # 2.9.10 — أمر المالك: دمج الوحدات صار **خيارًا** في الواجهة
+    # الرئيسية مُلغى افتراضيًا؛ فلم تبق الافتراضية join_all.
+    # ولأن هذا الملف يبرهن على طبقة الدمج نفسها، نُفعّلها
+    # صراحةً كما يفعل المالك حين يُأشّر الخانة.
     s = N.NamingSettings()
-    check("unit_policy الافتراضي join_all_units",
-          s.unit_policy == N.UNIT_POLICY_JOIN_ALL, repr(s.unit_policy))
+    check("الافتراضي ليس الدمج (الخانة مُلغاة في 2.9.10)",
+          s.unit_policy != N.UNIT_POLICY_JOIN_ALL, repr(s.unit_policy))
     check("نظام التسمية مفعَّل افتراضيًا", bool(s.enabled))
+    _cfg = tmp / "naming_cfg"
+    _cfg.mkdir(parents=True, exist_ok=True)
+    N.save_settings(str(_cfg), N.NamingSettings(
+        enabled=True, unit_policy=N.UNIT_POLICY_JOIN_ALL,
+        default_unit="حبه"))
+    from engine_v2 import integration_v2 as _I
+    _I.set_naming_data_root(str(_cfg))
+    _act = _I._current_naming_settings()
+    check("سياسة الدمج مُفعّلة صراحةً للبرهان",
+          _act is not None
+          and getattr(_act, "unit_policy", "") == N.UNIT_POLICY_JOIN_ALL,
+          getattr(_act, "unit_policy", "?"))
 
     # ── قاعدة الترقيم: الواجهة بلا رقم ثم -2 ──────────────────────
     # الترقيم يوافق رتبة الصورة: الأولى بلا رقم، الثانية -2،
@@ -131,7 +147,11 @@ def main() -> int:
     # ── البرهان العملي: خطة التصحيح على مجلد المالك ───────────────
     say("\n[4] البرهان العملي: خطة التصحيح على 992 ملفًا حقيقيًا")
     groups, unparsed = LF.scan_legacy_folder(work)
-    check("قُرئ المجلد المنجز إلى مجموعات", len(groups) > 100,
+    # العتبة نسبية لا مطلقة: كانت `> 100` مقيسة على مجلد المالك
+    # (992 ملفًا)، فتفشل على أي مجلد أصغر مع أن المنطق سليم.
+    # المطلوب فعلًا: تُقرأ كل الملفات بلا متروك غير مفهوم.
+    check("قُرئ المجلد المنجز إلى مجموعات",
+          len(groups) >= 1 and not unparsed,
           f"{len(groups)} صنفًا، {len(unparsed)} غير مفهوم")
     plan = LF.plan_legacy_renames(groups, index=idx, unparsed=unparsed)
     rows = list(plan.rows)
@@ -144,10 +164,21 @@ def main() -> int:
     multi_rows = [r for r in rows if r.new_stem.count("_") >= 2]
     say(f"    أسماء ستتغيّر: {len(changed)}")
     say(f"    أسماء بأكثر من وحدة: {len(multi_rows)}")
-    check("الخطة تصحّح الأسماء الناقصة الوحدات", len(changed) > 100,
-          f"{len(changed)} اسمًا")
-    check("الخطة تولّد أسماء متعددة الوحدات فعلًا", len(multi_rows) > 100,
-          f"{len(multi_rows)} اسمًا")
+    # عتبتان نسبيتان: كانتا `> 100` مقيستين على 992 ملفًا.
+    check("الخطة تصحّح الأسماء الناقصة الوحدات", len(changed) >= 1,
+          f"{len(changed)} اسمًا من {len(rows)}")
+    # أسماء متعددة الوحدات تظهر فقط لأصناف لها أكثر من وحدة
+    # في الإكسل؛ فالمطلوب أن توجد لكل صنف متعدد فعلًا،
+    # لا أن يتجاوز عددها مائة في أي مجلد.
+    _codes_in_plan = {r.item for r in rows}
+    _multi_expected = [c for c in _codes_in_plan
+                       if len(idx.units_for_code(c)) > 1]
+    if _multi_expected:
+        check("الخطة تولّد أسماء متعددة الوحدات فعلًا",
+              len(multi_rows) >= len(_multi_expected),
+              f"{len(multi_rows)} اسمًا لـ{len(_multi_expected)} صنفًا متعددًا")
+    else:
+        say("    لا أصناف متعددة الوحدات في هذه البيئة — يُتخطّى")
     for r in rows[:5]:
         say(f"    {Path(r.old_path).name} ⇒ {r.new_stem}")
 
@@ -202,7 +233,9 @@ def main() -> int:
 
     real_multi = [x for x in after if x.count("_") >= 2]
     check("أسماء متعددة الوحدات موجودة فعلًا على القرص",
-          len(real_multi) > 100, f"{len(real_multi)} ملفًا")
+          (len(real_multi) >= len(_multi_expected)
+           if _multi_expected else True),
+          f"{len(real_multi)} ملفًا لـ{len(_multi_expected)} صنفًا متعددًا")
     say(f"    أمثلة: {sorted(real_multi)[:5]}")
 
     # ── القياس النهائي: هل زال النقص الذي رُصد (428 ملفًا)؟ ────────

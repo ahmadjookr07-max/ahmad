@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.9.10 — اختبار طبقة تسمية الدفعة (`batch_naming_patch`).
+"""2.9.8 — اختبار طبقة تسمية الدفعة (`batch_naming_patch`).
 
 ## لماذا هذا الاختبار موجود
 
@@ -19,7 +19,6 @@
 1. الصنف متعدد الوحدات يُعاد تسميته: ``X_حبه`` ⇒ ``X_حبه_باكت``
 2. الصنف بوحدة واحدة **لا يُلمَس** (اسم المحرّك صحيح أصلًا)
 3. صورتان للصنف نفسه: الرئيسية بلا رقم والثانية ``-1``
-   (2.9.10 — نص المالك: الرقم ترتيب الصورة بين الإضافيات)
 4. ``output_path`` في النتيجة يُحدَّث ليشير للملف الجديد
 5. ``state.json`` يُحدَّث فلا تشير التقارير لملفات غير موجودة
 6. لا طمس لملف موجود
@@ -109,7 +108,7 @@ def main() -> int:
         return idx
 
     print("=" * 62)
-    print("اختبار طبقة تسمية الدفعة — 2.9.10")
+    print("اختبار طبقة تسمية الدفعة — 2.9.8")
     print("=" * 62)
 
     tmp = Path(tempfile.mkdtemp(prefix="batch_naming_"))
@@ -121,28 +120,30 @@ def main() -> int:
         "10000014": ["حبه", "باكت"],
         "10000051": ["حبه", "كرتون", "كرتون1"],
         "10009999": ["حبه"],
+        # وحدته الوحيدة ليست `حبه` — يكشف سقوط المحرّك
+        # للافتراضية العمياء في سياسة الوحدة الواحدة.
+        "10000098": ["كرتون"],
     }
 
     # نُسجّل الفهرس بنفس الطريقة التي يستخدمها التطبيق.
     integ.set_catalog_index(_index_from(fake_index))
 
-    # 2.9.10 — بأمر المالك صار الافتراضي **وحدة واحدة** (الخانة
-    # مُلغاة في الواجهة)، فلا يجوز للاختبار الاعتماد على جذر فارغ؛
-    # بل يكتب سياسة الدمج صراحةً كما يفعل المالك حين يُفعّل الخانة،
-    # ويتحقق من الافتراضي الجديد صراحةً حتى يُكشف أي ارتداد.
-    integ.set_naming_data_root(str(tmp))
-    save_settings(str(tmp), NamingSettings(
-        enabled=True, scheme=SCHEME_DASH,
-        unit_policy=UNIT_POLICY_JOIN_ALL, default_unit="حبه"))
+    # 2.9.10 — دمج الوحدات صار **خيارًا** في الواجهة مُلغى
+    # افتراضيًا (أمر المالك)؛ فلم تبق الافتراضية join_all.
+    # وهذا الملف يختبر طبقة الدمج نفسها، فنُفعّلها صراحةً
+    # بملف إعدادات محفوظ كما يفعل المالك حين يُأشّر الخانة.
+    _pol_root = tmp / "naming_cfg_join"
+    _pol_root.mkdir(parents=True, exist_ok=True)
+    save_settings(str(_pol_root),
+                  NamingSettings(enabled=True,
+                                 unit_policy=UNIT_POLICY_JOIN_ALL,
+                                 default_unit="حبه"))
+    integ.set_naming_data_root(str(_pol_root))
     _sanity = integ._current_naming_settings()
     check(_sanity is not None
           and _sanity.unit_policy == UNIT_POLICY_JOIN_ALL,
-          "سياسة الدمج المحفوظة تُقرأ من القرص",
+          "سياسة الدمج مُفعّلة صراحةً (خيار المالك)",
           getattr(_sanity, "unit_policy", "لا شيء"))
-    from engine_v2.naming_v2 import UNIT_POLICY_DEFAULT as _SINGLE
-    check(NamingSettings().unit_policy == _SINGLE,
-          "الافتراضي بلا ضبط = وحدة واحدة (أمر المالك)",
-          NamingSettings().unit_policy)
     _u = integ._units_from_catalog("10000014")
     check(_u == ["حبه", "باكت"],
           "الفهرس يُرجع الوحدات الصحيحة", str(_u))
@@ -166,7 +167,7 @@ def main() -> int:
     apply_join_all_units(res)
     check(p1.is_file(), "الاسم بقي كما هو", p1.name)
 
-    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -1")
+    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -2 (2.9.9)")
     a = out / "10000051_حبه.png"
     b = out / "10000051_حبه~2.png"
     _make_png(a)
@@ -176,13 +177,13 @@ def main() -> int:
                     workspace=str(tmp))
     apply_join_all_units(res)
     main_name = out / "10000051_حبه_كرتون_كرتون1.png"
-    # 2.9.10 — نص المالك: الإضافية الأولى `-1`، ولا تداخل مع
-    # الرئيسية لأنها بلا رقم أصلًا (`base` لا يماثل `base-1`).
-    second = out / "10000051_حبه_كرتون_كرتون1-1.png"
+    # 2.9.9 — الثانية تأخذ ترتيبها الحقيقي `-2`؛ كان `-1`
+    # يوهم أنها الأولى فيتداخل مع الرئيسية في نفس المجلد.
+    second = out / "10000051_حبه_كرتون_كرتون1-2.png"
     check(main_name.is_file(), "الرئيسية بلا رقم", main_name.name)
-    check(second.is_file(), "الثانية بـ-1", second.name)
-    check(not (out / "10000051_حبه_كرتون_كرتون1-0.png").is_file(),
-          "لا يوجد رقم -0")
+    check(second.is_file(), "الثانية بـ-2", second.name)
+    check(not (out / "10000051_حبه_كرتون_كرتون1-1.png").is_file(),
+          "لا يوجد -1 المحظور")
 
     print("\n[4] عدم طمس ملف موجود")
     keep = out / "10000014_حبه_باكت.png"   # موجود من [1]
@@ -193,8 +194,8 @@ def main() -> int:
     apply_join_all_units(res)
     check(keep.is_file() and keep.read_bytes() == keep_bytes,
           "الملف الأصلي لم يُطمَس")
-    check((out / "10000014_حبه_باكت-1.png").is_file(),
-          "الجديد أخذ التسلسل الحر", "…-1.png")
+    check((out / "10000014_حبه_باكت-2.png").is_file(),
+          "الجديد أخذ التسلسل الحر", "…-2.png")
 
     print("\n[5] تحديث state.json")
     st = tmp / "state.json"
@@ -210,10 +211,16 @@ def main() -> int:
     check("10000051_حبه_كرتون_كرتون1" in raw,
           "الاسم الجديد كُتب في state.json")
 
-    print("\n[6] السياسة معطّلة ⇒ لا تغيير")
+    print("\n[6] الدمج مُلغى ⇒ وحدة الإكسل الواحدة لا `حبه` العمياء")
     # نحاكي اختيار مالك لسياسة أخرى: نكتب ملف الإعدادات في جذر
     # بيانات مؤقت ونوجّه ``NAMING_DATA_ROOT`` إليه — لا نرقّع دالة
     # داخلية، لأن المراد اختبار المسار الحقيقي للإعدادات.
+    #
+    # 2.9.10 — كان هذا المقطع يتوقع **لا تغيير إطلاقًا**، وهو خطأ:
+    # إلغاء الدمج يعني «وحدة واحدة» لا «وحدة خاطئة». فالمحرك
+    # المُصرَف يسقط إلى `حبه` حين تصله الوحدة فارغة، فصنفٌ
+    # وحدته `كرتون` يخرج `_حبه` — وحدة لا يملكها فينكسر
+    # ربط المتجر (مقيسة على بيئة المالك: 4 من 17 صورة).
     cfg_root = tmp / "cfg"
     cfg_root.mkdir(exist_ok=True)
     try:
@@ -227,18 +234,36 @@ def main() -> int:
               and active.unit_policy == UNIT_POLICY_PER_IMAGE,
               "سياسة المالك المحفوظة تُقرأ",
               getattr(active, "unit_policy", "لا شيء"))
-        p4 = out / "10000014_حبه~5.png"
+        p4 = out / "10000098_حبه.png"
         _make_png(p4)
-        res = FakeBatch(items=[FakeItem("10000014", str(p4))],
+        res = FakeBatch(items=[FakeItem("10000098", str(p4))],
                         workspace=str(tmp))
         apply_join_all_units(res)
-        check(p4.is_file(),
-              "الاسم لم يتغير مع سياسة غير join_all", p4.name)
+        want4 = out / "10000098_كرتون.png"
+        check(want4.is_file(),
+              "الوحدة الواحدة تُصحَّح من الإكسل",
+              f"الموجود: {sorted(x.name for x in out.glob('10000098*'))}")
+        check(not p4.is_file(), "الاسم الخاطئ `_حبه` لم يبق")
+        check(str(res.items[0].output_path) == str(want4),
+              "مسار النتيجة يتبع الملف الجديد",
+              Path(str(res.items[0].output_path)).name)
+        # ولا تُدمج الوحدات في هذه السياسة: الصنف 10000014
+        # له وحدتان، فيجب أن يبقى بوحدة واحدة لا `حبه_باكت`.
+        p5 = out / "10000014_حبه~5.png"
+        _make_png(p5)
+        res5 = FakeBatch(items=[FakeItem("10000014", str(p5))],
+                         workspace=str(tmp))
+        apply_join_all_units(res5)
+        _p5 = Path(str(res5.items[0].output_path))
+        check("باكت" not in _p5.stem and _p5.stem.startswith("10000014_حبه"),
+              "لا دمج وحدات حين يلغي المالك الخيار", _p5.name)
     except Exception as exc:  # noqa: BLE001
         check(False, "اختبار السياسة البديلة", str(exc)[:80])
     finally:
-        integ.set_naming_data_root("")
-
+        # نعود لجذر سياسة الدمج المُفعّل (لا لجذر فارغ، لأن
+        # الافتراضي في 2.9.10 صار الوحدة الواحدة) لتكمل
+        # المراحل التالية على نفس السياسة المختبرة.
+        integ.set_naming_data_root(str(_pol_root))
     print("\n[7] الطبقة لا تُسقط الدفعة عند إخفاق")
     # ملف غير موجود على القرص + عنصر بلا item_code + عنصر بلا مسار.
     bad = FakeBatch(items=[
@@ -312,9 +337,8 @@ def main() -> int:
 
     fz = tmp / "frozen"
     code_fz = "20000001"
-    # الفقرة [6] بدّلت السياسة والجذر — نعيد جذر tmp وjoin_all_units
+    # الفقرة [6] بدّلت السياسة إلى per_image — نعيد join_all_units
     # وإلا ارتدت الطبقة مباشرة ومرّ الفحص بلا اختبار شيء.
-    integ.set_naming_data_root(str(tmp))
     save_settings(str(tmp), NamingSettings(
         enabled=True, scheme=SCHEME_DASH,
         unit_policy=UNIT_POLICY_JOIN_ALL, default_unit="حبه"))

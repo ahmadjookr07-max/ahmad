@@ -291,10 +291,28 @@ def main() -> int:
     multi_expected = [c for c, _s in outs if len(ref.get(c, [])) > 1]
     say(f"    أصناف متعددة الوحدات في الإكسل: {len(multi_expected)}")
     say(f"    أسماء فعلية متعددة الوحدات: {len(multi_named)}")
-    check("الأصناف متعددة الوحدات سُمِّيت بكل وحداتها",
-          len(multi_named) >= len(multi_expected),
-          f"متوقع ≥{len(multi_expected)} فوُجد {len(multi_named)}",
-          ok=f"{len(multi_named)}/{len(multi_expected)}")
+    # 2.9.10 — دمج كل الوحدات صار **خيارًا للمالك** في الواجهة
+    # (خانة اختيار مُلغاة افتراضيًا → وحدة واحدة). فلا يصح إلزام المسار
+    # التلقائي بالدمج دائمًا. المطلوب المطابقة مع السياسة الفعلية:
+    # إن كان الدمج مُفعّلًا فيجب أن تظهر الوحدات مجتمعة؛ وإن كان مُلغى
+    # فيجب أن تبقى وحدة واحدة — والمسار اليدوي في [5b] يفحص الدمج صراحةً.
+    try:
+        from engine_v2 import naming_v2 as _nv2
+        _pol = getattr(getattr(win, "naming_settings", None), "unit_policy", "")
+        _join_on = (_pol == _nv2.UNIT_POLICY_JOIN_ALL)
+    except Exception:
+        _join_on = False
+    say(f"    سياسة الوحدة الفعالة: {'دمج كل الوحدات' if _join_on else 'وحدة واحدة'}")
+    if _join_on:
+        check("الأصناف متعددة الوحدات سُمّيت بكل وحداتها (الدمج مُفعّل)",
+              len(multi_named) >= len(multi_expected),
+              f"متوقع ≥{len(multi_expected)} فوُجد {len(multi_named)}",
+              ok=f"{len(multi_named)}/{len(multi_expected)}")
+    else:
+        check("الدمج مُلغى → وحدة واحدة في كل اسم",
+              not multi_named,
+              f"{len(multi_named)} اسمًا دمج وحدات رغم إلغاء الخيار",
+              ok=f"{len(outs)} اسمًا بوحدة واحدة كما هو الافتراضي")
 
     say("\n[5] عيّنات فعلية (اسم الملف ← وحدات الإكسل)")
     for code, stem in outs[:10]:

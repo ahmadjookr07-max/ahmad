@@ -6465,12 +6465,15 @@ class MainWindow(QMainWindow):
                 item_code = result_item.item_code or "غير مرتبط"
                 barcode = result_item.barcode or "لا يوجد باركود"
                 product_name = result_item.product_name or "صنف غير محدد"
-                confidence = f"{result_item.confidence:.0%}" if result_item.confidence else "—"
+                # 2.9.10 — أُزيلت النسبة المئوية من العرض بأمر المالك:
+                # كان التلميح يقول «الثقة: 84%» — رقم لا يفيد المستخدم في
+                # قرار ولا يعرف مم اشتُق. المعلومة المفيدة هي **لماذا** رُبطت
+                # الصورة (باركود؟ اسم؟ ربط يدوي؟) وهي ما يحمله `explanation`.
                 tooltip = (
                     f"الصورة: {result_item.source_name}\n"
                     f"اسم الصنف: {product_name}\n"
                     f"رقم الصنف: {item_code}\nالباركود: {barcode}\n"
-                    f"الثقة: {confidence}\n{result_item.explanation or ''}"
+                    f"{result_item.explanation or ''}"
                 ).strip()
 
                 status_cell = QTableWidgetItem(status_text)
@@ -7024,7 +7027,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(dlg)
         hint = QLabel(
             f"ستُربط {len(targets)} صورة بصنف الصورة التي تختارها هنا —"
-            " القائمة مرتبة تلقائيًا: الأقرب بصريًا لصورتك يظهر أولاً."
+            " القائمة مرتبة بالقرب في الجدول: أقرب صورة مرتبطة لصورتك تأتي أولاً."
             " بعد الربط ترث الصورة رقم الصنف والوحدة وتخرج بالتسمية النهائية"
             " تلقائيًا (رقم الصنف_الوحدة-1 و-2...).")
         hint.setWordWrap(True)
@@ -7086,7 +7089,6 @@ class MainWindow(QMainWindow):
             for t in targets:
                 _lrn.record_link_decision(
                     source=t.source_name, item_code=reference,
-                    visual_score=0.0,  # 2.9.9 — أُلغيت نسبة التشابه
                     accepted=True)
         except Exception:
             pass
@@ -7128,7 +7130,6 @@ class MainWindow(QMainWindow):
                 _lrn.record_link_decision(
                     source=t.source_name,
                     item_code=reference_item.item_code,
-                    visual_score=0.0,
                     accepted=True,
                 )
         except Exception:
@@ -7169,7 +7170,6 @@ class MainWindow(QMainWindow):
                 _lrn.record_link_decision(
                     source=t.source_name,
                     item_code=target_code,
-                    visual_score=0.0,  # 2.9.9 — أُلغيت نسبة التشابه
                     accepted=True,
                 )
         except Exception:
