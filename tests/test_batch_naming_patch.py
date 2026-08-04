@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.9.8 — اختبار طبقة تسمية الدفعة (`batch_naming_patch`).
+"""2.9.10 — اختبار طبقة تسمية الدفعة (`batch_naming_patch`).
 
 ## لماذا هذا الاختبار موجود
 
@@ -19,6 +19,7 @@
 1. الصنف متعدد الوحدات يُعاد تسميته: ``X_حبه`` ⇒ ``X_حبه_باكت``
 2. الصنف بوحدة واحدة **لا يُلمَس** (اسم المحرّك صحيح أصلًا)
 3. صورتان للصنف نفسه: الرئيسية بلا رقم والثانية ``-1``
+   (2.9.10 — نص المالك: الرقم ترتيب الصورة بين الإضافيات)
 4. ``output_path`` في النتيجة يُحدَّث ليشير للملف الجديد
 5. ``state.json`` يُحدَّث فلا تشير التقارير لملفات غير موجودة
 6. لا طمس لملف موجود
@@ -108,7 +109,7 @@ def main() -> int:
         return idx
 
     print("=" * 62)
-    print("اختبار طبقة تسمية الدفعة — 2.9.8")
+    print("اختبار طبقة تسمية الدفعة — 2.9.10")
     print("=" * 62)
 
     tmp = Path(tempfile.mkdtemp(prefix="batch_naming_"))
@@ -125,15 +126,23 @@ def main() -> int:
     # نُسجّل الفهرس بنفس الطريقة التي يستخدمها التطبيق.
     integ.set_catalog_index(_index_from(fake_index))
 
-    # السياسة تُقرأ من ``NAMING_DATA_ROOT``؛ والافتراضية أصلاً
-    # ``join_all_units`` (2.9.6). نترك الجذر فارغًا فتعمل الافتراضية —
-    # وهو نفس ما يقع عند المالك قبل أي ضبط يدوي.
-    integ.set_naming_data_root("")
+    # 2.9.10 — بأمر المالك صار الافتراضي **وحدة واحدة** (الخانة
+    # مُلغاة في الواجهة)، فلا يجوز للاختبار الاعتماد على جذر فارغ؛
+    # بل يكتب سياسة الدمج صراحةً كما يفعل المالك حين يُفعّل الخانة،
+    # ويتحقق من الافتراضي الجديد صراحةً حتى يُكشف أي ارتداد.
+    integ.set_naming_data_root(str(tmp))
+    save_settings(str(tmp), NamingSettings(
+        enabled=True, scheme=SCHEME_DASH,
+        unit_policy=UNIT_POLICY_JOIN_ALL, default_unit="حبه"))
     _sanity = integ._current_naming_settings()
     check(_sanity is not None
           and _sanity.unit_policy == UNIT_POLICY_JOIN_ALL,
-          "السياسة الافتراضية join_all_units بلا ضبط يدوي",
+          "سياسة الدمج المحفوظة تُقرأ من القرص",
           getattr(_sanity, "unit_policy", "لا شيء"))
+    from engine_v2.naming_v2 import UNIT_POLICY_DEFAULT as _SINGLE
+    check(NamingSettings().unit_policy == _SINGLE,
+          "الافتراضي بلا ضبط = وحدة واحدة (أمر المالك)",
+          NamingSettings().unit_policy)
     _u = integ._units_from_catalog("10000014")
     check(_u == ["حبه", "باكت"],
           "الفهرس يُرجع الوحدات الصحيحة", str(_u))
@@ -157,7 +166,7 @@ def main() -> int:
     apply_join_all_units(res)
     check(p1.is_file(), "الاسم بقي كما هو", p1.name)
 
-    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -2 (2.9.9)")
+    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -1")
     a = out / "10000051_حبه.png"
     b = out / "10000051_حبه~2.png"
     _make_png(a)
@@ -167,13 +176,13 @@ def main() -> int:
                     workspace=str(tmp))
     apply_join_all_units(res)
     main_name = out / "10000051_حبه_كرتون_كرتون1.png"
-    # 2.9.9 — الثانية تأخذ ترتيبها الحقيقي `-2`؛ كان `-1`
-    # يوهم أنها الأولى فيتداخل مع الرئيسية في نفس المجلد.
-    second = out / "10000051_حبه_كرتون_كرتون1-2.png"
+    # 2.9.10 — نص المالك: الإضافية الأولى `-1`، ولا تداخل مع
+    # الرئيسية لأنها بلا رقم أصلًا (`base` لا يماثل `base-1`).
+    second = out / "10000051_حبه_كرتون_كرتون1-1.png"
     check(main_name.is_file(), "الرئيسية بلا رقم", main_name.name)
-    check(second.is_file(), "الثانية بـ-2", second.name)
-    check(not (out / "10000051_حبه_كرتون_كرتون1-1.png").is_file(),
-          "لا يوجد -1 المحظور")
+    check(second.is_file(), "الثانية بـ-1", second.name)
+    check(not (out / "10000051_حبه_كرتون_كرتون1-0.png").is_file(),
+          "لا يوجد رقم -0")
 
     print("\n[4] عدم طمس ملف موجود")
     keep = out / "10000014_حبه_باكت.png"   # موجود من [1]
@@ -184,8 +193,8 @@ def main() -> int:
     apply_join_all_units(res)
     check(keep.is_file() and keep.read_bytes() == keep_bytes,
           "الملف الأصلي لم يُطمَس")
-    check((out / "10000014_حبه_باكت-2.png").is_file(),
-          "الجديد أخذ التسلسل الحر", "…-2.png")
+    check((out / "10000014_حبه_باكت-1.png").is_file(),
+          "الجديد أخذ التسلسل الحر", "…-1.png")
 
     print("\n[5] تحديث state.json")
     st = tmp / "state.json"
@@ -303,8 +312,9 @@ def main() -> int:
 
     fz = tmp / "frozen"
     code_fz = "20000001"
-    # الفقرة [6] بدّلت السياسة إلى per_image — نعيد join_all_units
+    # الفقرة [6] بدّلت السياسة والجذر — نعيد جذر tmp وjoin_all_units
     # وإلا ارتدت الطبقة مباشرة ومرّ الفحص بلا اختبار شيء.
+    integ.set_naming_data_root(str(tmp))
     save_settings(str(tmp), NamingSettings(
         enabled=True, scheme=SCHEME_DASH,
         unit_policy=UNIT_POLICY_JOIN_ALL, default_unit="حبه"))

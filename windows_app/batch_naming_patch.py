@@ -96,13 +96,26 @@ def _log(msg: str) -> None:
 
 
 def _units_for(item: str) -> list[str]:
-    """وحدات الصنف من فهرس الإكسل المسجَّل — عبر ``integration_v2``."""
+    """وحدات الصنف من فهرس الإكسل المسجَّل — عبر ``integration_v2``.
+
+    2.9.10: ``excel_order=True`` لأن هذه الرقعة تعمل في مسار
+    الدمج وحده، وأمر المالك فيه «بنفس ترتيبها». لو بقيت
+    تأخذ الترتيب المُعاد (وحدة العبوة=1 متصدرة) لأعادت تسمية
+    ما كتبته ``build_output_stem`` بترتيب مخالف له، فتتصارع
+    الطبقتان على الملف نفسه في كل دفعة.
+
+    يُمرَّر الوسيط بمحاولة/استثناء حتى تبقى الرقعة عاملة مع
+    نسخة محرّك أقدم لا تعرف الوسيط.
+    """
     try:
         from engine_v2 import integration_v2 as integ
         fn = getattr(integ, "_units_from_catalog", None)
         if fn is None:
             return []
-        return list(fn(str(item)) or [])
+        try:
+            return list(fn(str(item), excel_order=True) or [])
+        except TypeError:
+            return list(fn(str(item)) or [])
     except Exception:
         return []
 

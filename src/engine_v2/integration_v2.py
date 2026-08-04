@@ -256,18 +256,28 @@ def set_catalog_index(index) -> None:
     _CATALOG_REF["index"] = index
 
 
-def _units_from_catalog(item: str) -> list[str]:
-    """كل وحدات الصنف كما وردت في الإكسل حرفيًا وبنفس الترتيب
-    (لسياسة join_all_units) — تعيد [] إن لم يتوفر الكتالوج.
+def _units_from_catalog(item: str, excel_order: bool = False) -> list[str]:
+    """وحدات الصنف من الإكسل — تعيد [] إن لم يتوفر الكتالوج.
 
-    2.9.3: تُحذف الوحدات المكررة إملائيًا (حبه/حبة) من المصدر
-    مع الاحتفاط بأول إملاء ورد في الإكسل حرفيًا.
-
-    2.9.4: **الوحدة ذات العبوة=1 تتصدر القائمة**. سياسة الوحدة
-    الواحدة تأخذ `units[0]`، وترتيب صفوف الإكسل عشوائي، فكان صنفٌ
-    صورته صورة حبة يُسمّى `باكت` لأن صف الباكت ورد أولًا. الصورة
-    تمثل القطعة الواحدة، فوحدتها هي ذات العبوة=1 (مقيسة على 484
+    ``excel_order=False`` (الافتراضي، لسياسة الوحدة الواحدة):
+    **الوحدة ذات العبوة=1 تتصدر**. سياسة الوحدة الواحدة تأخذ
+    ``units[0]``، وترتيب صفوف الإكسل عشوائي، فكان صنفٌا صورته صورة
+    حبة يُسمّى ``باكت`` لأن صف الباكت ورد أولًا (مقيسة على 484
     صنفًا: 99.8% تطابق).
+
+    ``excel_order=True`` (لسياسة ``join_all_units``): الترتيب
+    **حرفيًا كما وردت صفوف الإكسل** بلا أي إعادة ترتيب.
+
+    2.9.10 — لماذا فُصل المساران: أمر المالك في سياسة الدمج
+    نصٌّ: «قم بجمع كل الوحدات التابعة له من ملف الإكسل (بنفس
+    ترتيبها)» ومثاله ``حبه_شدة_كرتون``. وتصدير وحدة العبوة=1
+    قد يقلب هذا الترتيب (إن ورد الكرتون قبل الحبة يخرج
+    ``حبه_كرتون_شدة``) فيخالف «بنفس ترتيبها».
+    التصدير مُبرّر للوحدة الواحدة (اختيار أيّها تمطل الصورة)،
+    ولا معنى له في الدمج لأن كل الوحدات تُكتب أصلًا.
+
+    التكرار الإملائي (حبه/حبة) يُحذف في الحالتين مع الاحتفاط
+    بأول إملاء ورد حرفيًا — ولا يُجرى أي تصحيح إملائي.
     """
     idx = _CATALOG_REF.get("index")
     if idx is not None:
@@ -275,15 +285,17 @@ def _units_from_catalog(item: str) -> list[str]:
             units = [str(u) for u in idx.units_for_code(str(item))
                      if str(u or "").strip()]
             if units:
-                primary = ""
-                try:
-                    primary = str(idx.primary_unit_for_code(str(item)) or "")
-                except Exception:
+                if not excel_order:
                     primary = ""
-                if primary:
-                    key = unit_key(primary)
-                    units = [primary] + [u for u in units
-                                         if unit_key(u) != key]
+                    try:
+                        primary = str(
+                            idx.primary_unit_for_code(str(item)) or "")
+                    except Exception:
+                        primary = ""
+                    if primary:
+                        key = unit_key(primary)
+                        units = [primary] + [u for u in units
+                                             if unit_key(u) != key]
                 return dedupe_units(units)
         except Exception:
             pass
@@ -320,7 +332,9 @@ def build_output_stem(out_dir: str | Path, item: str,
     settings = _current_naming_settings()
     if settings is not None and settings.enabled and \
             getattr(settings, "unit_policy", "") == UNIT_POLICY_JOIN_ALL:
-        units = _units_from_catalog(item) or ([unit] if unit else [])
+        # ترتيب الإكسل الحرفي: أمر المالك «بنفس ترتيبها»
+        units = (_units_from_catalog(item, excel_order=True)
+                 or ([unit] if unit else []))
         existing = _count_item_images(stems, item)
         return build_name_join_all(item, units, existing + 1,
                                    total=existing + 1,

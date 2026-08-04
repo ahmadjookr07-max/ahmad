@@ -264,12 +264,17 @@ def _naming_settings():
         return None
 
 
-def _units_for_group(item: str, index, unit_in_name: str) -> list[str]:
+def _units_for_group(item: str, index, unit_in_name: str,
+                     excel_order: bool = True) -> list[str]:
     """وحدات الصنف للتسمية — **منطق مطابق حرفًا بحرف**
     لما تفعله الدفعة الجديدة في `integration_v2._units_from_catalog`.
 
-    يعيد قائمة الوحدات مرتّبة بتصدير وحدة العبوة=1، أو [] إن غاب
-    الإكسل (فيُستخدم ما في اسم الملف).
+    2.9.10: الافتراضي ``excel_order=True`` لأن مستدعيها الوحيد
+    هو مسار الدمج (``join_all``)، وأمر المالك فيه: الوحدات
+    «بنفس ترتيبها» في الإكسل. تصدير وحدة العبوة=1 كان يقلب
+    الترتيب، فيخرج المجلد المنجز ``حبه_كرتون_شدة`` حين يقول
+    الإكسل ``حبه_شدة_كرتون``. يبقى ``excel_order=False`` متاحًا
+    لمن يحتاج اختيار وحدة الصورة الواحدة.
     """
     from .naming_v2 import dedupe_units, unit_key
     if index is None:
@@ -281,14 +286,15 @@ def _units_for_group(item: str, index, unit_in_name: str) -> list[str]:
         units = []
     if not units:
         return []
-    primary = ""
-    try:
-        primary = str(index.primary_unit_for_code(str(item)) or "")
-    except Exception:
+    if not excel_order:
         primary = ""
-    if primary:
-        key = unit_key(primary)
-        units = [primary] + [u for u in units if unit_key(u) != key]
+        try:
+            primary = str(index.primary_unit_for_code(str(item)) or "")
+        except Exception:
+            primary = ""
+        if primary:
+            key = unit_key(primary)
+            units = [primary] + [u for u in units if unit_key(u) != key]
     return dedupe_units(units)
 
 

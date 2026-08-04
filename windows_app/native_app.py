@@ -210,7 +210,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.9.9"
+APP_VERSION = "2.9.10"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -1890,6 +1890,14 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._apply_scaled_metrics()
         self._update_controls()
+        # 2.9.10: استعادة حالة خيار دمج الوحدات فور بناء الواجهة،
+        # قبل أن يرى المالك النافذة، حتى توافق الخانة ما ستفعله
+        # المعالجة فعلًا لا ما تفترضه الواجهة افتراضًا.
+        try:
+            self._load_join_units_state()
+        except Exception as exc:
+            print(f"[naming] restore join state failed: {exc}",
+                  file=sys.stderr)
         # الإشارة تعبر من خيط تحميل الإكسل إلى خيط الواجهة
         # (Qt.AutoConnection يجعلها مطابورة تلقائيًا عبر الخيوط).
         self.legacy_recheck_requested.connect(
@@ -2367,6 +2375,29 @@ class MainWindow(QMainWindow):
         naming_row.addWidget(self.open_legacy_button)
         naming_row.addStretch(1)
         catalog_layout.addLayout(naming_row)
+        # 2.9.10 (أمر المالك): خيار دمج الوحدات في **الواجهة الرئيسية**
+        # لا في نافذة السياسة وحدها: «في الواجهة الرئيسية أفضل، قبل
+        # عمل أي شيء». النافذة الكاملة تبقى للخيارات المتقدمة، والاثنتان
+        # تقرأان وتكتبان ملف naming_settings.json نفسه فلا تتعارضان.
+        self.join_units_check = QCheckBox(
+            "دمج كل وحدات الصنف في الاسم (حبه_شدة_كرتون)")
+        self.join_units_check.setObjectName("joinUnitsCheck")
+        self.join_units_check.setToolTip(
+            "مُلغى: الاسم يأخذ وحدة واحدة فقط — 10011205_حبه\n"
+            "مُفعّل: تُدمج كل وحدات الصنف من الإكسل بترتيبها —\n"
+            "10011205_حبه_شدة_كرتون\n\n"
+            "وفي الحالتين: صورة الواجهة (★) بلا رقم، ثم -1 ثم -2.\n"
+            "يُحفظ اختيارك ويُستعاد في المرة القادمة.")
+        self.join_units_check.toggled.connect(self._on_join_units_toggled)
+        catalog_layout.addWidget(self.join_units_check)
+        # معاينة حيّة للاسم الناتج: المالك يرى أثر الخيار بعينه
+        # قبل تشغيل المعالجة بدل أن يكتشفه في 991 ملفًا بعد فوات الأوان.
+        self.naming_preview_label = QLabel("")
+        self.naming_preview_label.setObjectName("namingPreview")
+        self.naming_preview_label.setWordWrap(True)
+        self.naming_preview_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse)
+        catalog_layout.addWidget(self.naming_preview_label)
         layout.addWidget(catalog_group)
 
         images_group = QGroupBox("2. صور المنتجات")
@@ -5456,6 +5487,9 @@ class MainWindow(QMainWindow):
             try:
                 opener()
                 self._after_naming_policy_changed()
+                # تزامن اتجاهي: لو غيّر المالك السياسة من النافذة
+                # الكاملة فلا تبقى خانة الواجهة تعرض القديمة.
+                self._load_join_units_state()
                 return
             except Exception as exc:
                 print(f"[naming] installed opener failed: {exc}",
@@ -5474,9 +5508,140 @@ class MainWindow(QMainWindow):
         try:
             UnitNamingDialog(self, self).exec()
             self._after_naming_policy_changed()
+            self._load_join_units_state()
         except Exception as exc:
             QMessageBox.warning(self, "سياسة التسمية",
                                 f"تعذّر فتح النافذة.\nالسبب: {exc}")
+
+    # ------------------------------------------- خيار دمج الوحدات (الواجهة)
+    def _naming_settings_path(self) -> Path:
+        """مسار ملف سياسة التسمية — **نفس** الملف الذي تقرأه وتكتبه نافذة
+        السياسة الكاملة (v2_ui.UnitNamingDialog._settings_path)، حتى لا
+        تنشأ حالتان متعارضتان: خانة الواجهة تقول شيئًا والنافذة شيئًا آخر."""
+        base = Path(getattr(self, "v2_data_root", None) or DATA_ROOT)
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "naming_settings.json"
+
+    def _load_join_units_state(self) -> None:
+        """يستعيد حالة الخيار المحفوظة عند بدء التشغيل.
+
+        أمر المالك: «يُحفظ اختيارك ويُستعاد» — فلا يُعاد ضبطه كل تشغيل.
+        الافتراضي عند غياب الملف: **مُلغى** (الوحدة الواحدة `حبه`) وفق
+        أمره «الوحدة تكون حبه كما السابق».
+        """
+        policy = ""
+        try:
+            p = self._naming_settings_path()
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                policy = str(data.get("unit_policy", "") or "")
+        except Exception as exc:
+            print(f"[naming] load join state failed: {exc}", file=sys.stderr)
+        join_on = (policy == "join_all_units")
+        if hasattr(self, "join_units_check"):
+            # blockSignals حتى لا يُستدعى المعالج فيكتب الملف عند مجرد
+            # الاستعادة — الاستعادة قراءة لا اختيار جديد.
+            self.join_units_check.blockSignals(True)
+            self.join_units_check.setChecked(join_on)
+            self.join_units_check.blockSignals(False)
+        self._update_naming_preview()
+
+    def _on_join_units_toggled(self, checked: bool) -> None:
+        """يحفظ اختيار المالك فورًا ويعيد تحميله في مسار المعالجة.
+
+        الحفظ فوري لا عند إغلاق نافذة: الخيار في الواجهة الرئيسية
+        ليُختار «قبل عمل أي شيء»، فلو لم يُحفظ فورًا وبدأ المالك المعالجة
+        لخرجت الصور بالسياسة القديمة مع أن الخانة تُظهر الجديدة.
+        """
+        try:
+            p = self._naming_settings_path()
+            data = {}
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            data["unit_policy"] = ("join_all_units" if checked
+                                   else "default_unit")
+            # علم الاختيار الصريح: يمنع أي ترقية تلقائية مستقبلية من
+            # نقض اختيار المالك (كما فعلت ترقية 2.9.6 القسرية).
+            data["unit_policy_explicit"] = True
+            data.setdefault("default_unit", "حبه")
+            data.setdefault("scheme", "dash")
+            data.setdefault("template", "{item}_{unit}-{seq}")
+            data.setdefault("enabled", True)
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+            self.v2_naming_policy = data
+        except Exception as exc:
+            print(f"[naming] save join state failed: {exc}", file=sys.stderr)
+            if hasattr(self, "status_label"):
+                self.status_label.setText(f"تعذّر حفظ خيار التسمية: {exc}")
+            return
+        self._after_naming_policy_changed()
+        self._update_naming_preview()
+
+    def _update_naming_preview(self) -> None:
+        """يعرض الاسم الناتج فعليًا وفق الخيار الحالي.
+
+        يستخدم وحدات صنف حقيقي من الإكسل إن كان محمَّلًا — لأن معاينة
+        بمثال ثابت قد تُطابق حين يُخالف الواقع (صنف بوحدة واحدة يُعرض
+        كأن له ثلاثًا).
+        """
+        if not hasattr(self, "naming_preview_label"):
+            return
+        join_on = (hasattr(self, "join_units_check")
+                   and self.join_units_check.isChecked())
+        item = "10011205"
+        units: list[str] = []
+        idx = getattr(self, "v2_catalog_index", None)
+        if idx is not None:
+            try:
+                # by_code_all هو قاموس الأكواد الفعلي في CatalogIndex
+                # (لا توجد دالة codes()). نقف عند 500 مفتاح حتى لا
+                # تتجمد الواجهة على كتالوج بعشرات الآلاف.
+                first = ""
+                for n, code in enumerate(idx.by_code_all.keys()):
+                    if n >= 500:
+                        break
+                    if not first:
+                        first = str(code)
+                    u = idx.units_for_code(code)
+                    if len(u) > 1:
+                        item, units = str(code), u
+                        break
+                if not units and first:
+                    # كتالوج أصنافه بوحدة واحدة: نعرض صنفًا حقيقيًا
+                    # منه بدل مثال مُختلق يوهم بوحدات لا وجود لها.
+                    u = idx.units_for_code(first)
+                    if u:
+                        item, units = first, u
+            except Exception:
+                units = []
+        if not units:
+            units = ["حبه", "شدة", "كرتون"]
+        try:
+            from engine_v2.naming_v2 import (
+                build_name_join_all, NamingSettings)
+            if join_on:
+                base = build_name_join_all(item, units, 1, total=3)
+                second = build_name_join_all(item, units, 2, total=3)
+                third = build_name_join_all(item, units, 3, total=3)
+                head = f"مُفعّل — دمج {len(units)} وحدات من الإكسل"
+            else:
+                s = NamingSettings()
+                unit = units[0] if units else "حبه"
+                base = s.render(item, 1, unit, total=3)
+                second = s.render(item, 2, unit, total=3)
+                third = s.render(item, 3, unit, total=3)
+                head = f"مُلغى — وحدة واحدة ({unit})"
+            self.naming_preview_label.setText(
+                f"{head}\n"
+                f"الواجهة ★: {base}.webp\n"
+                f"الثانية: {second}.webp\n"
+                f"الثالثة: {third}.webp")
+        except Exception as exc:
+            self.naming_preview_label.setText(f"تعذّر حساب المعاينة: {exc}")
 
     def _after_naming_policy_changed(self) -> None:
         """يعيد توصيل جذر التسمية بعد أي حفظ حتى تُقرأ السياسة الجديدة
@@ -5791,6 +5956,11 @@ class MainWindow(QMainWindow):
                 # يُستدعى على خيط الواجهة لأن `_load` خلفي.
                 if getattr(self, "_legacy_folder", None) is not None:
                     self.legacy_recheck_requested.emit()
+                # 2.9.10: معاينة خيار دمج الوحدات تُبنى من وحدات
+                # الإكسل الحقيقية، فبمجرد وصول الفهرس تُحدَّث لتعرض
+                # ما سيخرج فعلًا لا مثالًا عامًا. التأجيل إلى خيط الواجهة
+                # لأن لمس عناصر Qt من خيط خلفي غير مأمون.
+                QTimer.singleShot(0, self._update_naming_preview)
             except Exception as exc:
                 print(f"[catalog] index load failed: {exc}", file=sys.stderr)
         # 2.9.7: نحفظ مقبض الخيط ليقدر `_ensure_catalog_index`
@@ -7515,7 +7685,13 @@ class MainWindow(QMainWindow):
         try:
             from engine_v2 import integration_v2 as _iv
             from engine_v2.primary_image_v2 import renumber_item_images
-            units = _iv._units_from_catalog(code) or []
+            # 2.9.10: ترتيب الإكسل الحرفي. إعادة الترقيم بعد ★
+            # يجب أن تنتج الأسماء نفسها التي تكتبها الدفعة؛
+            # ترتيب مختلف يعني أن مجرد ضغط ★ يغير الأسماء.
+            try:
+                units = _iv._units_from_catalog(code, excel_order=True) or []
+            except TypeError:
+                units = _iv._units_from_catalog(code) or []
             settings = _iv._current_naming_settings()
         except Exception:
             units, settings = [], None
