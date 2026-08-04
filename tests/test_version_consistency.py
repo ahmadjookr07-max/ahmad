@@ -191,8 +191,19 @@ def t_installers_read_version() -> None:
         hard = re.search(r'!define\s+APP_VERSION\s+"\d', txt)
         check(hard is None, f"{f.name}: لا إصدار نصي",
               hard.group(0) if hard else "")
-        check("searchparse" in txt and "__FILEDIR__" in txt,
-              f"{f.name}: يقرأ VERSION من موضع الملف")
+        check("searchparse" in txt,
+              f"{f.name}: يقرأ VERSION بـsearchparse")
+        # `__FILEDIR__` في سطر فعّال = عطب توافق مُثبت، لا مطلوبًا.
+        # makensis ينقل مجلد عمله إلى مجلد السكربت قبل التحليل
+        # (مُثبت بـ`!system 'pwd'`)، لكن `__FILEDIR__` يبقى كما ورد في
+        # سطر الأوامر؛ فالنداء بمسار نسبي من جذر المشروع يُنتج
+        # `build/windows/\..\..\VERSION` فيُحلّ مرتين ويخفق. ينجو منه
+        # windows-latest وحده، فيُسلّم مشروع لا يمكن بناءه محليًا.
+        bad = [ln.strip() for ln in txt.splitlines()
+               if "__FILEDIR__" in ln and not ln.lstrip().startswith(";")]
+        check(not bad,
+              f"{f.name}: لا __FILEDIR__ في سطر فعّال (يخفق على لينكس)",
+              f"{bad[:1]}" if bad else "")
         # رقم إصدار قديم متسرّب في أي سطر فعّال (لا تعليق)
         live = [ln for ln in txt.splitlines()
                 if not ln.lstrip().startswith(";")]

@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec — Ahmed Al-Faifi Market Image Studio V2.0.0."""
 from pathlib import Path
+import importlib.util
 import os
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
@@ -138,6 +139,63 @@ if _missing:
 print(f"[spec] وحدات مكتشفة: {len(_project_mods)} "
       f"(engine_v2={len(_engine_mods)}, awareness={len(_aware_mods)}, "
       f"ui={len(_ui_mods)})")
+
+# ───────────── إضافات منصّة Qt — جمع صريح إلزامي وحاجز مطلق ─────────────
+#
+# أخطر عطل وُجد في هذا المشروع: خرجت الحزمة مرةً بلا أي
+# مجلد `PySide6/plugins` — 14 ملفًا فقط في `_internal/PySide6/`.
+# وبلا `platforms/qwindows.dll` لا تستطيع Qt إنشاء أي نافذة
+# فيموت البرنامج عند الإقلاع برسالة:
+#   "no Qt platform plugin could be initialized"
+# على **كل جهاز** بما فيه ويندوز 11 حقيقي. أي أن العطل كان
+# سيصل للمالك.
+#
+# السبب: خُطّاف PySide6 المدمج في PyInstaller يعرف بنية نسخ Qt
+# التي صدرت قبله؛ فإن تغيرت بنية عجلة PySide6 (وقد تغيرت فى 6.11)
+# يعجز الخطّاف عن جمع الإضافات **ولا يُصدر أي تحذير**.
+# فلا يجوز الاعتماد عليه: نجمع الإضافات صراحةً من القرص ونفشل
+# البناء إن غابت `qwindows.dll`.
+#
+# لماذا مجموعات منتقاة لا الكل: البرنامج Widgets خالص بلا QML
+# ولا 3D ولا وسائط؛ فنستبعد qmltooling وsceneparsers وassetimporters
+# وmultimedia وdesigner وgeoservices… (مئات الميجابايت بلا منفعة).
+_QT_PLUGIN_GROUPS = (
+    "platforms",              # إلزامي مطلقًا — qwindows.dll
+    "styles",                 # مطابقة مظهر ويندوز
+    "imageformats",           # قراءة/كتابة WebP وJPEG وICO
+    "iconengines",            # أيقونات SVG في الواجهة
+    "platforminputcontexts",  # إدخال العربية
+    "tls",                    # HTTPS للترخيص وتنزيل النماذج
+    "networkinformation",     # كشف توفر الشبكة
+    "generic",                # أجهزة إدخال عامة
+)
+
+_qt_plugin_files = 0
+_qwindows_found = False
+_pyside_spec = importlib.util.find_spec("PySide6")
+if _pyside_spec and _pyside_spec.submodule_search_locations:
+    _pyside_dir = Path(list(_pyside_spec.submodule_search_locations)[0])
+    _plugins_root = _pyside_dir / "plugins"
+    for _grp in _QT_PLUGIN_GROUPS:
+        _grp_dir = _plugins_root / _grp
+        if not _grp_dir.is_dir():
+            continue
+        for _dll in sorted(_grp_dir.rglob("*.dll")):
+            _rel = _dll.relative_to(_plugins_root).parent
+            binaries.append((str(_dll), str(Path("PySide6/plugins") / _rel)))
+            _qt_plugin_files += 1
+            if _dll.name.lower() == "qwindows.dll":
+                _qwindows_found = True
+
+if not _qwindows_found:
+    raise SystemExit(
+        "\nفشل البناء متعمّدًا: إضافة منصّة Qt `qwindows.dll` غير موجودة.\n"
+        "بلاها لا تستطيع Qt إنشاء نافذة فلا يُقلع البرنامج على أي جهاز\n"
+        "ويموت برسالة 'no Qt platform plugin could be initialized'.\n\n"
+        "الموضع المتوقع: <site-packages>/PySide6/plugins/platforms/qwindows.dll\n"
+        "أعد تركيب PySide6 كاملة (لا PySide6-Essentials وحدها إن كانت مقطوعة).\n")
+
+print(f"[spec] إضافات Qt المحزومة: {_qt_plugin_files} ملفًا")
 
 hiddenimports = (list(zxing_hidden) + list(onnx_hidden) + list(dil_hidden) + [
     "zxingcpp", "onnxruntime", "dilithium_py", "dilithium_py.ml_dsa",

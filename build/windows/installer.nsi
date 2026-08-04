@@ -12,11 +12,20 @@
 ; قاعدة «لا تكرار»: لا يُكتب رقم الإصدار في هذا الملف إطلاقًا، فلا
 ; يتناقض المثبت مع التطبيق كما حدث في 2.9.8 (version_info.txt).
 ; يفشل البناء صراحةً إن غاب VERSION — أفضل من مثبت بإصدار خاطئ.
-; __FILEDIR__ يضمن الحل من موضع هذا الملف لا من مجلد تشغيل البناء
-; (المسار النسبي المجرد يُحلّ من مجلد العمل فيخفق صامتًا).
+; المسار نسبي مجرّد قصدًا: makensis يجعل مجلد عمله مجلد السكربت
+; نفسه قبل التحليل، فـ`..\..\VERSION` صحيح من أي مجلد تشغيل
+; وعلى ويندوز ولينكس معًا — وهو نفس أسلوب APP_SOURCE وMUI_ICON
+; وEULA_ar.txt أدناه وكلها تعمل.
+; تحذير: لا تُعد إلى `${__FILEDIR__}` هنا. هو يُبقِي المسار كما ورد
+; في سطر الأوامر؛ فإن نودي السكربت بمسار نسبي من جذر المشروع
+; (`makensis build/windows/installer.nsi`) صار الناتج مزدوجًا:
+; `build/windows/\..\..\VERSION` يُحلّ من داخل `build/windows` فيخفق:
+;   !searchparse /file: error opening "build/windows/\..\..\VERSION"
+; أي أنه ينجح على ورشة windows-latest ويخفق في أي بناء محلي
+; من الجذر — عطب «يعمل عندي». مُثبت بـ`!system 'pwd'`.
 ; ولا فرع احتياطي: غياب VERSION يُفشل البناء صراحةً بدل إنتاج
-; مثبت بإصدار كاذب. مُتحقَّق منه بـmakensis ⇒ [2.9.9].
-!searchparse /file "${__FILEDIR__}\..\..\VERSION" "" APP_VERSION "$\n"
+; مثبت بإصدار كاذب. مُتحقَق منه بـmakensis ⇒ [2.9.9].
+!searchparse /file "..\..\VERSION" "" APP_VERSION "$\n"
 !define APP_PUBLISHER "Ahmed Al-Faifi"
 !define APP_EXE "AhmedAlFaifiMarketImageStudio.exe"
 !define APP_SOURCE "..\..\dist\windows\AhmedAlFaifiMarketImageStudio"

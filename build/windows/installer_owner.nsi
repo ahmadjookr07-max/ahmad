@@ -12,10 +12,14 @@ Unicode true
 !define APP_NAME      "Ahmed Al-Faifi Owner Studio"
 !define APP_NAME_AR   "استوديو المالك"
 !define APP_ID        "AhmedAlFaifiOwnerStudio"
-; الإصدار مصدره الوحيد ملف VERSION. __FILEDIR__ يضمن الحل من موضع
-; هذا الملف لا من مجلد تشغيل البناء، ولا فرع احتياطي: غياب VERSION
+; الإصدار مصدره الوحيد ملف VERSION، ولا فرع احتياطي: غياب VERSION
 ; يُفشل البناء صراحةً بدل إنتاج مُثبِّت بإصدار كاذب.
-!searchparse /file "${__FILEDIR__}\..\..\VERSION" "" APP_VERSION "$\n"
+; المسار نسبي مجرّد قصدًا: makensis يجعل مجلد عمله مجلد السكربت
+; نفسه قبل التحليل، فيعمل من أي مجلد وعلى ويندوز ولينكس معًا.
+; لا تُعد إلى `${__FILEDIR__}`: يُبقي المسار كما ورد في سطر الأوامر،
+; فيندمج مع مجلد العمل الجديد ويخفق عند النداء بمسار نسبي
+; من جذر المشروع (عطب ينجو منه windows-latest وحده).
+!searchparse /file "..\..\VERSION" "" APP_VERSION "$\n"
 !define APP_PUBLISHER "Ahmed Al-Faifi"
 !define APP_EXE       "AhmedAlFaifiOwnerStudio.exe"
 !define SECRETS_DIR   "بيانات_المالك"

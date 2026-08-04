@@ -35,13 +35,30 @@ CASES = [
     ("مثبت يثبّت الإصدار نصيًا (عطب النسخ الثماني)",
      "build/windows/installer.nsi",
      lambda s: s.replace(
-         '!searchparse /file "${__FILEDIR__}\\..\\..\\VERSION" "" APP_VERSION "$\\n"',
+         '!searchparse /file "..\\..\\VERSION" "" APP_VERSION "$\\n"',
          '!define APP_VERSION "2.0.0"')),
 
-    ("ورشة تبني إصدارًا خاطئًا (عطب 2.0.0 الحقيقي)",
+    # العطب الحقيقي المكتشف في 2.9.9: `__FILEDIR__` يجعل المسار
+    # يتضاعف عند النداء بمسار نسبي من الجذر، فينجح البناء على
+    # windows-latest وحده ويخفق محليًا وعلى أي عامِل لينكس.
+    ("مسار VERSION بـ__FILEDIR__ (عطب توافق لينكس الحقيقي)",
+     "build/windows/installer.nsi",
+     lambda s: s.replace(
+         '!searchparse /file "..\\..\\VERSION"',
+         '!searchparse /file "${__FILEDIR__}\\..\\..\\VERSION"')),
+
+    ("مسار VERSION بـ__FILEDIR__ في مثبت المالك",
+     "build/windows/installer_owner.nsi",
+     lambda s: s.replace(
+         '!searchparse /file "..\\..\\VERSION"',
+         '!searchparse /file "${__FILEDIR__}\\..\\..\\VERSION"')),
+
+    # الورشة تقرأ الإصدار من VERSION إلى `steps.ver.outputs.version`؛
+    # تجميده نصيًا هو عين عطب 2.0.0 الذي أنتج مخرجًا باسم خاطئ.
+    ("ورشة ترفع مخرجًا بإصدار مجمّد (عطب 2.0.0 الحقيقي)",
      ".github/workflows/build-windows.yml",
-     lambda s: s.replace("name: Setup-User-${{ env.APP_VERSION }}",
-                         "name: Setup-User-2.0.0")),
+     lambda s: s.replace("name: Setup-${{ steps.ver.outputs.version }}",
+                         "name: Setup-2.0.0")),
 
     ("بنية بيانات الإصدار معطوبة نحويًا",
      "build/windows/version_info.txt",
