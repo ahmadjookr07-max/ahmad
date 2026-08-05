@@ -201,8 +201,14 @@ def t_installers_read_version() -> None:
         hard = re.search(r'!define\s+APP_VERSION\s+"\d', txt)
         check(hard is None, f"{f.name}: لا إصدار نصي",
               hard.group(0) if hard else "")
-        check("searchparse" in txt,
-              f"{f.name}: يقرأ VERSION بـsearchparse")
+        # ملف الجسر لا يقرأ VERSION بنفسه لأنه لا يملك منطقًا أصلًا:
+        # كل ما فيه `!include` للسكربت الحقيقي، فالقراءة تأتي منه.
+        # ولو أُلزم بـsearchparse لصار تكرارًا لمصدر الحقيقة — وهو
+        # عين ما تمنعه هذه الحراسة. فالشرط عليه أن يُضمّن الأصل.
+        includes_real = re.search(r'^\s*!include\s+"?installer\.nsi',
+                                  txt, re.M) is not None
+        check("searchparse" in txt or includes_real,
+              f"{f.name}: يقرأ VERSION بـsearchparse (أو يُضمّن من يقرأه)")
         # `__FILEDIR__` في سطر فعّال = عطب توافق مُثبت، لا مطلوبًا.
         # makensis ينقل مجلد عمله إلى مجلد السكربت قبل التحليل
         # (مُثبت بـ`!system 'pwd'`)، لكن `__FILEDIR__` يبقى كما ورد في
@@ -217,9 +223,18 @@ def t_installers_read_version() -> None:
         # رقم إصدار قديم متسرّب في أي سطر فعّال (لا تعليق)
         live = [ln for ln in txt.splitlines()
                 if not ln.lstrip().startswith(";")]
+        # استثناء واحد واعٍ: سطر `!finalize` التوافقي. ورشة GitHub
+        # القائمة تتحقق من اسم ثابت من عهد 2.0.0 وترفع الأثر به،
+        # وتصحيحها محجوب (الدفع إلى `.github/workflows` يستلزم صلاحية
+        # `workflows`). فينسخ السطر المُثبِّت الحقيقي نسخةً ثانية
+        # بالاسم القديم. فـ«2.0.0» هنا ليست إصدارًا متسرّبًا بل اسم
+        # واجهة خارجية لا نملك تغييرها — والملفان متطابقان بايتًا
+        # ببايت. ويُلغى هذا الاستثناء متى لُصقت الورشة المصحّحة من
+        # `build/ci/build-windows.yml.جاهز-للرفع`.
         leaked = [ln.strip() for ln in live
                   if re.search(r"\b\d+\.\d+\.\d+\b", ln)
-                  and version() not in ln]
+                  and version() not in ln
+                  and "!finalize" not in ln]
         check(not leaked, f"{f.name}: لا إصدار قديم متسرّب",
               f"{leaked[:2]}" if leaked else "")
 
