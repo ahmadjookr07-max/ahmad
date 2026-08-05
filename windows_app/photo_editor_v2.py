@@ -190,6 +190,46 @@ class EditorCanvas(QGraphicsView):
         self._zoom = self.transform().m11()
         self.zoom_changed.emit(self._zoom)
 
+    # 2.9.11 — زوم برمجي من الأزرار والاختصارات. كان الزوم حصرًا
+    # على `wheelEvent`، فمن لا يعرف أن العجلة تزوّم يظن المحرر بلا زوم؛
+    # ولا وسيلة للوصول إلى 100% بدقة (وهي حاجة حقيقية لفحص الباركود
+    # والنص قبل الحفظ). الزوم يتم نحو **مركز العرض** لا المؤشر،
+    # لأن موضع المؤشر عند النقر على زر في الشريط لا علاقة له بالصورة.
+    ZOOM_MIN = 0.04
+    ZOOM_MAX = 40.0
+
+    def zoom_step(self, factor: float) -> None:
+        """تكبير/تصغير نحو مركز العرض بمعامل معلوم."""
+        if self._item.pixmap().isNull():
+            return
+        new_zoom = self._zoom * float(factor)
+        if not (self.ZOOM_MIN <= new_zoom <= self.ZOOM_MAX):
+            # لا نتجاهل النقرة بلا أثر: نلتزم الحد فيشعر المستخدم
+            # أنه وصل النهاية بدل أن يحسب الزر معطلاً.
+            new_zoom = min(max(new_zoom, self.ZOOM_MIN), self.ZOOM_MAX)
+            if abs(new_zoom - self._zoom) < 1e-9:
+                return
+            factor = new_zoom / self._zoom
+        center = self.viewport().rect().center()
+        old_pos = self.mapToScene(center)
+        self.scale(factor, factor)
+        new_pos = self.mapToScene(center)
+        delta = new_pos - old_pos
+        self.translate(delta.x(), delta.y())
+        self._zoom = new_zoom
+        self.zoom_changed.emit(self._zoom)
+        self._update_cursor_preview()
+
+    def zoom_actual(self) -> None:
+        """الحجم الحقيقي 1:1 — بكسل الصورة = بكسل الشاشة."""
+        if self._item.pixmap().isNull():
+            return
+        self.resetTransform()
+        self._zoom = 1.0
+        self.centerOn(self._item)
+        self.zoom_changed.emit(self._zoom)
+        self._update_cursor_preview()
+
     def set_tool(self, tool: str) -> None:
         self._tool = tool
         if tool == self.TOOL_PAN:
@@ -233,7 +273,7 @@ class EditorCanvas(QGraphicsView):
             return
         factor = 1.18 if event.angleDelta().y() > 0 else 1 / 1.18
         new_zoom = self._zoom * factor
-        if not (0.04 <= new_zoom <= 40.0):
+        if not (self.ZOOM_MIN <= new_zoom <= self.ZOOM_MAX):
             return
         old_pos = self.mapToScene(event.position().toPoint())
         self.scale(factor, factor)

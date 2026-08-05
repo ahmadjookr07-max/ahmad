@@ -18,7 +18,8 @@ from .naming_v2 import (next_sequence, build_name, build_name_dash,
                         build_name_join_all, UNIT_POLICY_JOIN_ALL,
                         UNIT_SUFFIX_DEFAULT, SCHEME_DASH,
                         load_saved_settings, parse_name, dedupe_units,
-                        unit_key, NamingSettings)
+                        unit_key, NamingSettings,
+                        plan_stems_for_policy)
 
 if TYPE_CHECKING:  # للتحليل الساكن فقط — لا يُحمّل عند التشغيل
     from .processor_v2 import ProcessorV2, ProcessOptionsV2
@@ -316,38 +317,45 @@ def _count_item_images(stems: list[str], item: str) -> int:
     return count
 
 
-def build_output_stem(out_dir: str | Path, item: str,
-                      unit: str = UNIT_SUFFIX_DEFAULT) -> str:
-    """اسم الملف التالي للصنف وفق سياسة التسمية المحفوظة.
+def build_output_stems(out_dir: str | Path, item: str,
+                       unit: str = UNIT_SUFFIX_DEFAULT) -> list[str]:
+    """**كل** أسماء الملف التالي للصنف وفق السياسة المحفوظة.
 
-    النمط الجديد (dash): الصورة الأولى {item}_{unit} ثم عند وصول صورة
-    ثانية تُرقّم الجديدة -2 (ويُعاد ترقيم الأولى إلى -1 عبر rename لاحق
-    في طبقة الواجهة إن أمكن). النمط الكلاسيكي: حبه، 2_حبه، 3_حبه...
+    يعيد قائمة: اسمًا واحدًا في أغلب السياسات، و**اسمًا لكل وحدة** في
+    ``replicate_all_units`` (الصنف الذي له حبه/شدة/كرتون في الإكسل يأخذ
+    ثلاث نسخ). الوحدات تُقرأ من الإكسل حرفيًا وبترتيبه.
 
-    سياسة join_all_units (2.3): الرئيسية {item}_حبة_شدة_كرتون بلا رقم
-    ثم -1/-2/-3 للإضافية — الوحدات من الإكسل حرفيًا وبالترتيب."""
+    2.9.11: قبل هذا التاريخ كانت الدالة تفرّع على ``join_all_units`` ثم
+    ``SCHEME_DASH`` وتسقط كل ما بقي في وحدة واحدة قيمتها الوسيط ``unit``
+    القادم من المحرك (``حبه`` دائمًا) — فسياستا ``replicate_all_units``
+    و``default_unit`` لم تكن لهما وجود في مسار الإنتاج إطلاقًا. الآن
+    القرار كله في ``plan_stems_for_policy``.
+    """
     out_dir = Path(out_dir)
     stems = [p.stem for p in out_dir.glob("*.webp")] if out_dir.is_dir() else []
-    seq = next_sequence(stems, item)
     settings = _current_naming_settings()
-    if settings is not None and settings.enabled and \
-            getattr(settings, "unit_policy", "") == UNIT_POLICY_JOIN_ALL:
-        # ترتيب الإكسل الحرفي: أمر المالك «بنفس ترتيبها»
-        units = (_units_from_catalog(item, excel_order=True)
-                 or ([unit] if unit else []))
-        existing = _count_item_images(stems, item)
-        return build_name_join_all(item, units, existing + 1,
-                                   total=existing + 1,
-                                   default_unit=settings.default_unit)
-    if settings is not None and settings.enabled and \
-            settings.scheme == SCHEME_DASH:
-        # عدد الصور الموجودة للصنف حتى الآن + هذه = total
-        existing = sum(1 for s in stems
-                       if (pn := parse_name(s)) and pn.item == str(item))
-        return build_name_dash(item, seq, unit, total=existing + 1)
-    if settings is not None and settings.enabled:
-        return settings.render(item, seq, unit, total=seq)
-    return build_name(item, seq, unit)
+    if settings is None or not settings.enabled:
+        return [build_name(item, next_sequence(stems, item), unit)]
+    # وحدات الإكسل حرفيًا وبترتيبه — أمر المالك «بنفس ترتيبها».
+    # الوسيط ``unit`` احتياط أخير حين لا كتالوج للصنف.
+    units = (_units_from_catalog(item, excel_order=True)
+             or ([unit] if unit else []))
+    existing = _count_item_images(stems, item)
+    seq = existing + 1
+    return plan_stems_for_policy(item, units, seq, total=seq,
+                                 settings=settings, chosen_unit=unit)
+
+
+def build_output_stem(out_dir: str | Path, item: str,
+                      unit: str = UNIT_SUFFIX_DEFAULT) -> str:
+    """اسم الملف التالي للصنف (الاسم الأول) وفق السياسة المحفوظة.
+
+    غلاف توافقي حول ``build_output_stems`` لمن يحتاج اسمًا واحدًا؛ مع
+    ``replicate_all_units`` تُنشأ بقية النسخ في طبقة الدفعة
+    (``batch_naming_patch``) بعد كتابة الملف.
+    """
+    stems = build_output_stems(out_dir, item, unit)
+    return stems[0] if stems else build_name(item, 1, unit)
 
 
 def _wrap_result(result_cls, ok: bool, output_path: str, error: str,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,28 @@ ENV = dict(os.environ)
 ENV.setdefault("QT_QPA_PLATFORM", "offscreen")
 ENV.setdefault("MIS_SKIP_LICENSE", "1")
 ENV.setdefault("PYTHONWARNINGS", "ignore")
+
+# واجهة المالك (`owner_studio`) مبنية على tkinter لا Qt، وtkinter
+# لا يعرف `QT_QPA_PLATFORM=offscreen`؛ فيطلب خادم X حقيقيًا ويرمي
+# `TclError: couldn't connect to display`. ولمّا كان المُشغِّل يورّث
+# `DISPLAY`/`XAUTHORITY` من بيئته، صارت نتيجة اختبار استوديو
+# المالك (26 تحققًا للتراخيص والتواقيع) رهن متغير بيئي عارض:
+# ينجح إن وُرِثت شاشة صالحة، ويفشل إن وُرِثت شاشة ميتة أو بلا
+# تفويض — وهو فشل يوهم بعطب في المنتج وليس منه. فنُوفر
+# شاشة افتراضية معزولة لكل جولة بدل الاعتماد على الموروث.
+ENV.pop("XAUTHORITY", None)
+ENV.pop("DISPLAY", None)
+
+
+def _xvfb_prefix() -> list[str]:
+    """بادئة `xvfb-run` إن توفرت، وإلا فلا شيء.
+
+    `-a` يختار رقم شاشة حرًا تلقائيًا فلا تتعارك الجولات، وإن غاب
+    `xvfb-run` من الآلة يبقى التنفيذ مباشرًا ويتخطّى اختبار tkinter
+    برمزه المتفق عليه بدل أن يُعلن فشلًا كاذبًا.
+    """
+    return ["xvfb-run", "-a"] if shutil.which("xvfb-run") else []
+
 
 TIMEOUT = int(os.environ.get("MIS_TEST_TIMEOUT", "900"))
 
@@ -141,7 +164,8 @@ def main() -> int:
         t0 = time.time()
         try:
             proc = subprocess.run(
-                [sys.executable, str(path)], cwd=str(ROOT), env=ENV,
+                _xvfb_prefix() + [sys.executable, str(path)],
+                cwd=str(ROOT), env=ENV,
                 capture_output=True, text=True, timeout=TIMEOUT)
             out = (proc.stdout or "") + (proc.stderr or "")
             status, detail = verdict(path.name, proc.returncode, out)

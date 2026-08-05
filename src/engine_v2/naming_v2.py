@@ -682,6 +682,59 @@ def save_settings(data_root: str | Path, settings: NamingSettings) -> None:
         pass
 
 
+def plan_stems_for_policy(item: str, units: list[str] | tuple[str, ...],
+                          seq: int, total: int,
+                          settings: NamingSettings,
+                          chosen_unit: str = "") -> list[str]:
+    """أسماء صورة **واحدة** وفق السياسة — مصدر الحقيقة الوحيد.
+
+    يعيد قائمة: اسمًا واحدًا في السياسات الثلاث، و**اسمًا لكل وحدة**
+    في ``replicate_all_units`` (الصنف الذي له حبه/شدة/كرتون يأخذ
+    ثلاث نسخ من الصورة نفسها، وحدة لكل نسخة).
+
+    لماذا وُجدت (2.9.11 — عطب أبلغ عنه المالك): كان كل مسار إنتاج
+    يفرّع على «دمج أم لا» فقط، فتسقط ``replicate_all_units`` و
+    ``default_unit`` و``per_image`` في فرع واحد بالوحدة الافتراضية
+    ``حبه``. النتيجة التي رآها المالك: يختار «توليد نسخة لكل وحدة»
+    فتُحفظ السياسة ثم يخرج المجلد كله ``10011205_حبه`` وتُعلن
+    الواجهة «مُلغى — وحدة واحدة (حبه)». المنطق الصحيح كان موجودًا في
+    ``plan_names_for_item`` لكنه معزول عن الإنتاج (معاينة واختبارات
+    فقط). فمن اليوم: مسارات الإنتاج الثلاثة (الدفعة، الملف المفرد،
+    المجلد المنجز/القديم) تستدعي هذه الدالة، ولا تفرّع على السياسة
+    بنفسها. أي تعديل على قاعدة الوحدات يحدث **هنا وحدها**.
+
+    ``units`` وحدات الصنف من الإكسل بترتيب الإكسل حرفيًا.
+    ``seq`` رتبة الصورة الحقيقية (1 = الواجهة ★ بلا رقم).
+    """
+    clean = [u for u in (units or []) if str(u).strip()]
+    if not clean:
+        clean = [settings.default_unit or UNIT_SUFFIX_DEFAULT]
+    policy = settings.unit_policy
+    if policy == UNIT_POLICY_JOIN_ALL:
+        return [build_name_join_all(item, clean, seq, total=total,
+                                    default_unit=settings.default_unit)]
+    if policy == UNIT_POLICY_REPLICATE:
+        # نسخة لكل وحدة من وحدات الإكسل، بترتيب الإكسل، بلا تكرار.
+        out: list[str] = []
+        for u in dedupe_units([clean_unit(sanitize_item(str(u)))
+                              for u in clean]):
+            stem = settings.render(item, seq, u, total=total)
+            if stem not in out:
+                out.append(stem)
+        return out or [settings.render(item, seq, clean[0], total=total)]
+    if policy == UNIT_POLICY_DEFAULT:
+        # الوحدة الواحدة: **وحدة الإكسل الأولى** هي الأصل، والافتراضية
+        # ``حبه`` احتياط لصنف بلا وحدة في الإكسل. العكس (تصدير حبه
+        # دائمًا) هو العطب الذي أبلغ عنه المالك حرفيًا.
+        unit = clean_unit(sanitize_item(str(clean[0]))) or \
+            settings.default_unit or UNIT_SUFFIX_DEFAULT
+        return [settings.render(item, seq, unit, total=total)]
+    # per_image: وحدة اختارها المالك لهذه الصورة، أو أولى وحدات الإكسل
+    unit = clean_unit(sanitize_item(str(chosen_unit))) if chosen_unit else ""
+    unit = unit or clean_unit(sanitize_item(str(clean[0])))
+    return [settings.render(item, seq, unit, total=total)]
+
+
 def plan_names_for_item(item: str, image_count: int, units: list[str],
                         settings: NamingSettings,
                         chosen_unit: str = "") -> list[list[str]]:
@@ -690,25 +743,13 @@ def plan_names_for_item(item: str, image_count: int, units: list[str],
     يعيد قائمة لكل صورة: قائمة الأسماء المطلوبة لها (قد تتعدد مع replicate —
     الأصناف التي لها حبة وشدة وكرتون معًا تأخذ اسمًا لكل وحدة).
     """
+    # 2.9.11: صار غلافًا رقيقًا حول ``plan_stems_for_policy`` بعد أن
+    # كان يكرّر منطق السياسات. التكرار هو ما سمح للمعاينة أن تُظهر
+    # قاعدة والإنتاج يُنفّذ أخرى.
     units = [u for u in units if u] or [settings.default_unit]
-    result: list[list[str]] = []
-    for i in range(image_count):
-        seq = i + 1
-        if settings.unit_policy == UNIT_POLICY_JOIN_ALL:
-            result.append([build_name_join_all(
-                item, units, seq, total=image_count,
-                default_unit=settings.default_unit)])
-        elif settings.unit_policy == "replicate_all_units":
-            result.append([settings.render(item, seq, u, total=image_count)
-                           for u in units])
-        elif settings.unit_policy == "default_unit":
-            result.append([settings.render(item, seq, settings.default_unit,
-                                           total=image_count)])
-        else:  # per_image
-            unit = chosen_unit or units[0]
-            result.append([settings.render(item, seq, unit,
-                                           total=image_count)])
-    return result
+    return [plan_stems_for_policy(item, units, i + 1, image_count,
+                                  settings, chosen_unit)
+            for i in range(image_count)]
 
 
 def apply_template_to_all(groups: dict[str, int], units_by_item: dict[str, list[str]],

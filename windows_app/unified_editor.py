@@ -125,8 +125,152 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         self.advanced_panel = self._build_advanced_panel()
         self.advanced_panel.setVisible(False)
         root.addWidget(self.advanced_panel)
+        # مراجع التخطيط — تلزم لنقل اللوحة المتقدمة جانبيًا (2.9.11)
+        self._root_layout = root
 
         self._apply_unified_style()
+        self._install_zoom_shortcuts()
+
+    # ------------------------------------------------------- zoom shortcuts
+    def _install_zoom_shortcuts(self) -> None:
+        """اختصارات زوم معيارية — ما يتوقعه أي مستخدم من محرر صور.
+
+        ``Ctrl+=``/``Ctrl++`` تكبير، ``Ctrl+-`` تصغير، ``Ctrl+0``
+        الحجم الحقيقي، ``Ctrl+9``/``F`` ملاءمة. النطاق
+        ``WidgetWithChildrenShortcut`` لا ``ApplicationShortcut``، فلا
+        تختلس الاختصارات من بقية التطبيق حين لا يكون المحرر في الواجهة.
+        """
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        def add(keys: str, slot) -> None:
+            sc = QShortcut(QKeySequence(keys), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
+
+        add("Ctrl+=", lambda: self.canvas.zoom_step(1.25))
+        add("Ctrl++", lambda: self.canvas.zoom_step(1.25))
+        add("Ctrl+-", lambda: self.canvas.zoom_step(1 / 1.25))
+        add("Ctrl+0", lambda: self.canvas.zoom_actual())
+        add("Ctrl+9", lambda: self.canvas.fit_view())
+
+    # --------------------------------------------- advanced panel placement
+    def set_advanced_side_mode(self, side: bool) -> None:
+        """وضع اللوحة المتقدمة جانبًا بدل أسفل الصورة.
+
+        لماذا (2.9.11 — شكوى المالك الثالثة): اللوحة أسفل الصورة
+        تأكل حتى 240px من **الارتفاع**، ومعها الترويسة وشريط الأدوات
+        والتذييل لا يبقى للصورة إلا ثلث الشاشة — وهو الذي أبلغ عنه
+        حرفيًا («الصورة 35%»). الشاشات العريضة فيها عرض فاضل لا
+        ارتفاع، فنقلها يمينًا يرد للصورة كل ارتفاعها دون إخفاء أي أداة.
+        """
+        side = bool(side)
+        if side == bool(getattr(self, "_advanced_side", False)):
+            return
+        root = getattr(self, "_root_layout", None)
+        if root is None:
+            return
+        scroll = getattr(self, "_advanced_scroll", None)
+        if side:
+            # المحاولة الأولى أضافت الحاوية إلى نفس التخطيط العمودي
+            # فصارت صفًا رابعًا يأكل 410px من الارتفاع — أسوأ من قبل.
+            # الصواب: ننقل **كل محتوى الجذر** (الصورة والأشرطة)
+            # إلى ودجت عمود، ثم نضع [العمود | اللوحة] في صف أفقي واحد.
+            items: list = []
+            while root.count():
+                items.append(root.takeAt(0))
+
+            column = QWidget()
+            col = QVBoxLayout(column)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(root.spacing() if root.spacing() >= 0 else 6)
+            for it in items:
+                w = it.widget()
+                if w is self.advanced_panel:
+                    continue
+                if w is not None:
+                    col.addWidget(w, 1 if w is self.canvas else 0)
+                elif it.layout() is not None:
+                    col.addLayout(it.layout())
+                elif it.spacerItem() is not None:
+                    col.addItem(it.spacerItem())
+            self._side_column = column
+
+            hl = QHBoxLayout()
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            hl.addWidget(column, 1)
+            hl.addWidget(self.advanced_panel, 0)
+            self._side_row = hl
+
+            self.advanced_panel.setMaximumWidth(360)
+            self.advanced_panel.setMinimumWidth(260)
+            if scroll is not None:
+                # جانبيًا لا معنى لسقف ارتفاع — تمتد بكامل الطول
+                scroll.setMaximumHeight(16777215)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._reflow_advanced(vertical=True)
+            root.addLayout(hl, 1)
+        else:
+            column = getattr(self, "_side_column", None)
+            row = getattr(self, "_side_row", None)
+            self.advanced_panel.setMaximumWidth(16777215)
+            self.advanced_panel.setMinimumWidth(0)
+            if scroll is not None:
+                scroll.setMaximumHeight(240)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self._reflow_advanced(vertical=False)
+            if column is not None:
+                col = column.layout()
+                moved: list = []
+                while col is not None and col.count():
+                    moved.append(col.takeAt(0))
+                # أفرغ الجذر من الصف الأفقي قبل إرجاع العناصر
+                while root.count():
+                    root.takeAt(0)
+                for it in moved:
+                    w = it.widget()
+                    if w is not None:
+                        root.addWidget(w, 1 if w is self.canvas else 0)
+                    elif it.layout() is not None:
+                        root.addLayout(it.layout())
+                    elif it.spacerItem() is not None:
+                        root.addItem(it.spacerItem())
+                root.addWidget(self.advanced_panel)
+                if row is not None:
+                    row.setParent(None)
+                column.setParent(None)
+                column.deleteLater()
+            self._side_column = None
+            self._side_row = None
+        self._advanced_side = side
+
+    def _reflow_advanced(self, vertical: bool) -> None:
+        """يعيد ترتيب بطاقات اللوحة المتقدمة أفقيًا أو عموديًا.
+
+        البطاقات نفسها تُنقل بلا إعادة بناء، فلا تُفقد قيمة منزلقة
+        ولا حالة مربع اختيار ولا تنقطع أي إشارة موصولة.
+        """
+        row = getattr(self, "_advanced_row", None)
+        if row is None:
+            return
+        cards = [row.itemAt(i).widget() for i in range(row.count())]
+        cards = [c for c in cards if c is not None]
+        inner = getattr(self, "_advanced_inner", None)
+        if inner is None:
+            return
+        new = QVBoxLayout() if vertical else QHBoxLayout()
+        new.setContentsMargins(6, 6, 6, 6)
+        new.setSpacing(8)
+        for c in cards:
+            new.addWidget(c)
+        if vertical:
+            new.addStretch(1)
+        # إزالة التخطيط القديم ثم تركيب الجديد على نفس الحاوية
+        old = inner.layout()
+        if old is not None:
+            QWidget().setLayout(old)   # ينقل ملكية التخطيط القديم فيُحرر
+        inner.setLayout(new)
+        self._advanced_row = new
 
     # ---------------------------------------------------- primary toolbar
     def _build_primary_bar(self) -> QWidget:
@@ -175,7 +319,18 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
                               checkable=True)
         self.before_btn.pressed.connect(lambda: self._toggle_before(True))
         self.before_btn.released.connect(lambda: self._toggle_before(False))
-        self.fit_btn = btn("⛶", "ملاءمة الصورة لحجم النافذة",
+        # 2.9.11 — المالك طلب تكبيرًا وتحريكًا سهلًا وسلسًا. العجلة
+        # والسحب كانا متوفرين في `EditorCanvas` لكن بلا أي زر مرئي،
+        # ومن لا يعرف أن العجلة تزوّم يظن المحرر بلا زوم. فأُضيفت
+        # ثلاثة أزرار صريحة مع اختصارات Ctrl+= / Ctrl+- / Ctrl+0.
+        self.zoom_in_btn = btn("＋", "تكبير (Ctrl+=) — أو عجلة الفأرة للأعلى",
+                               lambda: self.canvas.zoom_step(1.25))
+        self.zoom_out_btn = btn("－", "تصغير (Ctrl+-) — أو عجلة الفأرة للأسفل",
+                                lambda: self.canvas.zoom_step(1 / 1.25))
+        self.zoom_reset_btn = btn(
+            "1:1", "الحجم الحقيقي 100% (Ctrl+0) — لفحص النص والباركود بدقة",
+            lambda: self.canvas.zoom_actual(), wide=True)
+        self.fit_btn = btn("⛶", "ملاءمة الصورة لحجم النافذة (والتحريك بسحب الفأرة)",
                            lambda: self.canvas.fit_view())
         self.reset_btn = btn("↺", "إعادة ضبط: العودة إلى الصورة الأصلية",
                              self._reset_all)
@@ -189,6 +344,7 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         for w in (self.auto_all_btn, self.cutout_btn, self.enhance_btn,
                   self.center_btn, self.auto_date_btn, self.auto_level_btn,
                   self.undo_btn, self.redo_btn, self.before_btn,
+                  self.zoom_out_btn, self.zoom_reset_btn, self.zoom_in_btn,
                   self.fit_btn, self.reset_btn, self.advanced_toggle_btn):
             lay.addWidget(w)
         return bar
@@ -196,6 +352,14 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
     def _toggle_advanced(self, on: bool) -> None:
         self.advanced_panel.setVisible(on)
         self.advanced_toggle_btn.setText("⚙ ▴" if on else "⚙ ▾")
+        # إغلاق اللوحة في الوضع الجانبي يجعل البقاء جانبيًا بلا معنى؛
+        # نعود للترتيب العمودي فتأخذ الصورة العرض كله أيضًا.
+        if not on and getattr(self, "_advanced_side", False):
+            self.set_advanced_side_mode(False)
+        elif on and getattr(self, "_root_layout", None) is not None:
+            want = self.width() >= 1120 and self.height() < 980
+            if want != bool(getattr(self, "_advanced_side", False)):
+                self.set_advanced_side_mode(want)
 
     # ---------------------------------------------------- advanced panel
     def _build_advanced_panel(self) -> QWidget:
@@ -223,6 +387,10 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         row = QHBoxLayout(inner)
         row.setContentsMargins(6, 6, 6, 6)
         row.setSpacing(8)
+        # 2.9.11 — يُحتفظ بالمرجعين لأن `set_advanced_side_mode`
+        # يعيد ترتيب البطاقات عموديًا حين تنتقل اللوحة للجانب.
+        self._advanced_inner = inner
+        self._advanced_row = row
 
         def card(title: str) -> tuple[QFrame, QVBoxLayout]:
             c = QFrame()
@@ -475,10 +643,20 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         """توزيع متجاوب: على الشاشات القصيرة تنكمش اللوحة المتقدمة
         (مع تمرير داخلي) لتبقى الصورة كبيرة ومرئية دائمًا."""
         super().resizeEvent(event)
+        # 2.9.11 — اختيار الموضع تلقائيًا: متى كان العرض واسعًا
+        # والارتفاع محدودًا تنتقل اللوحة يمينًا فترد للصورة ارتفاعها.
+        # العتبة عرض ≥ 1120 وارتفاع < 980 — تغطي 1366×768 و 1920×1080
+        # وهما شاشتا العمل الغالبتان، وتستثني الشاشات الضيقة.
+        if getattr(self, "_root_layout", None) is not None:
+            # واللوحة مطوية لا معنى للوضع الجانبي — الصورة تأخذ كل شيء
+            want_side = (self.advanced_panel.isVisible()
+                         and self.width() >= 1120 and self.height() < 980)
+            if want_side != bool(getattr(self, "_advanced_side", False)):
+                self.set_advanced_side_mode(want_side)
         scroll = getattr(self, "_advanced_scroll", None)
-        if scroll is not None:
-            # اللوحة المتقدمة لا تأخذ أكثر من 35% من ارتفاع الصفحة
-            cap = max(96, min(240, int(self.height() * 0.35)))
+        if scroll is not None and not getattr(self, "_advanced_side", False):
+            # اللوحة المتقدمة لا تأخد أكثر من 30% من ارتفاع الصفحة
+            cap = max(96, min(240, int(self.height() * 0.30)))
             if scroll.maximumHeight() != cap:
                 scroll.setMaximumHeight(cap)
 

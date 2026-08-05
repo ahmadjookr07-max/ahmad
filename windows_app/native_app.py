@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json  # 2.9.11: كان مفقودًا — فكل حفظ/استعادة لخيار التسمية
+               # ينفجر بـ NameError، والاستعادة تكتمه وتعود للوحدة الواحدة
 import math
 
 # Qt 6 يدعم Per-Monitor DPI تلقائياً، وهذه القيم تمنع التقريب الخشن
@@ -210,7 +212,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.9.10"
+APP_VERSION = "2.9.11"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -3404,6 +3406,17 @@ class MainWindow(QMainWindow):
         list_header.addWidget(self.last_item_button)
         list_layout.addWidget(list_header_host)
         list_layout.addLayout(result_filter_layout)
+        # 2.9.11 — مؤشر تحميل الجدول: رفيع (6px) ومخفي إلا أثناء
+        # تعبئة دفعة كبيرة، فلا يقضم من ارتفاع الجدول في العادة.
+        self.table_load_progress = QProgressBar()
+        self.table_load_progress.setObjectName("tableLoadProgress")
+        self.table_load_progress.setTextVisible(False)
+        self.table_load_progress.setMaximumHeight(6)
+        self.table_load_progress.setVisible(False)
+        self.table_load_progress.setToolTip(
+            "تقدم تحميل الأصناف — يمكنك العمل على المعروض منها الآن"
+        )
+        list_layout.addWidget(self.table_load_progress)
         list_layout.addWidget(self.results_table, 1)
         # 2.9: حاوية تمرير حول لوحة الربط — تبقى شفافة تمامًا في الحالة
         # العادية (بلا شريط ولا إطار)، وتُفعّل التمرير فقط عندما يكون
@@ -4467,6 +4480,34 @@ class MainWindow(QMainWindow):
         self.results_action_bar.setVisible(False)
         self.unified_editor.canvas.setFocus(Qt.OtherFocusReason)
 
+        # 2.9.11 — المالك أبلغ: «التحرير محشور في زاوية والصورة 35%».
+        # النافذة الموسّعة كانت موجودة لكنها تحتاج نقرة زر يجهلها،
+        # والمسار الافتراضي كان التبويب المدمج الضيق. فصار التحرير
+        # يُفتح في نافذة مستقلة بحجم كامل مباشرة (يمكن إلغاء السلوك
+        # من الإعدادات، والزر F11 يرجّعه للتبويب في أي لحظة).
+        if self._prefers_standalone_editor():
+            self._open_expanded_editor()
+
+    def _prefers_standalone_editor(self) -> bool:
+        """هل يُفتح التحرير في نافدة مستقلة تلقائيًا؟ (افتراضيًا: نعم)
+
+        محفوظ في `QSettings` فمن يفضل التبويب المدمج لا يُفرض عليه
+        سلوك جديد؛ والقراءة محمية لأن خطأ في الإعدادات لا يجوز أن
+        يمنع التحرير من العمل أصلاً.
+        """
+        try:
+            settings = getattr(self, "settings", None)
+            if settings is None:
+                from PySide6.QtCore import QSettings
+
+                settings = QSettings("MarketImageStudio", "MarketImageStudio")
+            raw = settings.value("editor/standalone_window", True)
+            if isinstance(raw, str):
+                return raw.strip().lower() not in ("false", "0", "no", "")
+            return bool(raw)
+        except Exception:
+            return True
+
     # ------------------------------------------------ 2.9.6 صفحة تحرير موسّعة
     def _toggle_expanded_editor(self) -> None:
         """فتح/إغلاق صفحة التحرير الموسّعة (النقطة 4).
@@ -4556,6 +4597,15 @@ class MainWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
+        # 2.9.11 — في النافذة المستقلة الصورة هي المقصود، فنفرض لها
+        # حدًا أدنى حقيقيًا (55% من ارتفاع النافذة) حتى لا تزحف الأشرطة
+        # واللوحات على مساحتها كما كان يحدث (شكوى «الصورة 35%»).
+        try:
+            floor = max(320, int(window.height() * 0.55))
+            self.unified_editor.canvas.setMinimumHeight(floor)
+            self._expanded_canvas_floor = floor
+        except Exception:
+            self._expanded_canvas_floor = 0
         QTimer.singleShot(0, lambda: self.unified_editor.canvas.fit_view())
         self.editor_expand_button.setText("⤵ إرجاع للتبويب")
 
@@ -4578,6 +4628,11 @@ class MainWindow(QMainWindow):
         self._editor_tab_footer.show()
         if not getattr(self, "_expanded_prev_advanced", False):
             self.unified_editor.advanced_toggle_btn.setChecked(False)
+        # رفع الحد الأدنى الخاص بالنافذة الموسّعة؛ لو بقي لأفسد
+        # تبويب التحرير المدمج على الشاشات القصيرة.
+        if getattr(self, "_expanded_canvas_floor", 0):
+            self.unified_editor.canvas.setMinimumHeight(140)
+            self._expanded_canvas_floor = 0
         self.editor_expand_button.setText("⛶ توسيع الصفحة")
         window.deleteLater()
         QTimer.singleShot(0, lambda: self.unified_editor.canvas.fit_view())
@@ -5190,6 +5245,8 @@ class MainWindow(QMainWindow):
             QPushButton:disabled { background: #e5eaf0; color: #96a3b1; border-color: #d5dce5; }
             QProgressBar { background: #e8eef5; border: none; border-radius: 7px; height: 15px; text-align: center; color: #27496d; font-weight: 800; }
             QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2c8ac6, stop:1 #35b3a5); border-radius: 7px; }
+            QProgressBar#tableLoadProgress { background: #e8eef5; border: none; border-radius: 3px; height: 6px; max-height: 6px; }
+            QProgressBar#tableLoadProgress::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2c8ac6, stop:1 #35b3a5); border-radius: 3px; }
             QTableWidget { selection-background-color: #d9ebff; selection-color: #0f2747; alternate-background-color: #f7fafd; }
             QCheckBox { spacing: 7px; }
             QCheckBox::indicator { width: 17px; height: 17px; border: 1px solid #9fb4c8; border-radius: 4px; background: #ffffff; }
@@ -6442,7 +6499,149 @@ class MainWindow(QMainWindow):
             table.setUpdatesEnabled(True)
         self._thumb_next_row = row
 
+    # حجم الدفعة الأولى: ما يملأ الشاشة وزيادة، فيرى المستخدم
+    # جدولاً مأهولاً فوراً ويبدأ العمل قبل اكتمال البقية.
+    _TABLE_FIRST_CHUNK = 60
+    _TABLE_CHUNK = 120
+    # دون هذا العدد لا معنى للتدريج — دفعة واحدة أسرع وأبسط.
+    _TABLE_PROGRESSIVE_MIN = 150
+
+    def _build_result_row_cells(self, result_item):  # type: ignore[no-untyped-def]
+        """يبني خلايا صف واحد. أُخرجت من الحلقة لتُستدعى من الدفعات."""
+        status_text = STATUS_TEXT.get(result_item.status, result_item.status)
+        item_code = result_item.item_code or "غير مرتبط"
+        barcode = result_item.barcode or "لا يوجد باركود"
+        product_name = result_item.product_name or "صنف غير محدد"
+        # 2.9.10 — أُزيلت النسبة المئوية من العرض بأمر المالك:
+        # كان التلميح يقول «الثقة: 84%» — رقم لا يفيد المستخدم في
+        # قرار ولا يعرف مم اشتُق. المعلومة المفيدة هي **لماذا** رُبطت
+        # الصورة (باركود؟ اسم؟ ربط يدوي؟) وهي ما يحمله `explanation`.
+        tooltip = (
+            f"الصورة: {result_item.source_name}\n"
+            f"اسم الصنف: {product_name}\n"
+            f"رقم الصنف: {item_code}\nالباركود: {barcode}\n"
+            f"{result_item.explanation or ''}"
+        ).strip()
+
+        status_cell = QTableWidgetItem(status_text)
+        # تحميل كسول للمصغرات: لا نقرأ الصورة هنا — تُعبأ على دفعات لاحقاً لسلاسة الواجهة
+        status_cell.setData(Qt.UserRole, result_item.source_name)
+        status_cell.setTextAlignment(Qt.AlignCenter)
+        status_cell.setToolTip(tooltip)
+        color = STATUS_COLORS.get(result_item.status)
+        if color:
+            status_color = QColor(*color)
+            status_cell.setForeground(status_color)
+            status_background = QColor(*color)
+            status_background.setAlpha(24)
+            status_cell.setBackground(status_background)
+            status_font = status_cell.font()
+            status_font.setBold(True)
+            status_cell.setFont(status_font)
+
+        identity_cell = QTableWidgetItem(f"{item_code}\n{barcode}")
+        identity_cell.setTextAlignment(Qt.AlignCenter)
+        identity_cell.setToolTip(tooltip)
+        identity_font = identity_cell.font()
+        identity_font.setBold(True)
+        identity_cell.setFont(identity_font)
+
+        name_cell = QTableWidgetItem(product_name)
+        name_cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        name_cell.setToolTip(tooltip)
+        name_font = name_cell.font()
+        name_font.setBold(True)
+        name_cell.setFont(name_font)
+        return status_cell, identity_cell, name_cell
+
+    def _stop_progressive_fill(self) -> None:
+        """يوقف أي تعبئة تدريجية جارية ويخفي مؤشر التقدم."""
+        timer = getattr(self, "_fill_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
+        self._fill_timer = None
+        self._fill_pending = []
+        bar = getattr(self, "table_load_progress", None)
+        if bar is not None:
+            bar.setVisible(False)
+
+    def _fill_rows_range(self, items: list, start_row: int) -> None:
+        """يكتب دفعة صفوف داخل الجدول مع توسيعه بالقدر اللازم فقط.
+
+        ملاحظة جوهرية: لا نحجز الصفوف كلها مقدمًا؛ لأن `_apply_result_filters`
+        يُخفي أي صف خلاياه فارغة، فلو حجزنا 3000 صف وملأنا 60 لرأى
+        المستخدم جدولاً مثقوباً. الجدول ينمو دفعة بدفعة.
+        """
+        table = self.results_table
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            needed = start_row + len(items)
+            if table.rowCount() < needed:
+                table.setRowCount(needed)
+            for offset, result_item in enumerate(items):
+                row = start_row + offset
+                status_cell, identity_cell, name_cell = self._build_result_row_cells(result_item)
+                table.setItem(row, 0, status_cell)
+                table.setItem(row, 1, identity_cell)
+                table.setItem(row, 2, name_cell)
+                # ارتفاع موحد من غير `resizeRowsToContents` على كل الجدول:
+                # المرور الشامل مرتين كان أحد أسباب التجميد مع الدفعات الكبيرة.
+                table.setRowHeight(row, 96)
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+
+    def _populate_next_chunk(self) -> None:
+        """يعبّئ الدفعة التالية من الأصناف دون تجميد الواجهة."""
+        pending = getattr(self, "_fill_pending", None)
+        if not pending:
+            self._finish_progressive_fill()
+            return
+        chunk = pending[: self._TABLE_CHUNK]
+        del pending[: self._TABLE_CHUNK]
+        start_row = getattr(self, "_fill_next_row", 0)
+        try:
+            self._fill_rows_range(chunk, start_row)
+        except RuntimeError:
+            # الجدول أُغلق أو النافذة تُهدم — لا داعي للانهيار
+            self._stop_progressive_fill()
+            return
+        self._fill_next_row = start_row + len(chunk)
+        done = self._fill_next_row
+        total = getattr(self, "_fill_total", done)
+        bar = getattr(self, "table_load_progress", None)
+        if bar is not None:
+            bar.setValue(done)
+        self.table_position_label.setText(f"جارٍ التحميل… {done} من {total}")
+        if not pending:
+            self._finish_progressive_fill()
+
+    def _finish_progressive_fill(self) -> None:
+        """يُنهي التعبئة: يعيد الفرز والتصفية ويخفي المؤشر."""
+        self._stop_progressive_fill()
+        try:
+            self.results_table.setSortingEnabled(
+                bool(getattr(self, "_fill_sorting_was_enabled", False))
+            )
+        except RuntimeError:
+            return
+        self._apply_result_filters()
+        self._update_result_position_label()
+        restore_position = getattr(self, "_fill_restore_position", None)
+        if restore_position is not None and self._visible_result_rows():
+            self._restore_results_position(restore_position)
+            QTimer.singleShot(
+                0,
+                lambda position=restore_position: self._restore_results_position_if_still_selected(position),
+            )
+        self._fill_restore_position = None
+
     def _populate_results(self, restore_position: tuple[str, int, int] | None = None) -> None:
+        self._stop_progressive_fill()
         self.results_table.setRowCount(0)
         self.table_position_label.setText("عدد الأصناف: 0")
         self.first_item_button.setEnabled(False)
@@ -6452,85 +6651,54 @@ class MainWindow(QMainWindow):
             self._update_summary(None)
             return
 
-        result_items = self.current_result.items
+        result_items = list(self.current_result.items)
         self._result_items_by_name = {item.source_name: item for item in result_items}
+        total = len(result_items)
         sorting_enabled = self.results_table.isSortingEnabled()
+        self._fill_sorting_was_enabled = sorting_enabled
+        # الفرز يُعاد تفعيله في النهاية وحدها؛ تركه مفتوحًا أثناء الإدخال
+        # التدريجي يخلط أرقام الصفوف فتكتب الدفعة التالية فوق سابقتها.
         self.results_table.setSortingEnabled(False)
-        self.results_table.blockSignals(True)
-        self.results_table.setUpdatesEnabled(False)
-        self.results_table.setRowCount(len(result_items))
-        try:
-            for row, result_item in enumerate(result_items):
-                status_text = STATUS_TEXT.get(result_item.status, result_item.status)
-                item_code = result_item.item_code or "غير مرتبط"
-                barcode = result_item.barcode or "لا يوجد باركود"
-                product_name = result_item.product_name or "صنف غير محدد"
-                # 2.9.10 — أُزيلت النسبة المئوية من العرض بأمر المالك:
-                # كان التلميح يقول «الثقة: 84%» — رقم لا يفيد المستخدم في
-                # قرار ولا يعرف مم اشتُق. المعلومة المفيدة هي **لماذا** رُبطت
-                # الصورة (باركود؟ اسم؟ ربط يدوي؟) وهي ما يحمله `explanation`.
-                tooltip = (
-                    f"الصورة: {result_item.source_name}\n"
-                    f"اسم الصنف: {product_name}\n"
-                    f"رقم الصنف: {item_code}\nالباركود: {barcode}\n"
-                    f"{result_item.explanation or ''}"
-                ).strip()
 
-                status_cell = QTableWidgetItem(status_text)
-                # تحميل كسول للمصغرات: لا نقرأ الصورة هنا — تُعبّأ على دفعات لاحقاً لسلاسة الواجهة
-                status_cell.setData(Qt.UserRole, result_item.source_name)
-                status_cell.setTextAlignment(Qt.AlignCenter)
-                status_cell.setToolTip(tooltip)
-                color = STATUS_COLORS.get(result_item.status)
-                if color:
-                    status_color = QColor(*color)
-                    status_cell.setForeground(status_color)
-                    status_background = QColor(*color)
-                    status_background.setAlpha(24)
-                    status_cell.setBackground(status_background)
-                    status_font = status_cell.font()
-                    status_font.setBold(True)
-                    status_cell.setFont(status_font)
+        progressive = total > self._TABLE_PROGRESSIVE_MIN
+        first_count = self._TABLE_FIRST_CHUNK if progressive else total
+        self._fill_rows_range(result_items[:first_count], 0)
+        self._fill_next_row = first_count
+        self._fill_total = total
+        self._fill_restore_position = restore_position
+        self.results_table.viewport().update()
 
-                identity_cell = QTableWidgetItem(f"{item_code}\n{barcode}")
-                identity_cell.setTextAlignment(Qt.AlignCenter)
-                identity_cell.setToolTip(tooltip)
-                identity_font = identity_cell.font()
-                identity_font.setBold(True)
-                identity_cell.setFont(identity_font)
-
-                name_cell = QTableWidgetItem(product_name)
-                name_cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                name_cell.setToolTip(tooltip)
-                name_font = name_cell.font()
-                name_font.setBold(True)
-                name_cell.setFont(name_font)
-
-                self.results_table.setItem(row, 0, status_cell)
-                self.results_table.setItem(row, 1, identity_cell)
-                self.results_table.setItem(row, 2, name_cell)
-        finally:
-            self.results_table.blockSignals(False)
-            self.results_table.setUpdatesEnabled(True)
-            self.results_table.setSortingEnabled(sorting_enabled)
-            self.results_table.viewport().update()
-        self.results_table.resizeRowsToContents()
-        for row in range(self.results_table.rowCount()):
-            self.results_table.setRowHeight(row, max(90, min(124, self.results_table.rowHeight(row))))
-        QTimer.singleShot(0, self.results_table.resizeRowsToContents)
+        # المصغرات والملخص يبدأان فورًا على ما ظهر، ويلحقان البقية
         self._start_lazy_thumbnails()
         self._update_summary(self.current_result)
-        result_count = self.results_table.rowCount()
         self._apply_result_filters()
-        if result_count and self._visible_result_rows():
+        if self.results_table.rowCount() and self._visible_result_rows():
             if restore_position is None:
                 self._select_first_result()
-            else:
+            elif not progressive:
                 self._restore_results_position(restore_position)
                 QTimer.singleShot(
                     0,
                     lambda position=restore_position: self._restore_results_position_if_still_selected(position),
                 )
+
+        if not progressive:
+            self.results_table.setSortingEnabled(sorting_enabled)
+            self._fill_restore_position = None
+            return
+
+        # ما تبقى يُعبّأ على دفعات مع مؤشر تقدم، والمستخدم يعمل من الآن
+        self._fill_pending = result_items[first_count:]
+        bar = getattr(self, "table_load_progress", None)
+        if bar is not None:
+            bar.setRange(0, total)
+            bar.setValue(first_count)
+            bar.setVisible(True)
+        self.table_position_label.setText(f"جارٍ التحميل… {first_count} من {total}")
+        self._fill_timer = QTimer(self)
+        self._fill_timer.setInterval(0)
+        self._fill_timer.timeout.connect(self._populate_next_chunk)
+        self._fill_timer.start()
 
     def _select_first_result(self) -> None:
         visible_rows = self._visible_result_rows()
@@ -8133,7 +8301,9 @@ class MainWindow(QMainWindow):
                 pass
         # مؤقتات الواجهة: إيقافها يمنع نبضات بعد التدمير
         # 2.9.9 — حُذف `_visual_warm_timer` مع إلغاء نسبة التشابه.
-        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer"):
+        # 2.9.11 — `_fill_timer` يعبّئ الجدول تدريجيًا؛ لو بقي ينبض بعد
+        # تدمير الجدول لرمى RuntimeError عند الإغلاق.
+        for attr in ("_thumb_timer", "_preview_timer", "_tap_hint_timer", "_fill_timer"):
             timer = getattr(self, attr, None)
             if timer is not None:
                 try:

@@ -121,10 +121,11 @@ class RenamePlanRow:
     """صف واحد في خطة التصحيح — بلا أي كتابة على القرص."""
 
     __slots__ = ("item", "old_path", "new_stem", "new_name", "unit",
-                 "is_primary", "changed", "note")
+                 "is_primary", "changed", "note", "copies")
 
     def __init__(self, item: str, old_path: Path, new_stem: str, unit: str,
-                 is_primary: bool, note: str = "") -> None:
+                 is_primary: bool, note: str = "",
+                 copies: list[str] | None = None) -> None:
         self.item = item
         self.old_path = old_path
         self.new_stem = new_stem
@@ -133,6 +134,9 @@ class RenamePlanRow:
         self.is_primary = is_primary
         self.changed = old_path.name != self.new_name
         self.note = note
+        # 2.9.11 — جذوع إضافية تُستوفى بـ**نسخ** الملف لا بنقله
+        # (سياسة «نسخة لكل وحدة» في مجلد منجز أصلًا).
+        self.copies: list[str] = list(copies or [])
 
     def __repr__(self) -> str:  # pragma: no cover - تشخيص
         return f"{self.old_path.name} -> {self.new_name}"
@@ -298,6 +302,31 @@ def _units_for_group(item: str, index, unit_in_name: str,
     return dedupe_units(units)
 
 
+def _target_stems_policy(item: str, units: list[str], count: int,
+                         settings, fallback_unit: str = ""
+                         ) -> list[list[str]]:
+    """أسماء المجموعة عبر **نفس دالة الدفعة الجديدة**.
+
+    يعيد لكل صورة قائمة أسمائها (تتعدد فقط مع ``replicate_all_units``).
+
+    2.9.11: قبله كان هذا الملف يختزل السياسة في علم منطقي
+    ``join_all`` واحد، فلا يعرف ``replicate_all_units`` ولا
+    ``default_unit`` — فيُعاملهما معاملة ``per_image`` بوحدة واحدة.
+    وذلك خالف أمر المالك: «اجعله في الدفعة الجديدة والقديمة».
+    """
+    from .naming_v2 import plan_stems_for_policy, NamingSettings
+
+    if settings is None:
+        settings = NamingSettings()
+    unit_list = [u for u in (units or []) if str(u or "").strip()]
+    if not unit_list and fallback_unit:
+        unit_list = [fallback_unit]
+    return [plan_stems_for_policy(item, unit_list, seq=i + 1, total=count,
+                                  settings=settings,
+                                  chosen_unit=fallback_unit)
+            for i in range(count)]
+
+
 def _target_stems(item: str, unit: str, count: int,
                   units: list[str] | None = None,
                   join_all: bool = False) -> list[str]:
@@ -341,18 +370,22 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
     index: `CatalogIndex` محمّل. إن كان None تُستخدم الوحدة الموجودة
     في اسم الملف (فلا يتعطل العمل بغياب الإكسل).
     """
-    from .naming_v2 import UNIT_POLICY_JOIN_ALL
+    from .naming_v2 import (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE,
+                            UNIT_POLICY_DEFAULT)
 
     plan = LegacyPlan()
     plan.groups = groups
     plan.unparsed = list(unparsed or [])
 
     # 2.9.6: المجلد المنجز يتبع نفس سياسة الدفعة الجديدة.
+    # 2.9.11: والسياسة تُقرأ كاملة لا كعلم منطقي واحد.
     settings = _naming_settings()
-    join_all = bool(settings is not None
-                    and getattr(settings, "enabled", True)
-                    and getattr(settings, "unit_policy", "")
-                    == UNIT_POLICY_JOIN_ALL)
+    active = bool(settings is not None and getattr(settings, "enabled", True))
+    policy = str(getattr(settings, "unit_policy", "")) if active else ""
+    join_all = policy == UNIT_POLICY_JOIN_ALL
+    # السياسات التي تحتاج كل وحدات الإكسل بترتيبه الحرفي.
+    needs_units = policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE,
+                             UNIT_POLICY_DEFAULT)
 
     for item in sorted(groups):
         grp = groups[item]
@@ -378,9 +411,9 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
                 plan.missing_in_excel.append(item)
                 note = "غير موجود في الإكسل — أُبقيت وحدة اسم الملف"
 
-        if join_all:
+        if needs_units:
             units = _units_for_group(item, index, unit_in_name)
-            if units:
+            if units and join_all:
                 # الوحدة المعروضة في الجدول = المجموع لا واحدة،
                 # ليرى المالك ما سيكتَب فعلًا في اسم الملف.
                 from .naming_v2 import join_units
@@ -389,13 +422,81 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
                     note = (f"وحدات الإكسل المجموعة: "
                             f"{'، '.join(units)}")
 
-        stems = _target_stems(item, unit, grp.count,
-                              units=units, join_all=join_all)
+        if active:
+            # مسار السياسات الأربع — نفس دالة الدفعة الجديدة.
+            names = _target_stems_policy(item, units, grp.count, settings,
+                                         fallback_unit=unit)
+        else:
+            names = [[s] for s in _target_stems(item, unit, grp.count,
+                                                units=units,
+                                                join_all=join_all)]
+
+        extra_note = ""
+        if policy == UNIT_POLICY_REPLICATE and units and len(units) > 1:
+            extra_note = (f"نسخة لكل وحدة: {'، '.join(units)} — "
+                          f"تُنشأ نُسخٌ إضافية من الصورة نفسها")
+
         for i, im in enumerate(grp.images):
-            plan.rows.append(RenamePlanRow(
-                item=item, old_path=im.path, new_stem=stems[i], unit=unit,
-                is_primary=(i == 0), note=note if i == 0 else ""))
+            stems_i = names[i] if i < len(names) else [im.stem]
+            row_note = note if i == 0 else ""
+            if i == 0 and extra_note:
+                row_note = f"{row_note} — {extra_note}" if row_note \
+                    else extra_note
+            row = RenamePlanRow(
+                item=item, old_path=im.path, new_stem=stems_i[0], unit=unit,
+                is_primary=(i == 0), note=row_note)
+            # 2.9.11 — سياسة «نسخة لكل وحدة» في المجلد المنجز:
+            # الملف القائم يُعاد تسميته للوحدة الأولى، وبقية
+            # الوحدات تُستوفى بـ**نسخ** الملف لا بنقله، لأن
+            # الصورة موجودة أصلًا ولا يجوز فقدانها.
+            row.copies = list(stems_i[1:])
+            plan.rows.append(row)
     return plan
+
+
+def _materialize_copies(rows: list[RenamePlanRow],
+                        renames: dict[str, str] | None = None
+                        ) -> tuple[dict[str, list[str]], list[str]]:
+    """يستوفي وحدات سياسة «نسخة لكل وحدة» بـ**نسخ** الملف.
+
+    في الدفعة الجديدة تُكتب النسخ وقت المعالجة؛ أمّا المجلد
+    المنجز فالصورة فيه موجودة أصلًا، فالوحدة الأولى تُستوفى
+    بإعادة التسمية والبقية بالنسخ. **لا يُحذف ولا يُكتب فوق
+    ملف قائم** بأي حال، فإن وجد الهدف عُدّ مستوفًى.
+
+    ``renames`` خريطة إعادة التسمية التي تمّت توّا — لازمة لأن
+    ``row.old_path`` يصير مسارًا معدومًا بعد النقل الذري، فلو
+    نُسخ منه لما وجدنا ملفًا أصلًا (أو نُسخ من ملف صنف آخر
+    صار يحمل ذات الاسم). ويُعاد القاموس مفتاحُه المصدر
+    وقيمته **قائمة** النسخ، لا نسخة واحدة تطمس أختها.
+    """
+    import shutil
+
+    made: dict[str, list[str]] = {}
+    errs: list[str] = []
+    renames = renames or {}
+    for r in rows:
+        wanted = list(getattr(r, "copies", ()) or ())
+        if not wanted:
+            continue
+        # الملف بعد إعادة التسمية لا قبلها.
+        src = Path(renames.get(str(r.old_path), str(r.old_path)))
+        if not src.is_file():
+            src = r.old_path.with_name(r.new_name)
+        if not src.is_file():
+            errs.append(f"{r.item}: مصدر النسخ غير موجود "
+                        f"({r.new_name})")
+            continue
+        for stem in wanted:
+            dst = src.with_name(f"{stem}{src.suffix}")
+            if dst.exists():
+                continue
+            try:
+                shutil.copy2(str(src), str(dst))
+                made.setdefault(str(src), []).append(str(dst))
+            except OSError as exc:
+                errs.append(f"{r.item}: تعذّر نسخ {dst.name} — {exc}")
+    return made, errs
 
 
 def apply_legacy_plan(plan: LegacyPlan,
@@ -403,12 +504,15 @@ def apply_legacy_plan(plan: LegacyPlan,
     """ينفّذ الخطة على القرص عبر إعادة تسمية ذرية لكل صنف.
 
     items: أرقام أصناف محددة، أو None لكل المجلد.
-    يعيد {"renames": {...}, "errors": [...], "items_done": n}.
+    يعيد {"renames": {...}, "errors": [...], "items_done": n,
+    "copies": {...}}. و`copies` تمتلئ فقط مع سياسة «نسخة لكل
+    وحدة» (2.9.11).
     """
     from .primary_image_v2 import renumber_item_images
 
     wanted = set(items) if items else None
     renames: dict[str, str] = {}
+    copies: dict[str, list[str]] = {}
     errors: list[str] = []
     done = 0
 
@@ -443,8 +547,14 @@ def apply_legacy_plan(plan: LegacyPlan,
             new = res.renames.get(str(im.path))
             if new:
                 im.path = Path(new)
+        # 2.9.11 — استيفاء الوحدات الباقية بالنسخ
+        made, copy_errs = _materialize_copies(rows, res.renames)
+        for k, v in made.items():
+            copies.setdefault(k, []).extend(v)
+        errors.extend(copy_errs)
 
-    return {"renames": renames, "errors": errors, "items_done": done}
+    return {"renames": renames, "errors": errors, "items_done": done,
+            "copies": copies}
 
 
 # ═══════════════════════════════════════════════════════════════════

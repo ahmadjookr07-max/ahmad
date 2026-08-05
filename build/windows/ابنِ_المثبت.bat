@@ -1,6 +1,14 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
+REM  ترميز مخرجات بايثون. `chcp 65001` أعلاه يضبط الطرفية وحدها، أمّا
+REM  مفسّر بايثون فيبقى على ترميز اللغة (cp1252 على ويندوز الإنجليزي)
+REM  لمجرى الإخراج، فتنفجر أول `print` عربية بـUnicodeEncodeError.
+REM  حدث فعلًا: ملف الـspec يطبع «[spec] وحدات مكتشفة: 55» فسقط
+REM  البناء عند هذا السطر قبل تجميع أي ملف. المتغيّران أدناه
+REM  يُلزمان كل خطوة بايثون تالية بـUTF-8، وهما محليّان لأن setlocal يحدّهما.
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0..\.."
 
 REM ============================================================
@@ -117,7 +125,11 @@ echo   التطبيق جُمِّع بنجاح.
 
 echo.
 echo ==== [8/9] إضافة محرك OCR المحمول (عربي + إنجليزي) ====
-echo   (اختياري: إن غاب يعمل البرنامج ويُعطّل قراءة الجداول فقط)
+rem لماذا إلزامي لا «اختياري»؟ لأن الشافي الذاتي داخل التطبيق يقول
+rem للمستخدم حرفيًا إن «سيتب التثبيت المرفق يثبّته تلقائيًا»، و`installer.nsi`
+rem يرفض البناء بدونه. والاعتماد على وجود tesseract في PATH يعني أن
+rem حزمة العميل تعتمد على ما صادف تركيبه على آلة الباني — فننزّله
+rem بأنفسنا ليكون المخرج واحدًا على أي آلة بناء.
 set "TESSDIR=%APPDIR%\tesseract"
 if exist "%TESSDIR%\tesseract.exe" (
     echo   موجود مسبقًا — تُخطّى.
@@ -132,13 +144,50 @@ if not errorlevel 1 (
     xcopy /E /I /Y /Q "!SYSTESSDIR!*" "%TESSDIR%\" >nul 2>&1
     if exist "%TESSDIR%\tesseract.exe" (
         echo   تم شحن المحرك مع الحزمة.
-        goto :after_tess
+        goto :check_tessdata
     )
 )
-echo   تنبيه: لم يُشحن محرك OCR — لم يُعثر على tesseract في PATH.
-echo   للحصول على قراءة الجداول: ركّب Tesseract من
+
+echo   غير موجود على الجهاز — يُنزّل تلقائيًا (~50 م.ب)...
+set "TESSSETUP=%TEMP%\tesseract-w64-setup.exe"
+set "TESSURL=https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe"
+if not exist "%TESSSETUP%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri '%TESSURL%' -OutFile '%TESSSETUP%' -UseBasicParsing; exit 0 } catch { exit 1 }"
+)
+if exist "%TESSSETUP%" (
+    if not exist "%TESSDIR%" mkdir "%TESSDIR%"
+    rem تثبيت صامت إلى مجلد معزول داخل الحزمة (مثبِّت Inno)
+    "%TESSSETUP%" /S /D=%CD%\%TESSDIR% >nul 2>&1
+    if exist "%TESSDIR%\tesseract.exe" (
+        echo   تم تنزيل المحرك وشحنه مع الحزمة.
+        goto :check_tessdata
+    )
+)
+
+echo   خطأ: تعذر شحن محرك OCR — والمُثبِّت يرفض البناء بدونه
+echo   لأن التطبيق يوعد المستخدم بأن السيتب يحمله.
+echo   الحل: ركّب Tesseract من الرابط أدناه ثم أعد تشغيل هذا الملف:
 echo   https://github.com/UB-Mannheim/tesseract/wiki
-echo   ثم أعد تشغيل هذا الملف. البرنامج يعمل بدونه.
+goto :fail
+
+:check_tessdata
+rem المحرك بلا بيانات عربية يقرأ الجداول خطأ بلا سبب مفهوم، وهو
+rem أسوأ من غيابه: فالغائب يُعلن والناقص يُفسد بصمت. فننزّل ara.
+if not exist "%TESSDIR%\tessdata\ara.traineddata" (
+    echo   تنزيل بيانات اللغة العربية...
+    if not exist "%TESSDIR%\tessdata" mkdir "%TESSDIR%\tessdata"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata/raw/main/ara.traineddata' -OutFile '%TESSDIR%\tessdata\ara.traineddata' -UseBasicParsing; exit 0 } catch { exit 1 }"
+)
+if not exist "%TESSDIR%\tessdata\ara.traineddata" (
+    echo   تنبيه: بيانات العربية غير متوفرة — قراءة الجداول العربية ستضعف.
+) else (
+    echo   اللغة العربية جاهزة.
+)
+rem حذف أدوات التدريب — لا يستخدمها التطبيق وتزيد الحجم بلا فائدة.
+del /Q "%TESSDIR%\*train*.exe" >nul 2>&1
+del /Q "%TESSDIR%\unicharset_extractor.exe" >nul 2>&1
 :after_tess
 
 echo.

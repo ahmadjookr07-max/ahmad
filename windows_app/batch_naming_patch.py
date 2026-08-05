@@ -148,6 +148,24 @@ def _units_for(item: str, join: bool) -> list[str]:
         return []
 
 
+def _policy_settings():
+    """كامل إعدادات التسمية المحفوطة، أو None.
+
+    2.9.11 — الرقعة صارت تمرر الإعدادات كاملة إلى
+    ``plan_stems_for_policy`` بدل اختزالها في علم منطقي
+    واحد (الدمج أم لا)، لأن الاختزال أسقط سياستي
+    ``replicate_all_units`` و``per_image`` من مسار الإنتاج.
+    """
+    try:
+        from engine_v2 import integration_v2 as integ
+        fn = getattr(integ, "_current_naming_settings", None)
+        if fn is None:
+            return None
+        return fn()
+    except Exception:
+        return None
+
+
 def _policy_active() -> tuple[bool, bool, str]:
     """السياسة الفعّالة: (التصحيح مطلوب؟، الدمج؟، الوحدة الافتراضية).
 
@@ -179,42 +197,67 @@ def _policy_active() -> tuple[bool, bool, str]:
         return False, False, "حبه"
 
 
-def _target_stem(item: str, units: list[str], seq: int,
-                 default_unit: str, join: bool) -> str:
-    """الاسم المطلوب وفق قاعدة المالك — من ``engine_v2`` نفسها.
+def _target_stems(item: str, units: list[str], seq: int,
+                  default_unit: str, settings=None,
+                  join: bool = False) -> list[str]:
+    """**كل** الأسماء المطلوبة لصورة واحدة وفق السياسة.
 
-    الدمج: ``build_name_join_all`` بكل الوحدات.
-    الوحدة الواحدة: ``build_name_dash`` بـ``units[0]`` — وهي نفس
-    الدالة التي تستدعيها ``integration_v2.build_output_stem``،
-    فلا تتباعد القاعدتان.
+    تمر عبر ``naming_v2.plan_stems_for_policy`` — **مصدر الحقيقة
+    الوحيد** الذي تستدعيه المسارات الثلاثة (الدفعة، الملف
+    المفرد، المجلد المنجز) فلا تتباعد القواعد. يعيد اسمًا
+    واحدًا في السياسات الثلاث، و**اسمًا لكل وحدة** في
+    ``replicate_all_units``.
+
+    ``settings=None`` → مسار التوافق الخلفي بالعلم ``join``.
     """
+    if settings is not None:
+        try:
+            from engine_v2.naming_v2 import plan_stems_for_policy
+            out = plan_stems_for_policy(item, units, seq, total=seq,
+                                        settings=settings)
+            if out:
+                return list(out)
+        except Exception as exc:
+            _log(f"تعذر حساب السياسة — مسار احتياطي: {exc}")
     if join:
         from engine_v2.naming_v2 import build_name_join_all
-        return build_name_join_all(item, units, seq, total=seq,
-                                   default_unit=default_unit)
+        return [build_name_join_all(item, units, seq, total=seq,
+                                    default_unit=default_unit)]
     from engine_v2.naming_v2 import build_name_dash
     unit = (units[0] if units else "") or default_unit
-    return build_name_dash(item, seq, unit, total=seq)
+    return [build_name_dash(item, seq, unit, total=seq)]
+
+
+def _target_stem(item: str, units: list[str], seq: int,
+                 default_unit: str, join: bool) -> str:
+    """الاسم الأول المطلوب — غلاف توافقي حول ``_target_stems``."""
+    stems = _target_stems(item, units, seq, default_unit, None, join)
+    return stems[0]
 
 
 def _free_path(folder: Path, item: str, units: list[str],
                default_unit: str, ext: str,
-               taken: set[str], join: bool) -> tuple[Path, str]:
+               taken: set[str], join: bool = False,
+               settings=None) -> tuple[Path, list[str]]:
     """أول مسار حر للصنف: الرئيسي بلا رقم ثم -2، -3 ...
 
     ``taken`` يمنع تصادم دفعة واحدة تكتب عدة صور للصنف نفسه قبل أن
     تظهر على القرص.
+
+    يعيد (مسار الوحدة الأولى، كل الجذوع المطلوبة لهذا التسلسل).
+    والجذوع تتعدد فقط مع ``replicate_all_units``، فيُطلب تسلسل
+    **تكون كل أسمائه حرة** حتى لا تختلف أرقام الوحدات للصورة نفسها.
     """
     seq = 1
     while True:
-        stem = _target_stem(item, units, seq, default_unit, join)
-        cand = folder / f"{stem}{ext}"
-        key = str(cand).casefold()
-        if key not in taken and not cand.exists():
-            return cand, stem
+        stems = _target_stems(item, units, seq, default_unit, settings, join)
+        cands = [folder / f"{s}{ext}" for s in stems]
+        if all(str(c).casefold() not in taken and not c.exists()
+               for c in cands):
+            return cands[0], stems
         seq += 1
         if seq > 9999:  # حاجز أمان
-            return folder / f"{item}_{seq}{ext}", f"{item}_{seq}"
+            return folder / f"{item}_{seq}{ext}", [f"{item}_{seq}"]
 
 
 def _rewrite_state(workspace: Path, mapping: dict[str, str]) -> None:
@@ -271,12 +314,61 @@ def _set_output_path(items: Any, idx: int, item: Any, new_path: str) -> bool:
     return False
 
 
+def _policy_label(settings, join: bool) -> str:
+    """وصف عربي للسياسة المطبّقة — للسجل وتشخيص المالك."""
+    try:
+        from engine_v2.naming_v2 import (UNIT_POLICY_DEFAULT,
+                                         UNIT_POLICY_JOIN_ALL,
+                                         UNIT_POLICY_PER_IMAGE,
+                                         UNIT_POLICY_REPLICATE)
+        pol = getattr(settings, "unit_policy", None)
+        return {UNIT_POLICY_DEFAULT: "الوحدة الافتراضية",
+                UNIT_POLICY_JOIN_ALL: "دمج كل الوحدات",
+                UNIT_POLICY_PER_IMAGE: "وحدة الإكسل الواحدة",
+                UNIT_POLICY_REPLICATE: "نسخة لكل وحدة"}.get(
+                    pol, "دمج كل الوحدات" if join
+                    else "وحدة الإكسل الواحدة")
+    except Exception:
+        return "دمج كل الوحدات" if join else "وحدة الإكسل الواحدة"
+
+
+def _replicate_on_disk(src: Path, stems: list[str]) -> list[str]:
+    """ينسخ ``src`` إلى بقية الجذوع (سياسة نسخة لكل وحدة).
+
+    الجذع الأول مستوفًى أصلًا بإعادة التسمية، فلا يُنسخ. ولا
+    يُكتب فوق ملف قائم ولا يُحذف شيء بحال.
+    """
+    import shutil
+
+    made: list[str] = []
+    for stem in stems[1:]:
+        dst = src.with_name(f"{stem}{src.suffix}")
+        if dst.exists():
+            continue
+        try:
+            shutil.copy2(str(src), str(dst))
+            made.append(str(dst))
+        except OSError as exc:
+            _log(f"تعذر نسخ {dst.name}: {exc}")
+    return made
+
+
 def apply_join_all_units(result: Any) -> Any:
     """يعيد تسمية نواتج الدفعة وفق وحدات الإكسل. يعيد النتيجة نفسها.
 
-    يغطّي السياستين (الاسم محفوظ للتوافق الخلفي):
-    الدمج ⇒ كل الوحدات؛ والوحدة الواحدة ⇒ وحدة الإكسل
-    الصحيحة بدل الافتراضية العمياء ``حبه``.
+    2.9.11 — يغطي **السياسات الأربع** (الاسم محفوظ للتوافق
+    الخلفي) عبر ``plan_stems_for_policy``:
+
+    | السياسة | الناتج على القرص |
+    |---|---|
+    | ``default_unit`` | الوحدة الافتراضية من الإعدادات |
+    | ``join_all`` | كل الوحدات في اسم واحد |
+    | ``per_image`` | وحدة الإكسل الأولى |
+    | ``replicate_all_units`` | **نسخة لكل وحدة** — أولاها بإعادة التسمية والبقية بالنسخ |
+
+    والنسخ لا يُضاف إلى ``result.items`` لأن كل عنصر يمثل صورة
+    معالجة واحدة؛ النسخ مخرجات رفع للمتجر لا نتائج جديدة،
+    وإقحامها سيضاعف عدّاد «صور معالجة» ويكرر صفوف الجدول.
 
     لا يرفع استثناءً أبدًا: أي إخفاق يُترك معه الاسم الأصلي، لأن فقدان
     قاعدة تسمية أهون من فقدان دفعة معالجة كاملة.
@@ -284,6 +376,7 @@ def apply_join_all_units(result: Any) -> Any:
     active, join, default_unit = _policy_active()
     if not active:
         return result
+    settings = _policy_settings()
     items = getattr(result, "items", None)
     if not items:
         return result
@@ -291,6 +384,7 @@ def apply_join_all_units(result: Any) -> Any:
     mapping: dict[str, str] = {}
     taken: set[str] = set()
     renamed = 0
+    copied = 0
 
     for idx, it in enumerate(items):
         try:
@@ -309,12 +403,21 @@ def apply_join_all_units(result: Any) -> Any:
             if not units:
                 # لا كتالوج للصنف: لا مرجع نصحّح إليه.
                 continue
-            want_stem = _target_stem(str(item_code), units, 1,
-                                     default_unit, join)
-            if src.stem == want_stem or src.stem.startswith(want_stem + "-"):
-                continue  # مطابق للقاعدة سلفًا
-            dst, _stem = _free_path(src.parent, str(item_code), units,
-                                    default_unit, src.suffix, taken, join)
+            want = _target_stems(str(item_code), units, 1, default_unit,
+                                 settings, join)
+            want_stem = want[0]
+            matched = (src.stem == want_stem
+                       or src.stem.startswith(want_stem + "-"))
+            if matched:
+                # مطابق للقاعدة سلفًا — لكن نسخ الوحدات قد تكون
+                # ناقصة (معالجة أقدم أو تغيير السياسة)، فتُستوفى.
+                if len(want) > 1:
+                    copied += len(_replicate_on_disk(src, want))
+                taken.add(str(src).casefold())
+                continue
+            dst, stems = _free_path(src.parent, str(item_code), units,
+                                    default_unit, src.suffix, taken,
+                                    join, settings)
             os.replace(src, dst)
             # حدّث النتيجة لتشير للملف الجديد. العناصر مُجمّدة
             # (frozen dataclass) فلا ينفع setattr — نستبدل العنصر.
@@ -330,12 +433,18 @@ def apply_join_all_units(result: Any) -> Any:
             taken.add(str(dst).casefold())
             mapping[src.name] = dst.name
             renamed += 1
+            # سياسة نسخة لكل وحدة: استوفِ الباقي بالنسخ.
+            if len(stems) > 1:
+                for extra in _replicate_on_disk(dst, stems):
+                    taken.add(extra.casefold())
+                    copied += 1
         except Exception as exc:
             _log(f"تعذرت إعادة تسمية عنصر: {exc}")
 
-    if renamed:
-        _mode = "كل الوحدات" if join else "وحدة الإكسل الواحدة"
-        _log(f"طُبِّقت قاعدة {_mode} على {renamed} ملفًا")
+    if renamed or copied:
+        _mode = _policy_label(settings, join)
+        _log(f"طُبّقت قاعدة {_mode} على {renamed} ملفًا"
+             + (f" وأُنشئت {copied} نسخة وحدة" if copied else ""))
         ws = getattr(result, "workspace", None)
         if ws:
             _rewrite_state(Path(ws), mapping)

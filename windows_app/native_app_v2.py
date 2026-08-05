@@ -17,7 +17,33 @@ for p in (str(_SRC), str(_HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-APP_VERSION_V2 = "2.9.9"
+
+def _read_version() -> str:
+    """يقرأ الإصدار من ملف ``VERSION`` وحده — لا رقم متجمّد هنا.
+
+    كان هذا الموضع يحمل ثابتًا مكتوبًا بيده (``"2.9.9"``) ثم يكتبه
+    فوق ``native_app.APP_VERSION`` في ``main()``. فكان الرقم الصحيح
+    موجودًا في ``VERSION`` وفي ``native_app`` وفي بيانات إصدار الملف،
+    ثم يُطمَس في اللحظة الأخيرة فيرى العميل رقمًا أقدم من الذي بين يديه.
+    وهذا ليس تجميلًا: العميل يستدل بالرقم على وصول الإصلاحات إليه،
+    فإن كذب الرقم بطلت ثقته بكل بلاغ تحديث بعده.
+
+    والقراءة تشمل حالة PyInstaller (``sys._MEIPASS``) لأن جذر المشروع
+    لا وجود له بعد التجميع، فلو اقتصرنا على الجذر لسقطنا إلى البديل.
+    """
+    for base in (_HERE.parent, Path(getattr(sys, "_MEIPASS", "") or ".")):
+        try:
+            f = base / "VERSION"
+            if f.is_file():
+                txt = f.read_text(encoding="utf-8-sig").strip()
+                if txt:
+                    return txt.splitlines()[0].strip()
+        except Exception:
+            continue
+    return ""
+
+
+APP_VERSION_V2 = _read_version()
 
 _SPLASH = None  # مرجع شاشة البدء الفورية
 
@@ -570,7 +596,10 @@ def main() -> int:
     _activate_engine()
     _activate_speedups()        # تسريع المطابقة + حالة المهمة (بطء المالك)
     import native_app
-    native_app.APP_VERSION = APP_VERSION_V2
+    # إن تعذّرت قراءة ``VERSION`` نُبقي رقم ``native_app`` كما هو
+    # ولا نطمسه بسلسلة فارغة.
+    if APP_VERSION_V2:
+        native_app.APP_VERSION = APP_VERSION_V2
     _gate_startup(native_app)   # أولاً: بوابة الترخيص (تلتف حول __init__ الأصلي)
     _patch_ui(native_app)       # ثانيًا: إضافات الواجهة (تلتف حول gated_init)
     try:

@@ -101,6 +101,21 @@ Function .onInit
     Sleep 400
 FunctionEnd
 
+; ---------------------------------------------------------------------------
+; حراسة وقت البناء: محرك OCR يجب أن يكون مشحونًا داخل الحزمة.
+;
+; الشافي الذاتي في التطبيق يقول للمستخدم حرفيًا إن «سيتب التثبيت المرفق
+; يثبّت المحرك تلقائيًا»، و`vitals.find_tesseract` تُقدّم المحمول
+; (`$INSTDIR\tesseract\tesseract.exe`) على كل شيء. فإن بُنيت الحزمة بلا
+; مجلد `tesseract` صار الوعد كاذبًا وسقطت قراءة الجداول على كل جهاز لم
+; يركّب Tesseract بنفسه — بلا خطأ بناء واحد يُنبّه. فنجعل غيابه خطأ
+; بناء صريحًا بدل عطب صامت عند العميل.
+!if /FileExists "${APP_SOURCE}\tesseract\tesseract.exe"
+!else
+    !error "محرك OCR غير مشحون: ${APP_SOURCE}\tesseract\tesseract.exe مفقود. \
+ انسخ نسخة Tesseract المحمولة (مع ara.traineddata) إلى مجلد الحزمة قبل البناء."
+!endif
+
 Section "Application" SEC_APP
     SetShellVarContext current
     SetOutPath "$INSTDIR"
