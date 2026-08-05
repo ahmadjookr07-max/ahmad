@@ -84,6 +84,18 @@ from lazy_engine import (
 )
 
 
+# 2.9.12 — سياق إعادة المعالجة: يُحيط بكل ربط أو تحرير لصفٍّ له
+# مخرَج قائم، فيُكتب فوق الملف نفسه بدل توليد -2 ثم -3 ثم -4
+# ثم حذف القديم — وهذا سبب «اختفاء الصور» الذي أبلغ عنه المالك.
+# البديل الآمن يجعل الواجهة تعمل ولو غابت الوحدة.
+try:
+    from integrity_patch import reprocess_scope as _reprocess_scope
+except Exception:  # pragma: no cover - حزمة بلا وحدة الترقيع
+    from contextlib import nullcontext as _nullcontext
+
+    def _reprocess_scope(_previous_output=None):    # type: ignore[misc]
+        return _nullcontext()
+
 try:
     from engine_v2.source_vault_v2 import (
         deposit_job_sources as _vault_deposit,
@@ -212,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.9.11"
+APP_VERSION = "2.9.12"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -606,9 +618,13 @@ class ManualLinkWorker(QThread):
         enhance_product: bool,
         image_options: FinalImageOptions | None = None,
         manual_rotation: float = 0.0,
+        previous_outputs: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.workspace = workspace
+        # 2.9.12: خريطة {اسم المصدر: مسار المخرَج القائم} — تُملأ من
+        # الواجهة قبل الربط ليُكتب فوق الملف نفسه بدل توليد اسم جديد.
+        self.previous_outputs = dict(previous_outputs or {})
         if isinstance(source_names, str):
             self.source_names = (source_names,)
         else:
@@ -668,24 +684,32 @@ class ManualLinkWorker(QThread):
             # 2.9.6: الربط اليدوي يقرأ المسار المطلق المخزّن في job_state؛
             # إن نُقلت الصور أو استُعيدت جلسة قديمة فشل بـFileNotFoundError.
             self._repair_report = _vault_restore_sources(self.workspace)
+            # 2.9.12: إعادة معالجة صفٍّ له مخرَج قائم تكتب فوقه،
+            # فلا يتصاعد الترقيم ولا يُحذف ملف مرجعي.
+            # السياق يقبل مسارًا واحدًا، والربط الجماعي لصور متعددة
+            # لصنف واحد يُترك للسلوك الطبيعي (أرقام جديدة مطلوبة).
+            previous = None
             if len(self.source_names) == 1:
-                result = apply_manual_link(
-                    self.workspace,
-                    self.source_name,
-                    self.item_code,
-                    remove_background=self.remove_background,
-                    enhance_product=self.enhance_product,
-                    final_image_options=self.image_options,
-                )
-            else:
-                result = apply_manual_links(
-                    self.workspace,
-                    self.source_names,
-                    self.item_code,
-                    remove_background=self.remove_background,
-                    enhance_product=self.enhance_product,
-                    final_image_options=self.image_options,
-                )
+                previous = self.previous_outputs.get(self.source_name)
+            with _reprocess_scope(previous):
+                if len(self.source_names) == 1:
+                    result = apply_manual_link(
+                        self.workspace,
+                        self.source_name,
+                        self.item_code,
+                        remove_background=self.remove_background,
+                        enhance_product=self.enhance_product,
+                        final_image_options=self.image_options,
+                    )
+                else:
+                    result = apply_manual_links(
+                        self.workspace,
+                        self.source_names,
+                        self.item_code,
+                        remove_background=self.remove_background,
+                        enhance_product=self.enhance_product,
+                        final_image_options=self.image_options,
+                    )
             self._apply_rotation_to_outputs(result)
             self.completed.emit(result)
         except Exception:
@@ -724,10 +748,14 @@ class IndividualEditWorker(QThread):
         deglare: bool = False,
         manual_rotation: float = 0.0,
         edited_source_path: "Path | None" = None,
+        previous_output: str = "",
     ) -> None:
         super().__init__()
         self.workspace = workspace
         self.source_name = source_name
+        # 2.9.12: مسار المخرَج القائم لهذا الصف — يُكتب فوقه بدل
+        # توليد اسم جديد، فيظهر الطمس فورًا في الصورة المعروضة.
+        self.previous_output = str(previous_output or "")
         self.preview_only = bool(preview_only)
         self.manual_crop = manual_crop
         self.smart_enhance = bool(smart_enhance)
@@ -809,7 +837,11 @@ class IndividualEditWorker(QThread):
 
                 _vision_pipeline._prepare_individual_source = _use_edited_source
             try:
-                self._run_pipeline(arguments)
+                # المعاينة لا تكتب مخرَجًا نهائيًا، فلا تحتاج تثبيت الاسم.
+                _previous = None if self.preview_only else \
+                    (self.previous_output or None)
+                with _reprocess_scope(_previous):
+                    self._run_pipeline(arguments)
             finally:
                 if _override_active:
                     _vision_pipeline._prepare_individual_source = _prev_prepare
@@ -5015,6 +5047,15 @@ class MainWindow(QMainWindow):
             if draft is not None and Path(draft).is_file():
                 edited_source_path = Path(draft)
 
+        # 2.9.12 — إصلاح «لا يحفظ بعد الطمس»: التحرير الفردي إعادة
+        # معالجة دائمًا لصفٍّ له مخرَج قائم، فيجب أن يُكتب فوق
+        # الملف نفسه. بدون ذلك يُكتب الناتج في اسم جديد ويبقى
+        # الصف مشيرًا للقديم، فيرى المالك أن الطمس لم يُحفظ.
+        _previous_output = str(getattr(item, "output_path", "") or "")
+        if _previous_output and not Path(_previous_output).is_file():
+            _previous_output = ""
+        self._pending_individual_previous_output = _previous_output
+
         if edited_source_path is not None:
             # التعديلات طُبقت داخل المحرر — نعطل المعالجات المكررة في الـ pipeline
             self.individual_worker = IndividualEditWorker(
@@ -5032,6 +5073,7 @@ class MainWindow(QMainWindow):
                 deglare=False,
                 manual_rotation=0.0,
                 edited_source_path=edited_source_path,
+                previous_output=_previous_output,
             )
         else:
             self.individual_worker = IndividualEditWorker(
@@ -5048,6 +5090,7 @@ class MainWindow(QMainWindow):
                 blur_dates=self.individual_blur_dates_check.isChecked(),
                 deglare=self.individual_deglare_check.isChecked(),
                 manual_rotation=self._current_manual_tilt(),
+                previous_output=_previous_output,
             )
         self.individual_worker.progress_changed.connect(self._on_progress)
         self.individual_worker.completed.connect(self._on_individual_edit_completed)
@@ -5742,6 +5785,35 @@ class MainWindow(QMainWindow):
             return
         self._load_legacy_folder(Path(folder), announce=True)
 
+    def _migrate_legacy_naming(self, folder: Path) -> dict:
+        """يرحّل أسماء مجلد منجَز إلى اصطلاح الترقيم الجديد.
+
+        خيار المالك صراحةً: الترحيل التلقائي مع نسخة احتياطية
+        («الثاني أفضل بحيث يصبح كل شيء ممتاز»).
+
+        محافظ عمدًا: لا يرحّل إلا مجلدًا كل أرقامه الظاهرة ≥ 2
+        (أي لا يوجد فيه `-1` يدلّ على الاصطلاح الجديد)، ويضع
+        علامة إنجاز تمنع الترحيل مرتين — والثاني يفقد صورًا.
+
+        لا يرفع استثناءً: فشل الترحيل يجب ألا يمنع فتح المجلد.
+        """
+        empty = {"migrated": False, "renamed": 0, "backup_dir": "",
+                 "errors": [], "reason": ""}
+        try:
+            from engine_v2.naming_v2 import migrate_legacy_dash_names
+        except Exception as exc:            # pragma: no cover - حزمة قديمة
+            empty["reason"] = str(exc)
+            return empty
+        try:
+            report = migrate_legacy_dash_names(folder, backup=True)
+        except Exception as exc:            # pragma: no cover - دفاع أخير
+            empty["reason"] = str(exc)
+            return empty
+        if report.get("errors"):
+            print(f"[migration] تحذيرات الترحيل: {report['errors'][:3]}",
+                  file=sys.stderr)
+        return report
+
     def _load_legacy_folder(self, folder: Path, announce: bool = False,
                             keep_position: bool = False) -> None:
         """يمسح المجلد، يصحّح التسميات من الإكسل فورًا، ويعرضها
@@ -5754,6 +5826,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME,
                                 f"تعذّر تحميل محرك المجلدات المنجزة.\n{exc}")
             return
+
+        # 2.9.12 — ترحيل تلقائي لاصطلاح الترقيم الجديد (خيار المالك).
+        # المجلدات القديمة تحمل (بلا رقم، -2، -3) والاصطلاح الجديد
+        # (بلا رقم، -1، -2). يجري قبل المسح ليرى المالك الأسماء
+        # النهائية مباشرة، ومعه نسخة احتياطية خارج المجلد.
+        migration = self._migrate_legacy_naming(folder)
 
         groups, unparsed = scan_legacy_folder(folder)
         if not groups:
@@ -5790,11 +5868,19 @@ class MainWindow(QMainWindow):
             parts.append("حمّل ملف الإكسل لتصحيح الوحدات تلقائيًا")
         else:
             parts.append("التسميات مطابقة للقاعدة أصلاً")
+        if migration.get("migrated"):
+            parts.append(
+                f"رُحّلت تسمية {migration['renamed']} ملف للترقيم الجديد")
         parts.append("اضغط ★ على أي صورة لتجعلها صورة الواجهة")
         self.status_label.setText(" — ".join(parts))
 
         if announce:
             lines = [f"فُتح المجلد: {st['items']} صنفًا، {st['images']} صورة."]
+            if migration.get("migrated"):
+                lines.append(
+                    f"رُحّلت تسمية {migration['renamed']} ملف إلى الترقيم الجديد"
+                    " (بلا رقم، ثم 1، 2، 3).\nوحُفظت نسخة احتياطية في:\n"
+                    f"{migration.get('backup_dir', '')}")
             if applied["items_done"]:
                 lines.append(f"صُحّحت تسمية {len(applied['renames'])} ملف في "
                              f"{applied['items_done']} صنفًا وفق الإكسل.")
@@ -7530,6 +7616,28 @@ class MainWindow(QMainWindow):
                 return img, f"الدمج في: {name}"
         return None, ""
 
+    def _insert_item_beside_group(self, new_item: BatchItemResult) -> None:
+        """يُدرج الصف الجديد بعد آخر صفٍّ يحمل رمز الصنف نفسه.
+
+        مطلب المالك حرفيًا: «يجب أن تكون قريبة من الصنف ولا تنزل
+        إلى الأسفل ليعرف المستخدم ويفهم الترتيب، يجب أن تكون
+        هناك خاصية للترتيب وليس عشوائيًا».
+
+        وإن لم يُوجد صفٌّ للصنف (حالة نادرة) يُلحَق في الذيل
+        كالسابق — لا نفقد الصف أبدًا.
+        """
+        items = self.current_result.items
+        code = str(getattr(new_item, "item_code", "") or "")
+        last = -1
+        if code:
+            for index, existing in enumerate(items):
+                if str(getattr(existing, "item_code", "") or "") == code:
+                    last = index
+        if last < 0:
+            items.append(new_item)
+        else:
+            items.insert(last + 1, new_item)
+
     def _save_nutrition_result(self, selected: BatchItemResult,
                                cropped, on_canvas: bool,
                                product_img=None, placement=None) -> str:
@@ -7588,7 +7696,12 @@ class MainWindow(QMainWindow):
         )
         if self.current_result is not None:
             position = self._capture_results_position()
-            self.current_result.items.append(new_item)
+            # 2.9.12 — أمر المالك: «صورة حقائق التغذية يجب أن تكون
+            # قريبة من الصنف ولا تنزل إلى الأسفل».
+            # كان ``append`` يضعها في ذيل القائمة دائمًا مهما بعُد
+            # صنفها، فتنقطع عن أخواتها ويضيع الترتيب المفهوم.
+            # الآن تُدرَج بعد آخر صفٍّ يحمل رمز الصنف نفسه.
+            self._insert_item_beside_group(new_item)
             self._populate_results(restore_position=position)
             # تحديث حزمة التسليم ZIP لتشمل الصورة الجديدة — بصمت.
             self._refresh_delivery_zip()
@@ -7653,11 +7766,64 @@ class MainWindow(QMainWindow):
             f"🗑 حُذفت {deleted} صورة من النتائج وحُدّثت حزمة ZIP —"
             " الصور الأصلية لم تُمس")
 
-    def _refresh_delivery_zip(self) -> None:
-        """يعيد كتابة حزمة التسليم ZIP بصمت.
+    def _refresh_delivery_zip(self, immediate: bool = False) -> None:
+        """يجدّد حزمة التسليم ZIP بلا تجميد الواجهة.
 
-        تحوّل المسارات النسبية (لمساحة العمل) إلى مطلقة مؤقتًا لأن
-        _write_delivery_zip تفحص is_file() مباشرة على القيمة."""
+        2.9.12 — إصلاح «البطء عند الحفظ والتعديل»:
+
+        الأصل (``pipeline._write_delivery_zip``) يفتح الأرشيف بالوضع
+        ``'w'`` ويعيد ضغط **كل** الصور بـDEFLATE مستوى 6 في كل
+        نداء، متزامنًا على خيط الواجهة. فحفظ صورة واحدة في
+        مجلد فيه 500 صورة يعيد ضغط 500 صورة والنافذة مجمدة.
+
+        والصور WebP مضغوطة أصلًا، فإعادة ضغطها تكلفة بلا عائد.
+
+        الآن: تأجيل يدمج الطلبات المتتابعة + كتابة في خيط
+        خلفي + تخزين بلا ضغط للصور. و``immediate=True`` تكتب
+        فورًا وتنتظر (عند الإغلاق أو قبل التسليم).
+        """
+        result = self.current_result
+        if result is None or not getattr(result, "delivery_zip", None):
+            return
+        scheduler = self._delivery_zip_scheduler()
+        if scheduler is None:
+            self._refresh_delivery_zip_blocking()
+            return
+
+        workspace = self.current_workspace
+
+        def _supplier():
+            return (self.current_result, workspace)
+
+        scheduler.request(_supplier)
+        if immediate:
+            scheduler.flush()
+
+    def _delivery_zip_scheduler(self):
+        """مجدول كتابة الحزمة (يُنشأ عند أول حاجة)، أو ``None``."""
+        scheduler = getattr(self, "_zip_scheduler", None)
+        if scheduler is not None:
+            return scheduler
+        try:
+            from delivery_zip_fast import DeliveryZipScheduler
+        except Exception as exc:                        # noqa: BLE001
+            print(f"[delivery_zip] تعذر تحميل المجدول: {exc}",
+                  file=sys.stderr)
+            self._zip_scheduler = None
+            return None
+        scheduler = DeliveryZipScheduler(delay_seconds=2.0)
+        self._zip_scheduler = scheduler
+        return scheduler
+
+    def _refresh_delivery_zip_blocking(self) -> None:
+        """المسار الأصلي المتزامن — شبكة أمان وحيدة.
+
+        يبقى لأن غياب وحدة التسريع يجب ألا يعني أبدًا حزمة
+        تسليم غير محدّثة — بطءٌ أهون من نقص في التسليم.
+
+        يحوّل المسارات النسبية إلى مطلقة مؤقتًا لأن
+        ``_write_delivery_zip`` تفحص ``is_file()`` مباشرة على القيمة.
+        """
         result = self.current_result
         if result is None or not getattr(result, "delivery_zip", None):
             return
@@ -7936,6 +8102,19 @@ class MainWindow(QMainWindow):
                          for it in self.current_result.items]
             self.current_result = _dc.replace(self.current_result,
                                               items=new_items)
+        # 2.9.12 — إغلاق الانفصال بين الذاكرة والقرص.
+        # أعلاه حُدّثت النتائج في ذاكرة الواجهة فقط، بينما المحرك
+        # يقرأ `job_state.json` من القرص. بدون هذه المزامنة يفشل
+        # أول تحرير بعد ★ بـ«لم يُعثر على الصورة المحددة داخل
+        # نتائج المهمة» — وهو ما وصفه المالك بأن الطمس لا يُحفظ.
+        if self.current_workspace is not None:
+            try:
+                from engine_v2.state_sync_v2 import sync_renamed_outputs
+                sync_renamed_outputs(self.current_workspace,
+                                     res.renames, renamed_names)
+            except Exception as exc:                    # noqa: BLE001
+                print(f"[state_sync] تعذرت مزامنة الحالة: {exc}",
+                      file=sys.stderr)
         self._populate_results(restore_position=position)
         extra = len(paths) - 1
         note = []
@@ -7948,7 +8127,7 @@ class MainWindow(QMainWindow):
         note_txt = (" — " + "، ".join(note)) if note else ""
         self.status_label.setText(
             f"تم تعيين الصورة الرئيسية للصنف {code} وإعادة ترقيم "
-            f"{extra} صورة إضافية (-2، -3…){note_txt}.")
+            f"{extra} صورة إضافية (-1، -2…){note_txt}.")
         detail = ""
         if recovered:
             detail += ("\n\nملاحظة: استُرجع مسار "
@@ -7960,7 +8139,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, APP_NAME,
             "تم التعيين بنجاح — الصورة المحددة أصبحت واجهة الصنف بلا رقم،\n"
-            f"وأعيد ترقيم بقية صور الصنف تلقائيًا (-2، -3…).\n"
+            f"وأعيد ترقيم بقية صور الصنف تلقائيًا (-1، -2…).\n"
             f"الملف الرئيسي: {Path(res.primary_path).name}{detail}")
 
     def _begin_manual_links(
@@ -7971,9 +8150,20 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.current_workspace is None:
             return
+        targets = list(targets)
         source_names = tuple(dict.fromkeys(item.source_name for item in targets))
         if not source_names:
             return
+        # 2.9.12 — جوهر إصلاح «اختفاء الأصناف عند الربط»:
+        # الصف المربوط قد يكون له مخرَج قائم من معالجة سابقة.
+        # نمرّر هذا المسار للعامل ليُكتب فوقه بدل توليد
+        # اسم جديد (-2 ثم -3…) ثم حذف القديم فتضيع الصورة.
+        previous_outputs = {}
+        for item in targets:
+            out = str(getattr(item, "output_path", "") or "")
+            name = str(getattr(item, "source_name", "") or "")
+            if out and name and Path(out).is_file():
+                previous_outputs[name] = out
         # 2.9.6 — حارس التزامن: بدء ربط جديد بينما السابق يعمل كان يستبدل
         # المرجع ويُسقط QThread عاملًا ⇒ SIGABRT وإغلاق التطبيق بلا رسالة.
         # الآن يُرفض الطلب بلطف مع إبقاء الأزرار معطلة حتى ينتهي الجاري.
@@ -8000,6 +8190,7 @@ class MainWindow(QMainWindow):
             self.enhance_product_check.isChecked(),
             self._final_image_options(),
             manual_rotation=self._current_manual_tilt(),
+            previous_outputs=previous_outputs,
         )
         self.manual_worker.completed.connect(self._on_manual_completed)
         self.manual_worker.failed.connect(self._on_manual_failed)
@@ -8064,6 +8255,15 @@ class MainWindow(QMainWindow):
     def _save_delivery_zip(self) -> None:
         if self.current_result is None:
             return
+        # 2.9.12 — قد يكون تحديث مؤجّل معلّقًا (تأجيل الكتابة لمنع
+        # البطء)؛ ننفّذه قبل النسخ حتى يأخذ المالك أحدث نسخة.
+        scheduler = getattr(self, "_zip_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.flush(timeout=60.0)
+            except Exception as exc:                    # noqa: BLE001
+                print(f"[delivery_zip] تعذر تفريغ الحزمة قبل الحفظ: {exc}",
+                      file=sys.stderr)
         source = Path(self.current_result.delivery_zip)
         if not source.is_file():
             QMessageBox.warning(self, APP_NAME, "حزمة النتائج غير موجودة.")
@@ -8228,6 +8428,16 @@ class MainWindow(QMainWindow):
         if interactive_close and not self._confirm_leave_results("إغلاق البرنامج"):
             event.ignore()
             return
+        # 2.9.12 — تحديث الحزمة صار مؤجّلًا لمنع البطء؛ فإن أُغلق
+        # البرنامج خلال فترة التأجيل وجب تنفيذ المعلّق أولًا
+        # وإلا سُلّمت حزمة ناقصة — وهذا أسوأ من البطء نفسه.
+        scheduler = getattr(self, "_zip_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.flush(timeout=30.0)
+            except Exception as exc:                    # noqa: BLE001
+                print(f"[delivery_zip] تعذر تفريغ الحزمة: {exc}",
+                      file=sys.stderr)
         # إيقاف منظم للخيوط قبل الإغلاق: تدمير QThread وهو يعمل يسبب
         # تحذير "Destroyed while thread is still running" وقد ينهي
         # العملية فجأة (خصوصًا إن أُغلق البرنامج أثناء معالجة دفعة).

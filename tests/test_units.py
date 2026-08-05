@@ -71,7 +71,7 @@ primary = idx.primary_unit_for_code(any_code)
 check("primary_unit", isinstance(primary, str) and primary in units,
       repr(primary))
 
-# خطة التسمية (2.9.9): الواجهة بلا لاحقة ثم -2 -3 للباقي
+# خطة التسمية (2.9.12): الواجهة بلا لاحقة ثم -1 -2 للباقي
 s = NamingSettings(unit_policy=UNIT_POLICY_REPLICATE)
 plan = plan_names_for_item(any_code, 3, list(dict.fromkeys(units)), s)
 check("plan_len", len(plan) == 3, str(plan))
@@ -79,16 +79,18 @@ check("plan_len", len(plan) == 3, str(plan))
 flat0 = list(plan[0]) if plan else []
 stem0 = str(flat0[0]).rsplit(".", 1)[0] if flat0 else ""
 check("plan_primary_no_suffix",
-      bool(stem0) and not stem0.endswith(("-1", "-2", "-3")), stem0)
-# 2.9.9 — الإضافية تحمل ترتيبها الحقيقي فتبدأ من -2؛
-# كان -1 يوهم أنها الأولى فيتداخل مع الواجهة في نفس المجلد.
+      bool(stem0) and not stem0.rsplit("-", 1)[-1].isdigit(), stem0)
+# 2.9.12 — الواجهة بلا رقم ثم -1 ثم -2 (أمر المالك الصريح:
+# «الأولى بدون رقم والثانية 1 والثالثة 2»).
 rest_ok = all(all(str(n).rsplit(".", 1)[0].endswith(f"-{i}")
                   for n in names)
-              for i, names in enumerate(plan[1:], start=2))
+              for i, names in enumerate(plan[1:], start=1))
 check("plan_suffix_dash", rest_ok, str(plan))
 flat_all = [str(n).rsplit(".", 1)[0] for names in plan for n in names]
-check("plan_no_dash_one",
-      not any(s.endswith("-1") for s in flat_all), str(flat_all))
+# الصف الأول وحده بلا رقم ترتيب (اسم لكل وحدة في سياسة التكرار).
+check("plan_one_unnumbered_row",
+      sum(1 for s in flat_all if not s.rsplit("-", 1)[-1].isdigit())
+      == len(flat0), str(flat_all))
 check("plan_no_duplicates",
       len(flat_all) == len(set(flat_all)), str(flat_all))
 

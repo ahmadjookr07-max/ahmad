@@ -223,20 +223,27 @@ def build_name(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT) -> str:
 
 def build_name_dash(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT,
                     total: int = 1) -> str:
-    """النمط الجديد بالشرطة — قاعدة المالك النهائية:
+    """النمط الجديد بالشرطة — قاعدة المالك النهائية (2.9.12):
 
     - الصورة الرئيسية (الواجهة المعيّنة بـ★) بلا رقم: ``{item}_{unit}``
-    - الصورة الثانية تحمل **رتبتها الحقيقية**: ``-2``
-    - الثالثة ``-3`` … وهكذا (الرقم = رتبة الصورة نفسها)
+    - الصورة الثانية تحمل ``-1``
+    - الثالثة ``-2``، الرابعة ``-3`` … وهكذا
     - الرقم في **نهاية الاسم دائمًا** بعد الوحدة، بشرطة، ولا شيء بعده.
 
-    أمر المالك نصًا: «إذا كان للمنتج أكثر من صورة فالمسمى يكون
-    بترقيم والأولى بدون رقم، لهذا أضفنا النجمة». فالنجمة ★
-    موجودة أصلًا لتعيين الواجهة التي **لا تحمل رقمًا**.
+    أمر المالك نصًا (2026-08-05): «عند التسمية البداية تكون
+    بدون رقم ثم واحد اثنين 3 الخـ.. عدلها».
 
-    تنبيه لمن يعدّل لاحقًا (وقع فعلًا مرتين): لا تجعلها
-    ``seq - 1``. ذلك يُعطي الصورة الثانية ``-1`` فيوهم أنها الأولى،
-    ويخالف نص المالك أعلاه. الرقم يطابق رتبة الصورة دائمًا
+    تاريخ هذا القرار (مهم لمن يعدّل لاحقًا):
+    تبدّل هذا الاصطلاح مرتين قبل 2.9.12 (كان ``-1`` ثم صار ``-2``
+    ثم عاد ``-1``). لا تعكسه من تلقاء نفسك بحجة «الرقم يجب أن
+    يطابق الرتبة» — المالك حسمه صراحة ومعه ترحيل تلقائي
+    للمجلدات القديمة (``migrate_legacy_dash_names``).
+
+    ملاحظة معمارية: ``seq`` هنا هو **الرتبة الداخلية** (1 للرئيسية،
+    2 للثانية) ويبقى كما هو في كل منطق الترتيب والفرز. التغيير
+    في **طبقة العرض فقط**: الرقم الظاهر = ``seq - 1``.
+    ومقابله في القراءة ``parse_name`` يردّ ``shown + 1``، فيبقى
+    round-trip متسقًا. لا تعدّل أحدهما دون الآخر.
     (يحرسه ``test_owner_units_real`` و``test_naming_join_all``).
     """
     item = sanitize_item(item)
@@ -245,7 +252,8 @@ def build_name_dash(item: str, seq: int = 1, unit: str = UNIT_SUFFIX_DEFAULT,
     base = normalize_stem(f"{item}_{unit}")
     if seq <= 1:
         return base
-    return f"{base}-{seq}"
+    # الرقم الظاهر يبدأ من 1 للصورة الثانية — أمر المالك.
+    return f"{base}-{seq - 1}"
 
 
 def parse_name(stem: str) -> ParsedName | None:
@@ -257,13 +265,12 @@ def parse_name(stem: str) -> ParsedName | None:
     stem = normalize_stem(stem)
     m = DASH_NAME_RE.match(stem)
     if m and not _unit_has_digit_part(m.group("unit")):
-        # الرقم الظاهر في نمط dash هو **الرتبة الحقيقية** للصورة
-        # (الرئيسية بلا رقم، والثانية -2) فيُقرأ كما هو ليبقى
-        # round-trip متسقًا مع ``build_name_dash``.
-        # الرقم 1 يأتي من مجلدات قديمة (كانت الثانية تأخذ -1)
-        # ويُقبل للقراءة وإعادة التسمية فيُرقّى إلى 2.
+        # 2.9.12 — الرقم الظاهر في نمط dash يبدأ من 1 للصورة
+        # **الثانية** (الرئيسية بلا رقم)، فالرتبة الداخلية =
+        # ``shown + 1`` — عكس ``build_name_dash`` تمامًا ليبقى
+        # round-trip متسقًا. لا تعدّل أحدهما دون الآخر.
         shown = int(m.group("seq"))
-        return ParsedName(m.group("item"), 2 if shown <= 1 else shown,
+        return ParsedName(m.group("item"), shown + 1 if shown >= 1 else 2,
                           m.group("unit"))
     m = NAME_RE.match(stem)
     # الحارس هنا أوجب ما يكون: `10012345_حبه_2` يطابق هذا النمط
@@ -301,6 +308,163 @@ def plan_group_names(item: str, count: int,
         return [build_name_dash(item, i + 1, unit, total=count)
                 for i in range(count)]
     return [build_name(item, i + 1, unit) for i in range(count)]
+
+
+# --------------------------------------------- 2.9.12 legacy dash migration
+# المشكلة: قبل 2.9.12 كان الرقم الظاهر = الرتبة نفسها
+# (الرئيسية بلا رقم، الثانية -2، الثالثة -3)، وصار الآن
+# (الثانية -1، الثالثة -2). فمجلدات المالك القديمة تحتاج
+# إزاحة واحدة لأسفل. المالك اختار صراحةً الترحيل التلقائي
+# مع نسخة احتياطية («الثاني أفضل بحيث يصبح كل شيء ممتاز»).
+#
+# الخطر الحقيقي: المجلد المُرحَّل مرتين يفقد صورًا (الإزاحة
+# تصطدم بالرئيسية بلا رقم)، لذلك نضع علامة إنجاز في المجلد
+# ونكشف المجلدات المُرحَّلة أصلًا بوجود `-1` فيها.
+MIGRATION_MARKER = ".naming_migrated_2912"
+
+
+def _dash_shown_number(stem: str) -> int | None:
+    """الرقم الظاهر في نمط الشرطة، أو ``None`` إن لم يكن منه."""
+    m = DASH_NAME_RE.match(normalize_stem(stem))
+    if not m or _unit_has_digit_part(m.group("unit")):
+        return None
+    return int(m.group("seq"))
+
+
+def folder_needs_dash_migration(folder: str | Path) -> bool:
+    """أيحتاج هذا المجلد ترحيلًا إلى اصطلاح 2.9.12؟
+
+    الحكم محافظ: لا نرحّل إلا إذا كانت كل الأرقام الظاهرة
+    ≥ 2 ولا يوجد أي `-1`، لأن وجود `-1` دليل قاطع على أن
+    المجلد بالاصطلاح الجديد أصلًا. والشك يُفسّر لمصلحة
+    عدم المساس بملفات المالك.
+    """
+    folder = Path(folder)
+    if not folder.is_dir() or (folder / MIGRATION_MARKER).exists():
+        return False
+    shown_numbers: list[int] = []
+    for p in folder.iterdir():
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+            continue
+        n = _dash_shown_number(p.stem)
+        if n is not None:
+            shown_numbers.append(n)
+    if not shown_numbers:
+        return False
+    return min(shown_numbers) >= 2
+
+
+def plan_dash_migration(folder: str | Path) -> list[RenamePlanEntry]:
+    """خطة إنقاص واحد من كل رقم ظاهر في نمط الشرطة.
+
+    ``item_حبه-2`` ← ``item_حبه-1`` ، ``-3`` ← ``-2`` … والرئيسية
+    بلا رقم تبقى كما هي.
+    """
+    folder = Path(folder)
+    entries: list[RenamePlanEntry] = []
+    files = [p for p in sorted(folder.iterdir())
+             if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+    # نرتّب تصاعديًا بالرقم الظاهر لينزل -2 قبل -3.
+    files.sort(key=lambda p: (_dash_shown_number(p.stem) or 0))
+
+    # ملاحظة دقيقة: لا يجوز الحكم بالتصادم لمجرد وجود الهدف
+    # على القرص، لأن الهدف نفسه قد يكون ملفًا سيُزاح هو الآخر
+    # في هذه الخطة (`-3` يريد `-2` و`-2` نازل إلى `-1`).
+    # و``apply_bulk_rename`` ينفّذ على مرحلتين بأسماء مؤقتة فلا
+    # تتصادم السلسلة. فالمعيار الصحيح: الهدف مشغول إن كان
+    # موجودًا و**لن يتحرك** من مكانه.
+    moving: set[str] = set()
+    for p in files:
+        shown = _dash_shown_number(p.stem)
+        if shown is not None and shown >= 2:
+            moving.add(p.name)
+
+    taken: set[str] = set()
+    for p in files:
+        shown = _dash_shown_number(p.stem)
+        if shown is None or shown < 2:
+            entries.append(RenamePlanEntry(p.name, p.name, "unchanged"))
+            taken.add(p.name)
+            continue
+        m = DASH_NAME_RE.match(normalize_stem(p.stem))
+        base = f"{m.group('item')}_{m.group('unit')}"
+        target = f"{base}-{shown - 1}{p.suffix.lower()}"
+        occupied = ((folder / target).exists() and target != p.name
+                    and target not in moving)
+        if target in taken or occupied:
+            entries.append(RenamePlanEntry(p.name, target, "conflict"))
+            continue
+        taken.add(target)
+        entries.append(RenamePlanEntry(p.name, target, "ok"))
+    return entries
+
+
+def migrate_legacy_dash_names(folder: str | Path,
+                              backup: bool = True,
+                              force: bool = False
+                              ) -> dict:
+    """يرحّل مجلد مخرَجات قديمًا إلى اصطلاح الترقيم الجديد.
+
+    يُعيد قاموسًا فيه ``migrated`` و``renamed`` و``backup_dir``
+    و``errors`` و``reason``. لا يرمي استثناءً أبدًا — فشل الترحيل
+    لا يجوز أن يمنع المالك من فتح مجلده.
+
+    النسخة الاحتياطية تُأخذ قبل أي تغيير وتُوضع **خارج**
+    مجلد المخرَجات لئلا تدخل في ملف التسليم المضغوط.
+    """
+    import shutil as _shutil
+    from datetime import datetime as _dt
+
+    folder = Path(folder)
+    result: dict = {"migrated": False, "renamed": 0, "backup_dir": "",
+                    "errors": [], "reason": ""}
+    try:
+        if not folder.is_dir():
+            result["reason"] = "المجلد غير موجود"
+            return result
+        if not force and not folder_needs_dash_migration(folder):
+            result["reason"] = "لا حاجة للترحيل"
+            return result
+        plan = [e for e in plan_dash_migration(folder)
+                if e.status == "ok" and e.target]
+        if not plan:
+            result["reason"] = "لا ملفات قابلة للترحيل"
+            return result
+        if backup:
+            stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+            bdir = folder.parent / f"{folder.name}_نسخة_قبل_الترحيل_{stamp}"
+            bdir.mkdir(parents=True, exist_ok=True)
+            # تُنسخ **كل صور المجلد** لا المتحركة وحدها. لو نُسخت
+            # المتحركة فقط لما كانت النسخة صورة صادقة عن المجلد قبل
+            # الترحيل، فتغيب عنها الواجهة (الصورة بلا رقم) وتفقد
+            # النسخة معناها: استرجاع الحالة السابقة كاملة.
+            sources = sorted({e.source for e in plan}
+                             | {p.name for p in folder.iterdir()
+                                if p.is_file()
+                                and p.suffix.lower() in IMAGE_EXTS})
+            for name in sources:
+                try:
+                    _shutil.copy2(folder / name, bdir / name)
+                except OSError as exc:
+                    result["errors"].append(f"نسخ {name}: {exc}")
+            # إن فشلت النسخة الاحتياطية كلها فلا نخاطر بملفات المالك.
+            if sources and len(result["errors"]) == len(sources):
+                result["reason"] = "تعذرت النسخة الاحتياطية — أُلغي الترحيل"
+                return result
+            result["backup_dir"] = str(bdir)
+        applied, errors = apply_bulk_rename(folder, plan)
+        result["renamed"] = applied
+        result["errors"].extend(errors)
+        result["migrated"] = applied > 0
+        try:
+            (folder / MIGRATION_MARKER).write_text(
+                f"migrated={applied}\n", encoding="utf-8")
+        except OSError:
+            pass
+    except Exception as exc:            # noqa: BLE001 - الترحيل لا يُسقط التطبيق
+        result["errors"].append(str(exc))
+        result["reason"] = "فشل غير متوقع"
+    return result
 
 
 # ------------------------------------------------------------ mojibake fix
@@ -418,8 +582,9 @@ UNIT_POLICY_REPLICATE = "replicate_all_units"
 UNIT_POLICY_DEFAULT = "default_unit"
 # join_all_units (جديد 2.3): الصنف المكرر في الإكسل بعدة وحدات (حبة/شدة/كرتون)
 # تُجمع كل وحداته حرفيًا وبنفس ترتيب الإكسل في اسم واحد:
-#   الرئيسية: 10001102_حبة_شدة_كرتون — الإضافية: ...-2 ثم -3 ثم -4
-# (أمر المالك: الأولى بدون رقم، فالرقم = رتبة الصورة)
+#   الرئيسية: 10001102_حبة_شدة_كرتون — الإضافية: ...-1 ثم -2 ثم -3
+# (أمر المالك 2.9.12: الأولى بلا رقم، ثم 1، 2، 3 — الرقم
+#  الظاهر = الرتبة ناقص واحد)
 UNIT_POLICY_JOIN_ALL = "join_all_units"
 VALID_POLICIES = (UNIT_POLICY_PER_IMAGE, UNIT_POLICY_REPLICATE,
                   UNIT_POLICY_DEFAULT, UNIT_POLICY_JOIN_ALL)
@@ -447,26 +612,25 @@ def build_name_join_all(item: str, units: list[str] | tuple[str, ...],
     """اسم الصورة بسياسة جمع كل الوحدات (قاعدة المالك النهائية):
 
     - الصورة الرئيسية (الأولى/الواجهة): ``{item}_{u1}_{u2}_{u3}`` بلا رقم
-    - الصورة الثانية تحمل **رتبتها الحقيقية**: ``…-2``
-    - الثالثة ``…-3`` … وهكذا (الرقم = رتبة الصورة نفسها)
+    - ثم ``…-1`` ثم ``…-2`` … (الرقم الظاهر = الرتبة ناقص واحد)
     - الرقم في **نهاية الاسم دائمًا** بعد كل الوحدات.
 
     مثال (الصنف 10011205 وله في الإكسل حبه/شدة/كرتون)::
 
         10011205_حبه_شدة_كرتون        ← الرئيسية بلا رقم
-        10011205_حبه_شدة_كرتون-2      ← الثانية
-        10011205_حبه_شدة_كرتون-3      ← الثالثة
+        10011205_حبه_شدة_كرتون-1      ← الثانية
+        10011205_حبه_شدة_كرتون-2      ← الثالثة
 
     مثال الوحدة الواحدة (10001205 وله `حبه` فقط)::
 
-        10001205_حبه    ثم    10001205_حبه-2
+        10001205_حبه    ثم    10001205_حبه-1
 
-    أمر المالك نصًا: «إذا كان للمنتج أكثر من صورة فالمسمى يكون
-    بترقيم والأولى بدون رقم، لهذا أضفنا النجمة».
+    2.9.12 — تغيير مقصود بأمر المالك الصريح: «الأولى بدون رقم
+    والثانية 1 والثالثة 2». قبل ذلك كانت الثانية ``-2``.
 
-    تنبيه لمن يعدّل لاحقًا (وقع فعلًا مرتين): لا تجعلها ``seq - 1``.
-    ذلك يُعطي الصورة الثانية ``-1`` فيوهم أنها الأولى، ويخالف
-    نص المالك. الرقم يطابق رتبة الصورة دائمًا
+    تنبيه لمن يعدّل لاحقًا: ``build_name_join_all`` و``parse_name``
+    متلازمان. إن غيّرت الإزاحة هنا فغيّر ``parse_name``
+    معها وإلا انفصم الكتابة عن القراءة وضاعت الصور
     (يحرسه ``test_naming_join_all`` و``test_owner_units_real``).
     """
     item = sanitize_item(item)
@@ -474,8 +638,8 @@ def build_name_join_all(item: str, units: list[str] | tuple[str, ...],
     base = normalize_stem(f"{item}_{joined}")
     if seq <= 1:
         return base
-    # قاعدة المالك: الرئيسية بلا رقم، والثانية -2، والثالثة -3 …
-    return f"{base}-{seq}"
+    # الرئيسية بلا رقم، ثم 1، 2، 3 — الظاهر = الرتبة − 1.
+    return f"{base}-{seq - 1}"
 
 
 TEMPLATE_DASH = "{item}_{unit}-{seq}"

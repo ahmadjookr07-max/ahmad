@@ -37,6 +37,7 @@
 """
 from __future__ import annotations
 
+import sys
 import threading
 from typing import Any, Callable
 
@@ -85,6 +86,17 @@ def load_engine() -> Any:
 
         _apply_perspective_patch(_pipeline)
         _apply_lossless_quality_patch(_final)
+        # 2.9.12 — ترقيعات السلامة: تمنع اختفاء الصور عند
+        # الربط وفشل الحفظ بعد الطمس. تُطبّق هنا لأن
+        # ``smart_catalog_vision`` مُسلَّم مُصرَّفًا فلا يُعدّل من الداخل،
+        # وهذا نفس نمط الترقيعين أعلاه. الفشل لا يُسقط
+        # التطبيق — يُسجّل ويُترك السلوك الأصلي.
+        try:
+            from integrity_patch import apply_integrity_patches
+            apply_integrity_patches(_pipeline, _final)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[integrity] تعذر تطبيق ترقيعات السلامة: {exc}",
+                  file=sys.stderr)
         _real_final_images = _final
         _real_pipeline = _pipeline
         return _real_pipeline

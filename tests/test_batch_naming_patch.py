@@ -167,7 +167,7 @@ def main() -> int:
     apply_join_all_units(res)
     check(p1.is_file(), "الاسم بقي كما هو", p1.name)
 
-    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -2 (2.9.9)")
+    print("\n[3] صورتان لصنف واحد: الرئيسية بلا رقم والثانية -1 (2.9.12)")
     a = out / "10000051_حبه.png"
     b = out / "10000051_حبه~2.png"
     _make_png(a)
@@ -177,13 +177,13 @@ def main() -> int:
                     workspace=str(tmp))
     apply_join_all_units(res)
     main_name = out / "10000051_حبه_كرتون_كرتون1.png"
-    # 2.9.9 — الثانية تأخذ ترتيبها الحقيقي `-2`؛ كان `-1`
-    # يوهم أنها الأولى فيتداخل مع الرئيسية في نفس المجلد.
-    second = out / "10000051_حبه_كرتون_كرتون1-2.png"
+    # 2.9.12 — الثانية تأخذ `-1` بأمر المالك الصريح:
+    # «الأولى بدون رقم والثانية 1 والثالثة 2».
+    second = out / "10000051_حبه_كرتون_كرتون1-1.png"
     check(main_name.is_file(), "الرئيسية بلا رقم", main_name.name)
-    check(second.is_file(), "الثانية بـ-2", second.name)
-    check(not (out / "10000051_حبه_كرتون_كرتون1-1.png").is_file(),
-          "لا يوجد -1 المحظور")
+    check(second.is_file(), "الثانية بـ-1", second.name)
+    check(not (out / "10000051_حبه_كرتون_كرتون1-2.png").is_file(),
+          "لا تقفز إلى -2 فتترك ثغرة")
 
     print("\n[4] عدم طمس ملف موجود")
     keep = out / "10000014_حبه_باكت.png"   # موجود من [1]
@@ -194,8 +194,8 @@ def main() -> int:
     apply_join_all_units(res)
     check(keep.is_file() and keep.read_bytes() == keep_bytes,
           "الملف الأصلي لم يُطمَس")
-    check((out / "10000014_حبه_باكت-2.png").is_file(),
-          "الجديد أخذ التسلسل الحر", "…-2.png")
+    check((out / "10000014_حبه_باكت-1.png").is_file(),
+          "الجديد أخذ التسلسل الحر", "…-1.png")
 
     print("\n[5] تحديث state.json")
     st = tmp / "state.json"

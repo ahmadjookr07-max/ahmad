@@ -317,6 +317,124 @@ def _count_item_images(stems: list[str], item: str) -> int:
     return count
 
 
+# ---------------------------------------------------------------------------
+# 2.9.12 — سياق إعادة المعالجة (إصلاح «اختفاء الصور»)
+#
+# العلة: كل ربط أو تحرير لصفٍّ له مخرَج قائم كان يولّد **اسمًا
+# جديدًا** (-2 ثم -3 ثم -4…) ثم يُحذف القديم، فيبقى الصف مشيرًا
+# إلى ملف غير موجود. الحل: أثناء إعادة المعالجة نحجز الجذع
+# المستقر نفسه فيُكتب فوقه — لا تكاثر ولا ملف يتيم.
+#
+# السياق خاص بكل خيط (thread-local) لأن المعالجة تجري في عمّال
+# متوازية، فلا يتسرّب حجز صفٍّ إلى صفٍّ آخر.
+# ---------------------------------------------------------------------------
+_reprocess_ctx = threading.local()
+
+
+def set_reprocess_stem(item: str, stem: str | None) -> None:
+    """يحجز الجذع المستقر للصنف ``item`` في الخيط الحالي.
+
+    يُستدعى قبل إعادة معالجة صورة لها مخرَج سابق (ربط يدوي،
+    تحرير فردي، تعيين واجهة) ليُكتب فوق الملف نفسه.
+    و``stem=None`` يرفع الحجز.
+    """
+    table = getattr(_reprocess_ctx, "stems", None)
+    if table is None:
+        table = {}
+        _reprocess_ctx.stems = table
+    key = str(item).strip()
+    if stem:
+        table[key] = str(stem)
+    else:
+        table.pop(key, None)
+
+
+def clear_reprocess_stems() -> None:
+    """يرفع كل الحجوزات في الخيط الحالي (يُستدعى في ``finally``)."""
+    _reprocess_ctx.stems = {}
+
+
+class reprocess_scope:
+    """مدير سياق يضمن ثبات اسم المخرَج أثناء إعادة المعالجة.
+
+    >>> with reprocess_scope("10001099", "10001099_حبه-1"):
+    ...     processor.process(...)   # يكتب فوق الملف نفسه
+    """
+
+    def __init__(self, item: str, stem: str | None):
+        self._item = str(item).strip()
+        self._stem = stem
+
+    def __enter__(self):
+        if self._stem:
+            set_reprocess_stem(self._item, self._stem)
+        return self
+
+    def __exit__(self, *exc):
+        set_reprocess_stem(self._item, None)
+        return False
+
+
+def _reserved_reprocess_stem(out_dir: Path, item: str) -> str | None:
+    """الجذع المحجوز لهذا الصنف إن كنّا في إعادة معالجة.
+
+    مصدران للسياق، وكلاهما لازم:
+
+    1. السياق المحلي ``reprocess_scope`` في هذه الوحدة — يُستعمل
+       من اختبارات المحرك ومن أي مستدعٍ يعرف رمز الصنف.
+    2. سياق ``integrity_patch`` الذي تضبطه الواجهة بـ**مسار**
+       المخرَج السابق دون أن تعرف الوحدة ولا الجذع المتوقع.
+       وهي الحالة الفعلية في الإنتاج (الربط اليدوي والتحرير
+       الفردي)، وترقيع ``_unique_output_path`` يقرأ منها أيضًا
+       فيتّفق مولّدا الأسماء على اسم واحد.
+
+    الاستيراد مؤجّل ومحروس لأن ``integrity_patch`` يسكن
+    ``windows_app`` وليس متاحًا حين يُستعمل المحرك وحده.
+    """
+    item_key = str(item).strip()
+    table = getattr(_reprocess_ctx, "stems", None)
+    if table:
+        stem = table.get(item_key)
+        if stem:
+            return str(Path(stem).stem)
+    try:
+        from integrity_patch import reserved_stem_for_reprocess
+    except Exception:
+        return None
+    try:
+        return reserved_stem_for_reprocess(out_dir, item_key)
+    except Exception:
+        return None
+
+
+def _next_free_sequence(stems: list[str], item: str) -> int:
+    """أول رقم **شاغر** للصنف — لا ``عدد + 1``.
+
+    الفرق جوهري: ``عدد + 1`` يتجاهل الفجوات فيتصاعد أبديًا
+    (تحذف صورتين من ثلاث فيصير التالي -4 والمجلد فيه صورة)،
+    و``next_sequence`` يملأ الفجوات فيبقى الترقيم متصلًا نظيفًا.
+
+    الدالة السليمة ``next_sequence`` موجودة أصلًا في ``naming_v2``
+    ولم تكن مستعملة هنا — وهذا جوهر العلة.
+
+    ونحرس الأسماء متعددة الوحدات (join_all) التي لا يفهمها
+    ``parse_name``: إن وُجدت ولم يُرجِع ``next_sequence`` شيئًا أكبر،
+    نسقط إلى العدّ لئلا نطمس صورة قائمة.
+    """
+    seq = next_sequence(stems, item)
+    item_s = str(item).strip()
+    # أسماء لا يفهمها parse_name لكنها تخص الصنف نفسه.
+    opaque = 0
+    for s in stems:
+        if parse_name(s):
+            continue
+        if s == item_s or s.startswith(f"{item_s}_"):
+            opaque += 1
+    if opaque:
+        seq = max(seq, _count_item_images(stems, item) + 1)
+    return seq
+
+
 def build_output_stems(out_dir: str | Path, item: str,
                        unit: str = UNIT_SUFFIX_DEFAULT) -> list[str]:
     """**كل** أسماء الملف التالي للصنف وفق السياسة المحفوظة.
@@ -330,9 +448,32 @@ def build_output_stems(out_dir: str | Path, item: str,
     القادم من المحرك (``حبه`` دائمًا) — فسياستا ``replicate_all_units``
     و``default_unit`` لم تكن لهما وجود في مسار الإنتاج إطلاقًا. الآن
     القرار كله في ``plan_stems_for_policy``.
+
+    2.9.12 — إصلاح «اختفاء الصور» (علة جذرية أنتجت أربعة أعراض):
+    كان السطر ``seq = existing + 1`` يمنح رقمًا جديدًا في **كل** نداء،
+    حتى حين تكون الصورة إعادةَ معالجة لصفٍّ له مخرَج قائم. فكل ربط أو
+    تحرير لنفس الصف يرى ملفه القديم موجودًا فيتصاعد: ``-2`` ثم ``-3``
+    ثم ``-4``… ثم يُحذف القديم، فيبقى الصف مشيرًا إلى اسم غير موجود:
+
+        ملف الصورة غير موجود: 10001099_حبه-4.webp
+
+    الآن نميّز حالتين:
+    - **إعادة معالجة** (سياق ``reprocess_scope`` نشط): يُعاد الجذع
+      المستقر نفسه فيُكتب فوقه — لا تكاثر ولا ملف يتيم.
+    - **صورة جديدة**: تستحق رقمًا جديدًا، والسلوك كما كان.
+
+    وبديل ``existing + 1`` صار ``next_sequence`` الذي يختار أول رقم
+    **شاغر** — وهو المنطق السليم الموجود أصلًا في ``naming_v2`` والذي
+    لم يكن مستعملًا هنا، فيملأ الفجوات بدل التصاعد الأبدي.
     """
     out_dir = Path(out_dir)
     stems = [p.stem for p in out_dir.glob("*.webp")] if out_dir.is_dir() else []
+
+    # إعادة معالجة صفٍّ له مخرَج قائم ⇒ ثبِّت الاسم واكتب فوقه.
+    reserved = _reserved_reprocess_stem(out_dir, item)
+    if reserved:
+        return [reserved]
+
     settings = _current_naming_settings()
     if settings is None or not settings.enabled:
         return [build_name(item, next_sequence(stems, item), unit)]
@@ -340,8 +481,7 @@ def build_output_stems(out_dir: str | Path, item: str,
     # الوسيط ``unit`` احتياط أخير حين لا كتالوج للصنف.
     units = (_units_from_catalog(item, excel_order=True)
              or ([unit] if unit else []))
-    existing = _count_item_images(stems, item)
-    seq = existing + 1
+    seq = _next_free_sequence(stems, item)
     return plan_stems_for_policy(item, units, seq, total=seq,
                                  settings=settings, chosen_unit=unit)
 

@@ -795,6 +795,49 @@ class NutritionCropDialog(QDialog):
         return self.white_canvas_check.isChecked()
 
 
+def _next_nutrition_path(out_dir: Path, item_code: str) -> Path:
+    """مسار صورة حقائق التغذية بالنمط الرسمي وحده.
+
+    2.9.12 — إصلاح شكوى المالك: «صورة حقائق التغذية تنزل
+    إلى الأسفل ولا تبقى قرب الصنف».
+
+    السبب الدقيق: عند تعارض الاسم كان يُلحَق ``(2)`` فينتج
+    ``10001099_حبه(2).webp`` — نمط رابع لا تفهمه ``parse_name``
+    إطلاقًا. فتُعامَل الصورة كاسم غريب لا ينتمي للصنف، فتسقط
+    إلى آخر القائمة بدل أن تقف بجوار أخواتها.
+
+    و``build_output_stem`` وحده لا يكفي هنا: قد يردّ اسمًا مشغولًا
+    فعلًا حين تكون في المجلد أسماء لا تتبع النمط (مجلدات
+    المالك القديمة)، فنزيد الرقم **بالنمط نفسه** حتى نجد
+    اسمًا حرًا — لا نخرج عن النمط أبدًا.
+    """
+    from engine_v2 import integration_v2
+    from engine_v2.naming_v2 import build_name_dash, parse_name
+
+    stem = integration_v2.build_output_stem(out_dir, str(item_code))
+    target = out_dir / f"{stem}.webp"
+    if not target.exists():
+        return target
+
+    # الاسم مشغول: تابِع بالرتبة التالية بنفس الوحدة.
+    parsed = parse_name(stem)
+    if parsed is None:
+        # اسم خارج النمط (سياسة خاصة): ألحِق الرقم بالشرطة
+        # لا بالأقواس، فيبقى النمط موحّدًا ومقروءًا.
+        shown = 1
+        while target.exists():
+            target = out_dir / f"{stem}-{shown}.webp"
+            shown += 1
+        return target
+
+    seq = parsed.seq
+    while target.exists():
+        seq += 1
+        target = out_dir / (
+            build_name_dash(parsed.item, seq, parsed.unit) + ".webp")
+    return target
+
+
 def save_nutrition_image(cropped: np.ndarray, out_dir: str | Path,
                          item_code: str, *, on_canvas: bool = True,
                          product_img: np.ndarray | None = None,
@@ -822,12 +865,7 @@ def save_nutrition_image(cropped: np.ndarray, out_dir: str | Path,
         final = cropped
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = integration_v2.build_output_stem(out_dir, str(item_code))
-    target = out_dir / f"{stem}.webp"
-    counter = 2
-    while target.exists():
-        target = out_dir / f"{stem}({counter}).webp"
-        counter += 1
+    target = _next_nutrition_path(out_dir, str(item_code))
     if not imwrite_unicode(target, final, lossless_webp=True):
         raise OSError(f"فشل حفظ صورة حقائق التغذية: {target}")
     return target

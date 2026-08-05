@@ -9,6 +9,9 @@
 
 الاختبار يبني مجلدًا منجزًا حقيقيًا على القرص (صنف بثلاث وحدات
 من الإكسل حبه/شدة/كرتون وصورتان) ويقيس المخرج في كل سياسة.
+
+تحديث 2.9.12: اصطلاح الترقيم صار (بلا رقم، 1، 2) بدل (بلا
+رقم، 2، 3) بأمر المالك، فحُدّثت التوقعات هنا تبعًا لذلك.
 """
 from __future__ import annotations
 
@@ -67,14 +70,14 @@ def _plan_with_policy(folder: Path, policy: str):
 
 
 def test_join_all_units():
-    """الدمج: كل وحدات الإكسل بترتيبها، والثانية `-2` لا `-1`."""
+    """الدمج: كل وحدات الإكسل بترتيبها، والثانية `-1` (2.9.12)."""
     tmp = Path(tempfile.mkdtemp())
     try:
         folder = _make_folder(tmp)
         plan, _ = _plan_with_policy(folder, UNIT_POLICY_JOIN_ALL)
         stems = [r.new_stem for r in plan.rows]
         assert stems[0] == f"{ITEM}_حبه_شدة_كرتون", stems
-        assert stems[1] == f"{ITEM}_حبه_شدة_كرتون-2", stems
+        assert stems[1] == f"{ITEM}_حبه_شدة_كرتون-1", stems
         assert all(not r.copies for r in plan.rows)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -88,7 +91,7 @@ def test_default_unit_reads_excel():
         plan, _ = _plan_with_policy(folder, UNIT_POLICY_DEFAULT)
         stems = [r.new_stem for r in plan.rows]
         assert stems[0] == f"{ITEM}_حبه", stems
-        assert stems[1] == f"{ITEM}_حبه-2", stems
+        assert stems[1] == f"{ITEM}_حبه-1", stems
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -103,8 +106,8 @@ def test_replicate_plans_one_name_per_unit():
         assert first.new_stem == f"{ITEM}_حبه", first.new_stem
         assert first.copies == [f"{ITEM}_شدة", f"{ITEM}_كرتون"], first.copies
         second = plan.rows[1]
-        assert second.new_stem == f"{ITEM}_حبه-2", second.new_stem
-        assert second.copies == [f"{ITEM}_شدة-2", f"{ITEM}_كرتون-2"], \
+        assert second.new_stem == f"{ITEM}_حبه-1", second.new_stem
+        assert second.copies == [f"{ITEM}_شدة-1", f"{ITEM}_كرتون-1"], \
             second.copies
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -121,12 +124,12 @@ def test_replicate_applies_copies_on_disk():
         names = sorted(p.name for p in folder.glob("*.webp"))
         expected = sorted([
             f"{ITEM}_حبه.webp", f"{ITEM}_شدة.webp", f"{ITEM}_كرتون.webp",
-            f"{ITEM}_حبه-2.webp", f"{ITEM}_شدة-2.webp", f"{ITEM}_كرتون-2.webp",
+            f"{ITEM}_حبه-1.webp", f"{ITEM}_شدة-1.webp", f"{ITEM}_كرتون-1.webp",
         ])
         assert names == expected, names
         # لا فقدان بيانات: كل نسخة تحمل محتوى أصلها
         assert (folder / f"{ITEM}_شدة.webp").read_bytes() == b"a"
-        assert (folder / f"{ITEM}_كرتون-2.webp").read_bytes() == b"b"
+        assert (folder / f"{ITEM}_كرتون-1.webp").read_bytes() == b"b"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -159,7 +162,7 @@ def test_disabled_settings_keeps_old_path():
             LF._naming_settings = original       # type: ignore[assignment]
         stems = [r.new_stem for r in plan.rows]
         assert stems[0] == f"{ITEM}_حبه", stems
-        assert stems[1] == f"{ITEM}_حبه-2", stems
+        assert stems[1] == f"{ITEM}_حبه-1", stems
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
