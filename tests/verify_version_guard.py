@@ -15,6 +15,21 @@ ROOT = Path(__file__).resolve().parents[1]
 TEST = Path(__file__).resolve().parent / "test_version_consistency.py"
 BACKUP = Path(tempfile.mkdtemp(prefix="guard_backup_"))
 
+# ── الرقم الحالي يُقرأ من VERSION لا يُكتب نصًا ────────────────────
+#
+# كانت التخريبات مكتوبة بالأرقام حرفيًا ('2.9.9'، filevers=(2, 9, 9, 0))،
+# فحين ارتفع الإصدار صارت `str.replace` لا تجد ما تبدله فتُعيد النص
+# كما هو، فيطبع الحارس «لم يُطبَّق التخريب» ويُحسَب إخفاقًا. أي أن أداة
+# التحقق من الحاجز كانت تتعطّل بمجرد رفع رقم الإصدار — وهو بالضبط
+# العطب الذي وُضعت لحرسه (رقم مكتوب في أكثر من موضع).
+#
+# الحل: تُشتق كل التخريبات من ملف VERSION، فتبقى فعّالة لأي إصدار.
+VER = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+_MAJ, _MIN, _PATCH = (int(x) for x in VER.split(".")[:3])
+OLD_VER = f"{_MAJ}.{_MIN}.{max(0, _PATCH - 1)}"        # إصدار متخلّف واحد
+FILEVERS_NOW = f"filevers=({_MAJ}, {_MIN}, {_PATCH}, 0)"
+FILEVERS_OLD = f"filevers=({_MAJ}, {_MIN}, {max(0, _PATCH - 1)}, 0)"
+
 
 def run_guard() -> int:
     r = subprocess.run([sys.executable, str(TEST)],
@@ -26,11 +41,11 @@ CASES = [
     # (وصف، الملف، دالة التخريب)
     ("بيانات إصدار المالك متخلّفة (عطب 2.9.5 الحقيقي)",
      "build/windows/version_info_owner.txt",
-     lambda s: s.replace("'2.9.9'", "'2.9.5'")),
+     lambda s: s.replace(f"'{VER}'", f"'{OLD_VER}'")),
 
     ("filevers الثنائي متخلّف بينما النص صحيح",
      "build/windows/version_info.txt",
-     lambda s: s.replace("filevers=(2, 9, 9, 0)", "filevers=(2, 9, 8, 0)")),
+     lambda s: s.replace(FILEVERS_NOW, FILEVERS_OLD)),
 
     ("مثبت يثبّت الإصدار نصيًا (عطب النسخ الثماني)",
      "build/windows/installer.nsi",
@@ -57,7 +72,9 @@ CASES = [
     # تجميده نصيًا هو عين عطب 2.0.0 الذي أنتج مخرجًا باسم خاطئ.
     ("ورشة ترفع مخرجًا بإصدار مجمّد (عطب 2.0.0 الحقيقي)",
      ".github/workflows/build-windows.yml",
-     lambda s: s.replace("name: Setup-${{ steps.ver.outputs.version }}",
+     # معرّف الخطوة في الورشة المصحّحة هو `version` لا `ver`، والمخرَج
+     # `value`. والتخريب يجمّد الرقم نصًا كما حدث فعلًا في عهد 2.0.0.
+     lambda s: s.replace("name: Setup-${{ steps.version.outputs.value }}",
                          "name: Setup-2.0.0")),
 
     ("بنية بيانات الإصدار معطوبة نحويًا",

@@ -113,14 +113,15 @@ try:
                       if p.name != "سابق.webp")
         check("outputs_written", len(outs) == 8, f"{len(outs)}")
 
-        # التسمية من الإكسل بنمط dash: الأولى بلا لاحقة ثم -2
+        # التسمية من الإكسل بنمط dash: الأولى بلا لاحقة ثم -1
         check("naming_primary", "10012345_حبه.webp" in outs,
               str([o for o in outs if o.startswith("10012345")]))
-        # 2.9.9 — الإضافية تحمل ترتيبها الحقيقي فتبدأ من -2؛
-        # كان -1 يوهم أنها الأولى فيتداخل مع الواجهة.
-        check("naming_dash_seq", "10012345_حبه-2.webp" in outs,
+        # 2.9.12 — قرار المالك: الرقم الظاهر يبدأ من 1 للصورة الثانية.
+        # الرئيسية بلا لاحقة، الثانية `-1`، الثالثة `-2` … وهكذا.
+        # كان الاصطلاح السابق يبدأ من -2 فيقفز الترقيم بلا سبب مفهوم.
+        check("naming_dash_seq", "10012345_حبه-1.webp" in outs,
               str([o for o in outs if o.startswith("10012345")]))
-        check("naming_no_dash_one", "10012345_حبه-1.webp" not in outs,
+        check("naming_no_dash_two", "10012345_حبه-2.webp" not in outs,
               str([o for o in outs if o.startswith("10012345")]))
         check("unit_literal_kees",
               any(o.startswith("10021777_كيس") for o in outs),

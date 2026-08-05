@@ -8,14 +8,14 @@
 
 | البند | القيمة |
 | --- | --- |
-| النسخة | **2.9.10** (`VERSION`، `native_app.py:213`، `native_app_v2.py:20`) |
-| المنصة | ويندوز سطح مكتب، Python 3.11 + PySide6 (Qt6)، **لا واجهة ويب** |
+| النسخة | **2.9.12** (`VERSION`، `native_app.py:213`، `native_app_v2.py:20`) |
+| المنصة | ويندوز سطح مكتب، Python 3.12 + PySide6 (Qt6)، **لا واجهة ويب** |
 | نقطة الإطلاق | `python windows_app/native_app_v2.py` |
 | الواجهة | `windows_app/native_app.py` (8,496 سطرًا) |
 | المحرك | `src/engine_v2/` |
 | برنامج المالك | `python owner_studio/owner_studio.py` |
 | المُثبِّت | `build/windows/installer.nsi` (المستخدم) · `installer_owner.nsi` (المالك) |
-| الاختبارات | **64 ملفًا — 53 ناجح / 7 متخطّى / 4 فاشل بيئيًا** (OCR وtkinter غير مثبتين في صندوق لينكس) |
+| الاختبارات | **70 ملفًا — 70 ناجح / 0 فاشل** (بعد تجهيز البيئة كاملة: OCR، tkinter، تجويفة المالك، مهلة 900ث) |
 | المستودع | `ahmad121232414-collab/market-image-studio-v2` · المجلد **مربوط** بـgit (`origin`, `main`) |
 
 **البرنامج:** يحوّل صور المنتجات الخام إلى حزمة جاهزة للمتجر، يقرأ
@@ -39,6 +39,22 @@
 **تحفّز واحد باقٍ:** دفع ملفات `.github/workflows/` يحتاج صلاحية
 `workflow` في رمز الجلسة. إن رُفض الدفع (403) فالمحتوى الصحيح موجود
 محليًا في `.github/workflows/` ويُلصق يدويًا من واجهة GitHub في دقيقة.
+
+### تتمّة 2.9.12 — الملفان صارا في المستودع فعلًا
+
+الجلسة السابقة دفعت الكود وتركت الورشتين للمالك لرفعهما يدويًا،
+فبقيتا في `main` بالأسماء القديمة (`Setup-2.0.0`، `OwnerStudio-1.0.0`)
+وكان `test_version_consistency` يسقط بــ**28/4**. فُفعّل المحتوى المصحّح
+في 2.9.12 وصار الفحص **32/32**.
+
+وحُذفت معه نسخة التوافق: كان `installer.nsi` ينسخ المُثبِّت نسخةً
+ثانية (300 م.ب) بالاسم `Setup-2.0.0.exe` لإرضاء الورشة القديمة. وبعد
+تصحيح الورشتين لم يبقَ لها من ينتظرها، ووجودها يعيد المشكلة نفسها
+(ملف يدّعي إصدارًا لا يطابق ما بداخله). **لا تُعد إضافتها.**
+
+وتحدَّث `tests/verify_version_guard.py`: كانت تخريباته مكتوبة بالأرقام
+حرفيًا (`'2.9.9'`) فتتعطّل مع كل رفع إصدار — وهو عين العطب الذي
+وُضع لحرسه. صارت تُشتق من `VERSION`، والنتيجة **10/10 مكشوف**.
 
 **بديل دائم:** البناء المحلي على ويندوز عبر
 `build/windows/ابنِ_المثبت.bat` (يشير إلى `installer.nsi`).
@@ -320,3 +336,101 @@ grep -rn "اسم_الزر\|objectName\|دالة_الفتح" \
 - **أنهِ خيوط Qt قبل هدم النوافذ** في أي اختبار واجهة، وإلا `SIGABRT`.
 - **الترقيم يُنتج من سبعة مواضع.** أي تعديل على قاعدة التسمية يُفحص في
   كلها معًا لا في واحد.
+
+## 13. بناء المثبّت محليًا تحت Wine — وصفة مُختبَرة (2.9.12)
+
+البناء الرسمي يجري على ويندوز عبر الورشة. لكن التسليم المباشر للمالك
+من صندوق لينكس يحتاج Wine، وقد اكتُشفت فيه ثلاث عقبات وحُلّت كلها.
+
+### الوصفة كاملة
+
+```bash
+# 1) Wine 11 من WineHQ (لا wine الافتراضي في أوبنتو)
+#    السبب: crealf/cimagf كانت stub حتى wine-10.0، وonnxruntime يحتاجها.
+sudo dpkg --add-architecture i386
+sudo wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+sudo wget -qNP /etc/apt/sources.list.d/ \
+  https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
+sudo apt-get update && sudo apt-get install -y --install-recommends winehq-stable
+
+# 2) البادئة — WINEDLLOVERRIDES إلزامي وإلا علِق wineboot على wine.inf
+export WINEPREFIX=/home/ubuntu/.wine64 WINEARCH=win64 WINEDEBUG=-all
+WINEDLLOVERRIDES="mscoree,mshtml=" timeout 500 wineboot -u
+
+# 3) بايثون ويندوز 3.12 المحمول (3.12 إلزامي: الـpyc بصمتها 3531)
+wget https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip
+# ثم عدّل python312._pth إلى: python312.zip / . / Lib\site-packages / import site
+wine py312/python.exe get-pip.py
+wine py312/python.exe -m pip install "PySide6>=6.6,<6.10" opencv-python-headless \
+  Pillow numpy onnxruntime openpyxl xlrd zxing-cpp pytesseract cryptography \
+  dilithium-py qrcode segno pyinstaller
+
+# 4) النماذج (مستبعدة من git لحجمها)
+wget -P src/engine_v2/models/ \
+  https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
+wget -P src/engine_v2/models/ \
+  https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
+
+# 5) البناء — عبر السكربت لا عبر PyInstaller مباشرة (انظر أدناه)
+cd /home/ubuntu/work && rm -rf build_tmp dist/windows
+PYTHONUTF8=1 wine /home/ubuntu/wpy/py312/python.exe tools/بناء_ويندوز_عبر_واين.py
+
+# 6) Tesseract المحمول — إلزامي وإلا !error في installer.nsi
+wine tesseract-ocr-w64-setup-5.4.0.20240606.exe /S
+cp -r "$WINEPREFIX/drive_c/Program Files/Tesseract-OCR/." \
+  dist/windows/AhmedAlFaifiMarketImageStudio/tesseract/
+wget -O dist/windows/AhmedAlFaifiMarketImageStudio/tesseract/tessdata/ara.traineddata \
+  https://github.com/tesseract-ocr/tessdata/raw/main/ara.traineddata
+
+# 7) المثبّت
+mkdir -p dist/installer && makensis -V2 build/windows/installer.nsi
+```
+
+### العقبات الثلاث وحلولها
+
+**١) PyInstaller يتجمّد بلا رسالة.** يشغّل دوال الجمع في عملية فرعية
+معزولة تتواصل عبر أنابيب، وتحت Wine تنتظر الأمّ سطرًا لا يأتي أبدًا
+(قيس: توقّف عشرين دقيقة عند `collect_all("onnxruntime")` باستهلاك معالج
+صفر، بينما `dilithium_py` يمرّ في 3.7 ثانية — الفرق حجم البيانات).
+
+الحل في `tools/بناء_ويندوز_عبر_واين.py`: يضبط
+`sys._pyi_isolated_subprocess = True` **قبل** استيراد PyInstaller، فتصير
+`isolated.Python.__enter__` بلا عمل و`call()` تنفّذ الدالة في العملية
+نفسها. النتيجة مطابقة تمامًا لأن الدوال نفسها تُنفَّذ بالوسائط نفسها.
+والسكربت يتحقّق أن العلم قُرئ فعلًا ويفشل صراحةً إن لم يُقرأ، حتى لا
+يتجمّد بناءٌ مستقبلي بلا سبب ظاهر إن غيّر PyInstaller آليته.
+
+**٢) `QCoreApplication` مزدوج.** بعد تعطيل العزل صارت خُطّافات Qt تعمل
+في عملية البناء نفسها، فحاول خُطّاف `QtNetwork` إنشاء `QCoreApplication`
+ثانيًا بعد أن أنشأه خُطّاف `QtCore`، فسقط بـ
+`RuntimeError: Please destroy the QCoreApplication singleton…`.
+الإصلاح في نسخة PyInstaller المحلية:
+`QCoreApplication.instance() or QCoreApplication(sys.argv)` في موضعين
+(`utils/hooks/qt/__init__.py` سطرا 205 و678). **إن أُعيد تركيب
+PyInstaller يُعاد هذا التعديل.**
+
+**٣) نسخة التوافق 2.0.0.** حُذفت — انظر القسم أعلاه.
+
+### التحقق بعد البناء (لا يُتخطّى)
+
+```bash
+# إقلاع فعلي بواجهة افتراضية
+Xvfb :95 -screen 0 1600x1000x24 &
+DISPLAY=:95 wine dist/windows/AhmedAlFaifiMarketImageStudio/AhmedAlFaifiMarketImageStudio.exe &
+DISPLAY=:95 xdotool search --name "." getwindowname %@   # يجب أن تظهر النوافذ
+```
+
+المتوقع: نافذة الاتفاقية ثم عنوان
+`Ahmed Al-Faifi Market Image Studio — 2.9.12`، وفي المخرَج
+`[V2] speedup state_cache: on` و`match_speed: on` (دليل نجاح استيراد
+`smart_catalog_vision` المصرَّف من داخل الحزمة).
+
+### حصيلة 2.9.12 المقيسة
+
+| البند | القيمة |
+| --- | --- |
+| الاختبارات | 70/70 ناجحة (بمهلة 900ث وتجويفة المالك مولَّدة) |
+| حجم الحزمة | 741 م.ب (مع Tesseract) |
+| حجم المثبّت | 298 م.ب (312,132,618 بايت) |
+| بصمة SHA-256 | `f50ec75ef39ccbe05627562ed4a480688c8601c6cae9c439fb902b9e2aab7145` |
+| زمن البناء | ~110 ثانية (PyInstaller) + ~11 دقيقة (NSIS) |
