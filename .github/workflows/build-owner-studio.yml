@@ -6,9 +6,6 @@ on:
     paths:
       - "owner_studio/**"
       - ".github/workflows/build-owner-studio.yml"
-env:
-  APP_VERSION_FILE: VERSION
-
 jobs:
   build:
     runs-on: windows-latest
@@ -54,6 +51,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OwnerStudio-2.9.13
+          name: OwnerStudio-1.0.0
           path: owner_studio/dist/AhmedAlFaifiOwnerStudio.exe
           retention-days: 30

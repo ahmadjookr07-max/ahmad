@@ -1,12 +1,9 @@
-name: Build Windows Setup 2.9.13
+name: Build Windows Setup 2.0.0
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
-
-env:
-  APP_VERSION_FILE: VERSION
 
 jobs:
   build:
@@ -83,19 +80,19 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist/installer | Out-Null
           & "C:\Program Files (x86)\NSIS\makensis.exe" build\windows\installer_v200.nsi
-          if (-not (Test-Path "dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.9.13.exe")) { throw "Installer missing" }
+          if (-not (Test-Path "dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.0.0.exe")) { throw "Installer missing" }
           Get-Item dist/installer/*.exe | Format-List Name,Length
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Setup-2.9.13
-          path: dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.9.13.exe
+          name: Setup-2.0.0
+          path: dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.0.0.exe
           retention-days: 30
 
       - name: Upload portable app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Portable-2.9.13
+          name: Portable-2.0.0
           path: dist/windows/AhmedAlFaifiMarketImageStudio
           retention-days: 7
