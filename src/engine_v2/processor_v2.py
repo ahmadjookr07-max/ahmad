@@ -125,6 +125,83 @@ class ProcessorV2:
     def __init__(self, model_dir: str | Path):
         self.segmenter = ProductSegmenterV2(model_dir)
 
+    # -------------------------------------------------- prescale (م-1)
+    @staticmethod
+    def _prescale_to_target(img: np.ndarray, alpha: np.ndarray,
+                           opts: ProcessOptionsV2):
+        """اقتصاص حول القناع وتصغير إلى مقاس الهدف (بند م-1).
+
+        يُرجع ``(img, alpha, True)`` عند التطبيق، و``None`` حين لا
+        مكسب فيه فيُمضى في المسار القديم دون تغيير.
+
+        ولماذا هذا أسرع بلا خسارة جودة: الخطوتان التاليتان
+        (التركيب على أبيض والتحسين الواعي بالنص) تكلفتان
+        طرديًّا مع عدد البكسلات، وكانتا تعملان على 12.2
+        ميجابكسل لتُرمى إلى 0.56 ميجابكسل بعدهما.
+
+        ويُحتفظ بهامش أمان (`PRESCALE_SLACK`) فوق مقاس الهدف
+        لأن `_frame_on_canvas` سيعيد التأطير لاحقًا، وربّ الظل
+        يوسّع القناع، فلا نريد تصغيرًا مرتين على الحدّ.
+        """
+        if img is None or alpha is None:
+            return None
+        h, w = img.shape[:2]
+        bbox = ProductSegmenterV2.alpha_bbox(alpha)
+        if bbox is None:
+            return None
+        x0, y0, x1, y1 = bbox
+        # هامش حول المنتج: لا نقصّ على الحافة تمامًا لأن
+        # الظل وإزالة الهالة يحتاجان متنفّسًا حول الجسم.
+        prod_w, prod_h = x1 - x0 + 1, y1 - y0 + 1
+        pad = int(max(prod_w, prod_h) * 0.10) + 8
+        cx0 = max(0, x0 - pad)
+        cy0 = max(0, y0 - pad)
+        cx1 = min(w - 1, x1 + pad)
+        cy1 = min(h - 1, y1 + pad)
+        cw, chh = cx1 - cx0 + 1, cy1 - cy0 + 1
+        if cw < 8 or chh < 8:
+            return None
+
+        # مقاس الهدف مع هامش أمان
+        slack = ProcessorV2.PRESCALE_SLACK
+        tw = int(opts.width * slack)
+        th = int(opts.height * slack)
+        sc = min(tw / cw, th / chh)
+        # لا تكبير أبدًا، ولا تصغير طفيف لا يستحق العملية
+        if sc >= 0.9:
+            return None
+        nw = max(8, int(round(cw * sc)))
+        nh = max(8, int(round(chh * sc)))
+
+        img_c = img[cy0:cy1 + 1, cx0:cx1 + 1]
+        alpha_c = alpha[cy0:cy1 + 1, cx0:cx1 + 1]
+
+        # الصورة: بنفس التصغير الواعي بالنص المستخدم في
+        # التأطير، لا بتصغير قاسٍ — وهذا ما يحفط المقروئية.
+        if getattr(opts, "text_aware", True):
+            try:
+                from .quality_v2 import smart_downscale
+                img_s = smart_downscale(img_c, nw, nh, text_aware=True)
+            except Exception:
+                img_s = cv2.resize(img_c, (nw, nh),
+                                   interpolation=cv2.INTER_AREA)
+        else:
+            img_s = cv2.resize(img_c, (nw, nh),
+                               interpolation=cv2.INTER_AREA)
+
+        # القناع: INTER_AREA يحفط تدرج الحافة (القناع عشري في
+        # 0..1 ويجب أن يبقى كذلك لا أن يُعتّب فتخشن الحواف).
+        alpha_s = cv2.resize(alpha_c.astype(np.float32), (nw, nh),
+                             interpolation=cv2.INTER_AREA)
+        alpha_s = np.clip(alpha_s, 0.0, 1.0)
+        return img_s, alpha_s, True
+
+    # هامش الأمان فوق مقاس الهدف قبل التأطير النهائي.
+    # 1.6 مختار لا مخمّن: يترك دقة كافية للتأطير الثاني
+    # ولتوسعة القناع بالظل، ومع ذلك يخفّض البكسلات إلى
+    # حدود 1.4 ميجابكسل بدل 12.2.
+    PRESCALE_SLACK = 1.6
+
     # ------------------------------------------------------------ frame
     @staticmethod
     def _frame_on_canvas(img_white: np.ndarray, alpha: np.ndarray,
@@ -226,11 +303,52 @@ class ProcessorV2:
             res.confidence = seg.confidence
             res.warnings.extend(seg.warnings)
             alpha = seg.alpha
-
             # تدوير يدوي
             if abs(opts.manual_rotation_degrees) > 0.05:
                 img, alpha = rotate_with_alpha(img, alpha,
                                                opts.manual_rotation_degrees)
+
+            # ============ 2.9.13 (م-1) — إعادة ترتيب الخط ============
+            #
+            # الترتيب القديم كان:
+            #     segment → compose_on_white(12MP) → enhance(12MP)
+            #             → shadow → frame(→0.56MP)
+            #
+            # والمقيس داخل `process` نفسه على مقاس صور المالك
+            # 4032×3024 (بعد تسخين النموذج، ثلاث جولات):
+            #     الإجمالي           5786 مللي/صورة
+            #     enhance           3617 مللي  (62.5%)
+            #     compose_on_white   893 مللي  (15.4%)
+            # → 217 صورة = 20.9 دقيقة، مطابق لبلاغ المالك.
+            #
+            # والعلة ليست العتاد بل **ترتيب العمليات**: الخطوتان
+            # تعملان على 12.2 ميجابكسل والمخرَج 0.56 ميجابكسل فقط
+            # (نسبة 21.8×)، أي أن **95.4% من حسابهما يُرمى** في
+            # `frame_on_canvas` بعدهما.
+            #
+            # الترتيب الجديد: اقتصاص حول القناع ثم تصغير إلى
+            # مقاس الهدف **قبل** التركيب والتحسين. ولماذا لا يضر
+            # هذا بالجودة:
+            #   • التصغير يجري بنفس `smart_downscale` الواعي بالنص
+            #     الذي كان يجري في `frame_on_canvas`، لا بتصغير قاسٍ.
+            #   • التحسين والواعي بالنص يعمل على البكسلات التي
+            #     ستُرى فعلًا، وهذا أدق لا أردأ: حدة تُحسب على
+            #     12MP ثم يُرمى 95% منها ليست حدة مرئية.
+            #   • إزالة الهالة (`decontaminate`) تعمل على شريط الحافة،
+            #     والحافة تبقى حافة بعد التصغير.
+            #
+            # ولأن الجودة لا تُفترض بل تُقاس، لهذا التغيير اختبار
+            # يقارن مقروئية النص قبله وبعده:
+            # `tests/test_pipeline_order_m1.py`.
+            #
+            # ولا يُطبّق الترتيب الجديد إلا حين يكون مفيدًا فعلًا
+            # (المنتج أكبر من مقاس الهدف)؛ وإلا فالمسار القديم
+            # أسلم ولا مكسب في تغييره.
+            _pre_scaled = False
+            with _span("prescale"):
+                _pre = self._prescale_to_target(img, alpha, opts)
+                if _pre is not None:
+                    img, alpha, _pre_scaled = _pre
 
             # تركيب على أبيض + تحسين
             with _span("compose_on_white"):

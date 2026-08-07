@@ -224,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "2.9.12"
+APP_VERSION = "2.9.13"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -1898,6 +1898,12 @@ class MainWindow(QMainWindow):
         # التسخين، ومجموعات المنتظر/الفاشل. الربط الآن بالباركود والاسم
         # والجيرة واليد وحدها — أدق وأسرع وبلا أي قراءة أقراص زائدة.
         self._individual_edit_source_name = ""
+        # 2.9.13 (م-12) — وجهة المحرر الفعلية: اسم الملف المحمّل في
+        # `unified_editor` الآن. وهو متغير مستقل عن
+        # `_individual_edit_source_name` قصدًا: ذاك يتبع **التحديد**
+        # وهذا يتبع **البكسلات**. خلطهما هو أصل فساد البيانات:
+        # التحديد يتحوّل فيُحدَّث الأول وتبقى البكسلات للصنف القديم.
+        self._editor_loaded_source_name = ""
         self._individual_crop_box: tuple[float, ...] | None = None
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -4480,6 +4486,9 @@ class MainWindow(QMainWindow):
         pane.viewer.fit_image()
         # 2.6: تحميل الصورة في المحرر الموحد — كل الأدوات تعمل مباشرة على الصورة
         self.unified_editor.load_image(str(source))
+        # 2.9.13 (م-12): تسجيل وجهة المحرر — عليها يعتمد حرس
+        # فساد البيانات قبل اعتماد أي بكسلات.
+        self._editor_loaded_source_name = item.source_name
         self.individual_editor_product_label.setText(item.product_name or item.source_name)
         unit = self._units_label_for_code(item.item_code)
         self.individual_editor_meta_label.setText(
@@ -4788,27 +4797,40 @@ class MainWindow(QMainWindow):
             return None
         return draft_dir / f"{Path(source_name).stem}.edited.png"
 
-    def _save_editor_draft(self, *, silent: bool = False) -> Path | None:
+    def _save_editor_draft(self, *, silent: bool = False,
+                           source_name: str = "") -> Path | None:
         """حفظ تعديلات المحرر **أثناء العمل** بلا اشتراط الربط.
 
         هذا هو إصلاح علة المالك: التعديل يُحفظ فورًا على القرص، فلا
         يُفقد عند الانتقال إلى صورة أخرى أو إغلاق الصفحة، وعند الربط
         لاحقًا يُعالج المصدر **المعدَّل** لا الأصلي.
+
+        2.9.13 (م-12): ``source_name`` الصريح يسمح بحفظ مسودة الصف
+        **السابق** قبل أن يتحول التحديد إلى صف آخر. بدونه كان
+        الحفظ يستخرج الاسم من التحديد الجديد ─ فيُكتب عمل الصنف
+        الأول في مسودة الصنف الثاني، وهو نفس فساد البيانات من باب
+        آخر.
         """
-        item = self._individual_editable_item()
         editor = getattr(self, "unified_editor", None)
-        if item is None or editor is None or not editor.has_image():
-            if not silent:
-                QMessageBox.information(
-                    self, APP_NAME,
-                    "حدد صفًا واحدًا وحمّل صورته في المحرر قبل الحفظ.")
-            return None
+        if source_name:
+            key = str(source_name)
+            if editor is None or not editor.has_image():
+                return None
+        else:
+            item = self._individual_editable_item()
+            if item is None or editor is None or not editor.has_image():
+                if not silent:
+                    QMessageBox.information(
+                        self, APP_NAME,
+                        "حدد صفًا واحدًا وحمّل صورته في المحرر قبل الحفظ.")
+                return None
+            key = item.source_name
         result_bgr = editor.get_result_bgr()
         if result_bgr is None:
             if not silent:
                 QMessageBox.warning(self, APP_NAME, "تعذر قراءة ناتج المحرر.")
             return None
-        target = self._editor_draft_path(item.source_name)
+        target = self._editor_draft_path(key)
         if target is None:
             if not silent:
                 QMessageBox.warning(self, APP_NAME, "تعذر تحديد مكان حفظ المسودة.")
@@ -4828,10 +4850,12 @@ class MainWindow(QMainWindow):
         if drafts is None:
             drafts = {}
             self._editor_drafts = drafts
-        drafts[item.source_name] = target
+        drafts[key] = target
         self._individual_editor_dirty = False
         label = getattr(self, "individual_editor_state_label", None)
-        if label is not None:
+        # لا تُغير لافتة الحالة حين يكون الحفظ للصف السابق
+        # أثناء المزامنة، فاللافتة تخص الصف المعروض لا المنقول عنه.
+        if label is not None and not source_name:
             label.setText(f"✓ حُفظ التعديل — {target.name}")
         return target
 
@@ -4948,6 +4972,8 @@ class MainWindow(QMainWindow):
             # 2.6: إعادة تحميل الأصل في المحرر الموحد يلغي كل التعديلات غير المحفوظة
             if self._editor_ready():
                 self.unified_editor.load_image(str(source))
+                # 2.9.13 (م-12): الوجهة تُحدّث مع كل تحميل بلا استثناء
+                self._editor_loaded_source_name = item.source_name
         self._individual_preview_active = False
         self._individual_preview_path = None
         self.individual_show_preview_button.setEnabled(False)
@@ -5012,6 +5038,21 @@ class MainWindow(QMainWindow):
         # كمصدر معدّل ونمرره للـ pipeline (التأطير 800×700 + التقارير تبقى كما هي)
         edited_source_path: Path | None = None
         editor = getattr(self, "unified_editor", None)
+        # 2.9.13 (م-12) — حرس فساد البيانات: لا تُعتمد بكسلات من
+        # المحرر إلا إن كان محمّلًا على هذا الصف بعينه. قبل هذا
+        # الشرط كانت بكسلات صنف تُكتب فوق ناتج صنف آخر بلا أي
+        # رسالة — وهو أخطر ما في السجل لأنه يتلف العمل ولا يُعلم به.
+        if editor is not None and editor.has_image() and \
+                not self._editor_matches_selection(item):
+            if not getattr(self, "_headless_mode", False):
+                QMessageBox.warning(
+                    self, APP_NAME,
+                    "المحرر محمّل على صورة غير المحددة — لم يُعتمد أي تعديل"
+                    " منعًا لكتابة صورة صنف فوق صنف آخر.\n\n"
+                    "أُعيدت مزامنة المحرر مع الصف المحدد — أعد التعديل"
+                    " ثم اضغط «حفظ واعتماد التعديل».")
+            self._sync_editor_to_selection(item)
+            return
         if editor is not None and editor.has_image() and editor.has_edits():
             try:
                 result_bgr = editor.get_result_bgr()
@@ -7081,6 +7122,73 @@ class MainWindow(QMainWindow):
             candidate = self.current_workspace / candidate
         return candidate
 
+    def _sync_editor_to_selection(self, item) -> None:
+        """يُزامن المحرر الموحّد مع الصف المحدد (بند م-12).
+
+        لا يبني المحرر إن لم يكن مبنيًا أصلًا (`_editor_ready`) — فلا
+        تكلفة إن لم يُفتح التبويب بعد. وإن كان في المحرر عمل غير
+        محفوظ لصف آخر، فمسودة تُكتب على القرص قبل التحويل، فلا
+        يُفقد عمل المالك بمجرد نقلة صف.
+        """
+        if not self._editor_ready():
+            return
+        editor = self.unified_editor
+        # أولًا: لا يُفقد عمل غير محفوظ يخص الصف السابق
+        try:
+            previous = getattr(self, "_editor_loaded_source_name", "") or ""
+            if previous and editor.has_image() and editor.has_edits():
+                self._save_editor_draft(source_name=previous, silent=True)
+        except Exception:
+            pass
+        if item is None:
+            try:
+                editor.clear()
+            except Exception:
+                pass
+            self._editor_loaded_source_name = ""
+            return
+        source = self._result_path(item.source_path)
+        # المسودة المحفوطة لهذا الصف أولى من الأصل إن وجدت
+        try:
+            drafts = getattr(self, "_editor_drafts", None) or {}
+            draft = drafts.get(item.source_name)
+            if draft is None:
+                candidate = self._editor_draft_path(item.source_name)
+                if candidate is not None and candidate.is_file():
+                    draft = candidate
+            if draft is not None and Path(draft).is_file():
+                source = Path(draft)
+        except Exception:
+            pass
+        if source is None or not source.is_file():
+            try:
+                editor.clear()
+            except Exception:
+                pass
+            self._editor_loaded_source_name = ""
+            return
+        try:
+            editor.load_image(str(source))
+            self._editor_loaded_source_name = item.source_name
+            self._individual_editor_dirty = False
+        except Exception:
+            self._editor_loaded_source_name = ""
+
+    def _editor_matches_selection(self, item) -> bool:
+        """حرس فساد البيانات: هل المحرر محمّل على الصف نفسه؟
+
+        يُستدعى قبل اعتماد أي بكسلات من المحرر. وهو الطبقة
+        الثانية بعد المزامنة: حتّى لو اختلت المزامنة لسبب لم
+        نتوقّعه، لا تُكتب بكسلات صنف فوق صنف آخر أبدًا.
+        """
+        if item is None:
+            return False
+        loaded = getattr(self, "_editor_loaded_source_name", None)
+        if not loaded:
+            # لم تُسجّل وجهة بعد — مسار قديم يُعتبر مجهولًا لا مطابقًا
+            return False
+        return str(loaded) == str(item.source_name)
+
     def _show_selected_preview(self) -> None:
         current = self._selected_result_item()
         current_name = current.source_name if current is not None else ""
@@ -7092,6 +7200,18 @@ class MainWindow(QMainWindow):
                 self.individual_manual_crop_button.setChecked(False)
             self.output_preview.viewer.clear_crop()
             self.output_preview.viewer.set_crop_mode(False)
+            # 2.9.13 (م-12) — أخطر عطل في السجل: فساد بيانات صامت.
+            #
+            # كان هذا الفرع يُحدِّث وجهة الحفظ (`_individual_edit_source_name`)
+            # ثم يترك `unified_editor` محمّلًا على بكسلات **الصف السابق**.
+            # و`_begin_individual_edit` يأخذ `editor.get_result_bgr()` ويكتبه
+            # باسم الصنف الجديد ─ فتُكتب صورة صنف فوق صنف آخر.
+            # وهذا هو تفسير بلاغ المالك «يتم تكرار الصورة نفسها؟؟
+            # لم أكررها» — وهو محقّق، البرنامج كرّرها.
+            #
+            # والمزامنة كانت موجودة في `_open_individual_editor` وحدها،
+            # أي في مسار الفتح لا في مسار تغيير الصف.
+            self._sync_editor_to_selection(current)
 
         count = self.results_table.rowCount()
         self._update_result_position_label()

@@ -1,4 +1,8 @@
-name: Build Windows Setup 2.0.0
+# مصدر الإصدار الوحيد هو ملف VERSION في جذر المستودع.
+# لا يُكتب رقم إصدار المنتج يدويًا هنا: الترميز الصلب هو ما جعل الورشة
+# تبحث عن مُثبّت 2.0.0 بينما ينتج NSIS رقم VERSION الحقيقي، فتفشل
+# برسالة مضلّلة «المُثبّت مفقود» بعد تسعين دقيقة من البناء.
+name: Build Windows Setup
 
 on:
   workflow_dispatch:
@@ -12,6 +16,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read product version from VERSION
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION malformed: '$v'" }
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Product version = $v"
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
@@ -79,20 +92,21 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/installer | Out-Null
-          & "C:\Program Files (x86)\NSIS\makensis.exe" build\windows\installer_v200.nsi
-          if (-not (Test-Path "dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.0.0.exe")) { throw "Installer missing" }
+          & "C:\Program Files (x86)\NSIS\makensis.exe" build\windows\installer.nsi
+          $setup = "dist/installer/AhmedAlFaifiMarketImageStudio-Setup-${{ steps.ver.outputs.value }}.exe"
+          if (-not (Test-Path $setup)) { throw "Installer missing: $setup" }
           Get-Item dist/installer/*.exe | Format-List Name,Length
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Setup-2.0.0
-          path: dist/installer/AhmedAlFaifiMarketImageStudio-Setup-2.0.0.exe
+          name: Setup-${{ steps.ver.outputs.value }}
+          path: dist/installer/AhmedAlFaifiMarketImageStudio-Setup-${{ steps.ver.outputs.value }}.exe
           retention-days: 30
 
       - name: Upload portable app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Portable-2.0.0
+          name: Portable-${{ steps.ver.outputs.value }}
           path: dist/windows/AhmedAlFaifiMarketImageStudio
           retention-days: 7

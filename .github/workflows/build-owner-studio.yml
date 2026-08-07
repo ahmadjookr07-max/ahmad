@@ -1,3 +1,5 @@
+# مصدر الإصدار الوحيد هو ملف VERSION في جذر المستودع، فلا يُرمّز رقم
+# المنتج صلبًا هنا ولا ينحرف اسم المخرج عن الإصدار الفعلي.
 name: Build Owner Studio EXE
 on:
   workflow_dispatch:
@@ -13,6 +15,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Read product version from VERSION
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION malformed: '$v'" }
+          "value=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Product version = $v"
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -51,6 +61,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OwnerStudio-1.0.0
+          name: OwnerStudio-${{ steps.ver.outputs.value }}
           path: owner_studio/dist/AhmedAlFaifiOwnerStudio.exe
           retention-days: 30
