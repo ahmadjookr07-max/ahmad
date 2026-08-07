@@ -93,6 +93,81 @@ def read_image(path: str):
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
+# ------------------------------------------- أمانة الجلسة (بند م-5)
+# كان الحفظ والاسترجاع يسردان حقول ``BatchItemResult`` يدويًا
+# في موضعين متباعدين، فكل حقل يُضاف للمحرك يُفقد بصمت في
+# الجلسات إلى أن يتذكّره أحد. الدالتان أدناه تقرأان حقول
+# الـ``dataclass`` من النوع نفسه وقت التشغيل، فلا توجد قائمة
+# حقول ثانية تتخلف عن الأولى.
+
+def _dataclass_field_names(cls) -> list[str]:
+    try:
+        import dataclasses
+        return [f.name for f in dataclasses.fields(cls)]
+    except Exception:
+        return []
+
+
+def item_to_dict(item) -> dict:
+    """يحوّل ``BatchItemResult`` إلى قاموس بكل حقوله لا ببعضها."""
+    names = _dataclass_field_names(type(item))
+    if not names:
+        names = ["source_path", "source_name", "status", "item_code",
+                 "product_name", "barcode", "confidence", "explanation",
+                 "output_path", "review_path", "match_source",
+                 "barcode_candidates", "warnings", "processing_ms",
+                 "foreground_method", "foreground_quality_score",
+                 "foreground_quality_status", "foreground_quality_metrics"]
+    out: dict = {}
+    for name in names:
+        val = getattr(item, name, None)
+        if isinstance(val, tuple):
+            val = list(val)
+        elif isinstance(val, dict):
+            val = dict(val)
+        out[name] = "" if val is None else val
+    return out
+
+
+def dict_to_item(cls, data: dict):
+    """يبني ``BatchItemResult`` من قاموس متجاوزًا المفاتيح الغريبة."""
+    names = set(_dataclass_field_names(cls))
+    kwargs = {}
+    for key, val in (data or {}).items():
+        if names and key not in names:
+            continue
+        if key in ("barcode_candidates", "warnings"):
+            val = tuple(val or ())
+        elif key == "foreground_quality_metrics":
+            val = dict(val or {})
+        elif key in ("confidence", "processing_ms",
+                     "foreground_quality_score"):
+            try:
+                val = float(val or 0.0)
+            except (TypeError, ValueError):
+                val = 0.0
+        kwargs[key] = val
+    kwargs.setdefault("status", "review")
+    # 2.9.13 — الحقول الإلزامية تُعبّأ تلقائيًا لا يُترك غيابها
+    # يُسقط الاستئناف كلّه. وهذا ليس ترقيعًا نطريًا: ملفات
+    # جلسات قديمة محفوطة فعلًا على قرص المالك تحوي أقل من هذه
+    # الحقول، فإسقاط الاستئناف يعني فقد جلسة كاملة لأجل حقل فارغ.
+    for required, fallback in (("source_path", ""), ("source_name", "")):
+        if not kwargs.get(required):
+            other = (kwargs.get("source_name") if required == "source_path"
+                     else kwargs.get("source_path"))
+            kwargs[required] = other or fallback
+    try:
+        return cls(**kwargs)
+    except TypeError:
+        # دفاعي: نوع مختلف عن المتوقع — أرسل الحقول الأساسية فقط
+        basic = {k: kwargs.get(k, "") for k in (
+            "source_path", "source_name", "status", "item_code",
+            "product_name", "barcode", "explanation", "review_path")}
+        basic["status"] = basic.get("status") or "review"
+        return cls(**basic)
+
+
 # ============================================================== crop widget
 class CropSelectLabel(QLabel):
     """Image display with a draggable/resizable selection rectangle."""
@@ -805,18 +880,10 @@ def install_v2(main_window, data_root: Path) -> None:
             state["setup"] = setup
             result = getattr(main_window, "current_result", None)
             if result is not None:
-                items = []
-                for it in getattr(result, "items", []):
-                    items.append({
-                        "source_path": getattr(it, "source_path", ""),
-                        "source_name": getattr(it, "source_name", ""),
-                        "status": getattr(it, "status", ""),
-                        "item_code": getattr(it, "item_code", ""),
-                        "product_name": getattr(it, "product_name", ""),
-                        "barcode": getattr(it, "barcode", ""),
-                        "explanation": getattr(it, "explanation", ""),
-                        "review_path": getattr(it, "review_path", ""),
-                    })
+                # 2.9.13 (م-5): كل الحقول لا ثمانية منها — وأهمّها
+                # ``output_path``، فبدونه يُفقد ناتج العزل عند الاستئناف.
+                items = [item_to_dict(it)
+                         for it in getattr(result, "items", [])]
                 state["items"] = items
                 state["workspace"] = getattr(result, "workspace", "")
             table = getattr(main_window, "results_table", None)
@@ -867,8 +934,31 @@ def install_v2(main_window, data_root: Path) -> None:
                 barcode=d.get("barcode", ""),
                 item_code=d.get("item_code", ""),
                 item_name=d.get("product_name", ""),
-                output_path=d.get("review_path", ""),
+                # 2.9.13 — أمانة الجلسة الكاملة (بند م-5).
+                #
+                # كان الحفظ يكتب سبعة حقول من ثمانية عشر، والأخطر أنه يكتب
+                # ``review_path`` في خانة ``output_path`` ثم لا يستعيد
+                # ``output_path`` إطلاقًا. فناتج العزل يُفقد عند الاستئناف
+                # ويُعرض الأصل بخلفية مكان التصوير، فيظن المالك أن العزل ذهب
+                # وهو سليم على القرص. الآن يُحفظ كل حقل بمفتاحه الحقيقي،
+                # ويُحفظ القاموس الخام كاملًا في ``raw`` ضمانًا لأي حقل يُضاف
+                # لاحقًا فلا يُفقد بصمت.
+                output_path=d.get("output_path", ""),
+                review_path=d.get("review_path", ""),
                 error=d.get("explanation", ""),
+                confidence=d.get("confidence", 0.0),
+                match_source=d.get("match_source", ""),
+                barcode_candidates=list(d.get("barcode_candidates") or ()),
+                warnings=list(d.get("warnings") or ()),
+                processing_ms=d.get("processing_ms", 0.0),
+                foreground_method=d.get("foreground_method", ""),
+                foreground_quality_score=d.get(
+                    "foreground_quality_score", 0.0),
+                foreground_quality_status=d.get(
+                    "foreground_quality_status", ""),
+                foreground_quality_metrics=dict(
+                    d.get("foreground_quality_metrics") or {}),
+                raw=d,
             )
         store.save(force=True)
         return store.state.session_id
@@ -921,6 +1011,13 @@ def install_v2(main_window, data_root: Path) -> None:
                 items_data = []
                 for key, img in (state.images or {}).items():
                     _sp = str(_g(img, "source_path"))
+                    # 2.9.13 (م-5): القاموس الخام إن حُفِط هو المصدر الأدق
+                    _raw = _g(img, "raw", None)
+                    if isinstance(_raw, dict) and _raw.get("source_name"):
+                        items_data.append(dict(_raw))
+                        continue
+                    _out = str(_g(img, "output_path"))
+                    _rev = str(_g(img, "review_path"))
                     items_data.append({
                         "source_path": _sp,
                         "source_name": (key if "." in str(key)
@@ -931,7 +1028,25 @@ def install_v2(main_window, data_root: Path) -> None:
                         "product_name": str(_g(img, "item_name")),
                         "barcode": str(_g(img, "barcode")),
                         "explanation": str(_g(img, "error")),
-                        "review_path": str(_g(img, "output_path") or _sp),
+                        # الناتج والمراجعة حقلان مستقلان لا حقل واحد.
+                        # المعاينة تُفضّل الناتج المعزول، وتسقط إلى
+                        # المراجعة ثم الأصل عند غيابه فقط.
+                        "output_path": _out,
+                        "review_path": (_rev or _out or _sp),
+                        "confidence": _g(img, "confidence", 0.0) or 0.0,
+                        "match_source": str(_g(img, "match_source")),
+                        "barcode_candidates": tuple(
+                            _g(img, "barcode_candidates", ()) or ()),
+                        "warnings": tuple(_g(img, "warnings", ()) or ()),
+                        "processing_ms": _g(img, "processing_ms", 0.0) or 0.0,
+                        "foreground_method": str(
+                            _g(img, "foreground_method")),
+                        "foreground_quality_score": _g(
+                            img, "foreground_quality_score", 0.0) or 0.0,
+                        "foreground_quality_status": str(
+                            _g(img, "foreground_quality_status")),
+                        "foreground_quality_metrics": dict(
+                            _g(img, "foreground_quality_metrics", {}) or {}),
                     })
                 _pos = getattr(state, "position", {}) or {}
                 try:
@@ -956,19 +1071,11 @@ def install_v2(main_window, data_root: Path) -> None:
                 # جلسة إعداد فقط — استُعيد الإكسل والصور أعلاه، لا نتائج تُستعاد
                 return
             import native_app as _na
-            items = [
-                _na.BatchItemResult(
-                    source_path=d.get("source_path", ""),
-                    source_name=d.get("source_name", ""),
-                    status=d.get("status", "review"),
-                    item_code=d.get("item_code", ""),
-                    product_name=d.get("product_name", ""),
-                    barcode=d.get("barcode", ""),
-                    explanation=d.get("explanation", ""),
-                    review_path=d.get("review_path", ""),
-                )
-                for d in items_data
-            ]
+            # 2.9.13 (م-5): تُمرّر كل الحقول المتاحة لا ثمانية منها،
+            # وأهمها ``output_path``: بدونه يُعرض الأصل بخلفية مكان
+            # التصوير فيظن المالك أن العزل ذهب.
+            items = [dict_to_item(_na.BatchItemResult, d)
+                     for d in items_data]
             result = _na.BatchRunResult(
                 workspace=state.get("workspace", ""),
                 database_path="",

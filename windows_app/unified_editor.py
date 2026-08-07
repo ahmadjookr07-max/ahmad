@@ -113,7 +113,17 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         self.mode_label = QLabel("")
         self.mode_label.setStyleSheet(
             "color:#0a6e3a;font-weight:700;font-size:11px;")
+        # 2.9.13 (م-10) — مؤشر الأداة النشطة في الشريط المعروض فعلًا.
+        #
+        # هذا الصف لا ترفيه: `UnifiedEditorWidget` يستبدل `_build_ui`
+        # بالكامل، فما يُضاف إلى شريط حالة `photo_editor_v2` لا يُرى
+        # هنا إطلاقًا. والمالك يعمل في هذا المحرر لا في الحوار
+        # القديم، فوضع المؤشر هناك وحده كان سيكون إضافة لا يراها أحد.
+        self.active_tool_label = QLabel("")
+        self.active_tool_label.setObjectName("activeToolLabel")
+        self.active_tool_label.setAlignment(Qt.AlignCenter)
         info_row.addWidget(self.status_label, 1)
+        info_row.addWidget(self.active_tool_label)
         info_row.addWidget(self.mode_label)
         info_row.addWidget(self.zoom_label)
         root.addLayout(info_row)

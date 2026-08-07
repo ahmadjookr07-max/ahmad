@@ -394,6 +394,20 @@ class V2PhotoEditorDialog(QDialog):
         self._composited: np.ndarray | None = None    # الناتج النهائي BGR
         self._show_before = False
 
+        # 2.9.13 (م-8) — تحويل المشهد ← الأصل.
+        #
+        # المشهد يعرض `_composited`، والفرشاة تكتب في أقنعة
+        # بمقاس `_original`. والمعروض ليس دائمًا مطابقًا للأصل:
+        # هامش الظل يُزيحه يمينًا، والتدوير يوسّع الإطار
+        # ويُدير المحاور. فإن لم يُعكس التحويل، وقعت الضربة
+        # بعيدًا عن المؤشر (المقيس: 96 بكسل أفقيًا بالظل وحده
+        # على 1600 عرضًا، و241 بكسل على مقاس صور المالك 4032).
+        #
+        # لذا يُسجّل هنا مصفوفة 2×3 تحوّل إحداثيات المشهد إلى
+        # إحداثيات الأصل، تُحدَّث في كل `_recompose`، و`None` تعني
+        # التطابق التام (لا حساب ولا تكلفة في الحالة الشائعة).
+        self._scene_to_image: np.ndarray | None = None
+
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(120)
@@ -494,6 +508,17 @@ class V2PhotoEditorDialog(QDialog):
             rb.toggled.connect(self._mode_changed)
             mode_bar.addWidget(rb)
         mode_bar.addStretch(1)
+        # 2.9.13 (م-10) — مؤشر الأداة النشطة.
+        #
+        # بلاغ المالك: يضغط زر أداة ثم يرسم فلا يحدث شيء، أو يرسم
+        # وهو يظن أداة والفعل لأخرى. السبب أن حالة الأداة كانت تُرى
+        # في لون حافة الزر وحده — والأزرار في لوحة جانبية قد تكون
+        # مطوية أو خارج مجال النظر وعين المستخدم على الصورة لا عليها.
+        # المؤشر هنا في مسار البصر مباشرة فوق اللوحة.
+        self.active_tool_label = QLabel("")
+        self.active_tool_label.setObjectName("activeToolLabel")
+        self.active_tool_label.setAlignment(Qt.AlignCenter)
+        mode_bar.addWidget(self.active_tool_label)
         self.status_label = QLabel("افتح صورة للبدء")
         self.status_label.setStyleSheet("color:#555;")
         mode_bar.addWidget(self.status_label)
@@ -884,6 +909,47 @@ class V2PhotoEditorDialog(QDialog):
         return panel
 
     # ------------------------------------------------------------ helpers
+    #: م-10 — وصف كل أداة للمؤشر: (الاسم، اللون، ما يفعله الماوس)
+    #
+    # الألوان ليست تزيينًا: كل لون يطابق لون دائرة الفرشة على
+    # اللوحة (أحمر للتبييض، أخضر للاسترجاع) فيربط المستخدم
+    # المؤشر بما يراه تحت ماوسه بلا تعلّم.
+    TOOL_INFO = {
+        EditorCanvas.TOOL_PAN: (
+            "تحريك", "#475569", "السحب يُحرك الصورة — لا يعدّل شيئًا"),
+        EditorCanvas.TOOL_ERASE: (
+            "قلم تبييض", "#dc2626", "السحب يمسح إلى خلفية بيضاء"),
+        EditorCanvas.TOOL_RESTORE: (
+            "استرجاع", "#15803d", "السحب يُرجع البكسلات من الأصل"),
+        EditorCanvas.TOOL_REGION: (
+            "فرشة منطقة العزل", "#1d4ed8",
+            "السحب يحدد المنطقة التي يعمل فيها العزل"),
+        EditorCanvas.TOOL_REGION_RECT: (
+            "مستطيل منطقة العزل", "#1d4ed8",
+            "ارسم مستطيلًا لتحديد منطقة العزل"),
+        EditorCanvas.TOOL_DATE_BLUR: (
+            "طمس تاريخ", "#b45309",
+            "ارسم مستطيلًا فوق التاريخ لطمسه بلون المنتج"),
+    }
+
+    def _update_active_tool_label(self, tool: str = "") -> None:
+        """يُظهر الأداة النشطة وما يفعله الماوس الآن (م-10)."""
+        label = getattr(self, "active_tool_label", None)
+        if label is None:
+            return
+        tool = tool or getattr(self.canvas, "_tool", EditorCanvas.TOOL_PAN)
+        name, color, hint = self.TOOL_INFO.get(
+            tool, (str(tool), "#475569", ""))
+        label.setText(f"الأداة: {name}")
+        label.setStyleSheet(
+            f"color:#ffffff;background:{color};font-weight:800;"
+            "padding:2px 10px;border-radius:9px;")
+        label.setToolTip(hint)
+        # التلميح يُكتب في الحالة أيضًا لمن لا يُمرّر الماوس
+        status = getattr(self, "status_label", None)
+        if status is not None and hint:
+            status.setText(hint)
+
     def _pick_tool(self, tool: str, on: bool, source_btn) -> None:
         if not on:
             # لو أطفأ المستخدم الزر نرجع للتحريك
@@ -894,6 +960,7 @@ class V2PhotoEditorDialog(QDialog):
             if not any(b.isChecked() for b in _btns):
                 self.pan_btn.setChecked(True)
                 self.canvas.set_tool(EditorCanvas.TOOL_PAN)
+                self._update_active_tool_label(EditorCanvas.TOOL_PAN)
             return
         # أطفئ بقية أزرار الأدوات
         for b in (self.erase_btn, self.restore_btn, self.pan_btn,
@@ -904,6 +971,9 @@ class V2PhotoEditorDialog(QDialog):
                 b.setChecked(False)
                 b.blockSignals(False)
         self.canvas.set_tool(tool)
+        # م-10: المؤشر يتبع الأداة الفعلية لا الزر المضغوط،
+        # فلو رُدّ التعيين داخليًا بقي المؤشر صادقًا.
+        self._update_active_tool_label()
 
     def _mode_changed(self) -> None:
         smart = self.mode_smart_rb.isChecked()
@@ -954,6 +1024,10 @@ class V2PhotoEditorDialog(QDialog):
         self._shadow_opts = None
         self._history.clear()
         self._redo.clear()
+        # 2.9.13 (م-8): لا يُترك تحويل الصورة السابقة حيًا مع صورة
+        # جديدة، وإلا انزاحت أول ضربة قبل أول `_recompose`.
+        self._scene_to_image = None
+        self._rot_inverse = None
         self._zero_sliders(silent=True)
         self.rotate_slider.blockSignals(True)
         self.rotate_slider.setValue(0)
@@ -971,6 +1045,13 @@ class V2PhotoEditorDialog(QDialog):
         self.canvas._first_fit_done = False
         self._recompose(fit=True)
         self.status_label.setText(Path(path).name)
+        # 2.9.13 (م-10): المؤشر يُضبط مع كل صورة جديدة، فلا يبقى
+        # فارغًا حتى أول ضغطة أداة — وأول ما يحتاجه المستخدم أن
+        # يعلم أن الماوس الآن يُحرك ولا يعدّل.
+        try:
+            self._update_active_tool_label()
+        except Exception:
+            pass
 
     def _populate_shadow_presets(self) -> None:
         if self.shadow_combo.count():
@@ -1135,6 +1216,16 @@ class V2PhotoEditorDialog(QDialog):
         self._alpha_manual = None
         self._region_mask = None
         self._region_active = False
+        # 2.9.13 (م-8): الأصل صار هو اللوحة المأطرة والميل
+        # اندمج فيها، فأي تحويل قديم صار كاذبًا ويجب أن يُطرح.
+        self._scene_to_image = None
+        self._rot_inverse = None
+        try:
+            self.rotate_slider.blockSignals(True)
+            self.rotate_slider.setValue(0)
+            self.rotate_slider.blockSignals(False)
+        except Exception:
+            pass
         self.canvas._first_fit_done = False
         self.status_label.setText("تم التوسيط والتأطير 800×700 ✓")
         self._recompose(fit=True)
@@ -1302,6 +1393,31 @@ class V2PhotoEditorDialog(QDialog):
         self._recompose()
 
     # ------------------------------------------------------- manual tools
+    def _scene_points_to_image(self, points: list) -> list:
+        """يحوّل نقاط المشهد إلى إحداثيات الأصل (بند م-8).
+
+        الفرشاة تقرأ من `mapToScene` فتأتي النقاط بإحداثيات
+        **المعروض** لا الأصل. والمعروض يختلف عن الأصل متى
+        فُعّل الظل (هامش يمين ويسار) أو الميل (إطار موسّع
+        ومحاور مدارة). فبلا هذا التحويل تقع الضربة بعيدًا
+        عن المؤشر — المقيس: 96 بكسل أفقيًا بالظل وحده على
+        صورة عرضها 1600، و241 بكسل على مقاس صور المالك 4032.
+
+        وحين لا يوجد تحويل (الحالة الشائعة) تُردّ النقاط كما
+        هي بلا أي حساب، فلا تكلفة على الأداء.
+        """
+        xform = getattr(self, "_scene_to_image", None)
+        if xform is None or not points:
+            return list(points)
+        a, b, tx = float(xform[0][0]), float(xform[0][1]), float(xform[0][2])
+        c, d, ty = float(xform[1][0]), float(xform[1][1]), float(xform[1][2])
+        out = []
+        for x, y in points:
+            x = float(x)
+            y = float(y)
+            out.append((a * x + b * y + tx, c * x + d * y + ty))
+        return out
+
     def _on_stroke(self, points: list, size: int, tool: str) -> None:
         live = tool.endswith("_live")
         tool_base = tool.replace("_live", "")
@@ -1309,6 +1425,11 @@ class V2PhotoEditorDialog(QDialog):
             return
         import cv2
         h, w = self._original.shape[:2]
+        # 2.9.13 (م-8): أول ما يحدث — ردّ النقاط من فضاء المشهد
+        # إلى فضاء الأصل، قبل أي استخدام لها. كل الفروع أدناه
+        # تعتمد عليها كأنها إحداثيات الأصل، فالتحويل هنا يجعل
+        # هذا الافتراض صحيحًا فعلًا لا افتراضًا.
+        points = self._scene_points_to_image(points)
 
         if tool_base == EditorCanvas.TOOL_DATE_BLUR:
             (x0, y0), (x1, y1) = points
@@ -1439,6 +1560,10 @@ class V2PhotoEditorDialog(QDialog):
             self._alpha_manual = self._alpha_manual[y0:y1 + 1, x0:x1 + 1].copy()
         self._region_mask = None
         self._region_active = False
+        # 2.9.13 (م-8): مقاس الأصل تغير بالاقتصاص فأي تحويل
+        # محسوب على المقاس القديم لم يعد صحيحًا.
+        self._scene_to_image = None
+        self._rot_inverse = None
         self.canvas.set_overlay(None)
         self.canvas._first_fit_done = False
         self.status_label.setText("تم الاقتصاص للتحديد ✓")
@@ -1457,8 +1582,13 @@ class V2PhotoEditorDialog(QDialog):
         self._preview_timer.start()
 
     def _compose_rgba(self) -> np.ndarray:
-        """يبني BGRA: الأساس (ذكي أو الأصل) + تعديلات القلم + المنزلقات."""
+        """يبني BGRA: الأساس (ذكي أو الأصل) + تعديلات القلم + المنزلقات.
+
+        2.9.13 (م-8): يُسجّل أيضًا تحويل التدوير العكسي في
+        ``self._rot_inverse`` ليُدمجه ``_recompose`` مع إزاحة الظل.
+        """
         import cv2
+        self._rot_inverse: np.ndarray | None = None
         if self._base is not None:
             rgba = self._base.copy()
         else:
@@ -1521,6 +1651,9 @@ class V2PhotoEditorDialog(QDialog):
                                   borderMode=cv2.BORDER_CONSTANT,
                                   borderValue=(0, 0, 0, 0) if self._cutout_applied
                                   else (255, 255, 255, 255))
+            # 2.9.13 (م-8): معكوس تحويل التدوير — يردّ نقطة
+            # من الإطار المدوّر الموسّع إلى موضعها في الأصل.
+            self._rot_inverse = cv2.invertAffineTransform(M)
         return rgba
 
     def _rot_released(self) -> None:
@@ -1596,6 +1729,7 @@ class V2PhotoEditorDialog(QDialog):
         if self._original is None:
             return
         rgba = self._compose_rgba()
+        pad = 0
         # الظل
         if self._shadow_opts is not None and self._cutout_applied:
             from engine_v2.shadow_v2 import apply_shadow
@@ -1605,6 +1739,25 @@ class V2PhotoEditorDialog(QDialog):
                                         cv2.BORDER_CONSTANT,
                                         value=(0, 0, 0, 0))
             rgba = apply_shadow(padded, self._shadow_opts)
+        # 2.9.13 (م-8): بناء تحويل المشهد ← الأصل.
+        #
+        # الترتيب الأمامي: الأصل ← تدوير (M) ← إزاحة هامش
+        # الظل (+pad أفقيًا فقط، لأن الهامش يُضاف يمينًا ويسارًا
+        # وأسفل لا أعلى). فالعكس هو: طرح pad من x ثم معكوس
+        # التدوير. وإن لم يوجد أي منهما تبقى `None` فلا تكلفة.
+        rot_inv = getattr(self, "_rot_inverse", None)
+        if pad == 0 and rot_inv is None:
+            self._scene_to_image = None
+        else:
+            base_inv = rot_inv if rot_inv is not None else np.array(
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
+            xform = np.array(base_inv, dtype=np.float64, copy=True)
+            if pad:
+                # إزاحة الهامش تُطرح قبل معكوس التدوير، وأثرها
+                # على حدّ المصفوفة: t ← t − A·(pad, 0)
+                xform[0, 2] -= xform[0, 0] * pad
+                xform[1, 2] -= xform[1, 0] * pad
+            self._scene_to_image = xform
         self._composited = self._flatten_white(rgba)
         shown = self._original if self._show_before else self._composited
         self.canvas.set_image(shown, fit=fit)
@@ -1619,23 +1772,79 @@ class V2PhotoEditorDialog(QDialog):
         self.canvas.set_image(shown)
 
     # ------------------------------------------------------- history
+    # 2.9.13 (م-13) — تاريخ تراجع خفيف: لماذا وكيف
+    #
+    # العلة: كان `_snapshot` ينسخ أربع مصفوفات **كاملة** في كل
+    # لقطة. المقيس على مقاس صور المالك (4032×3024):
+    #     لقطة واحدة        = 104.7 ميجا
+    #     السقف 15 لقطة     = 1569.8 ميجا
+    #     + ثلاث تراجعات    = 1883.7 ميجا   (ورام المالك 6 جيجا)
+    # فويندوز يقتل البرنامج بلا رسالة **في منتصف العمل لا في
+    # بدايته**، لأن الذاكرة تتراكم بضربات الفرشاة حتى تصطدم
+    # بالسقف. وقائمة `_redo` كانت **بلا أي سقف إطلاقًا**.
+    #
+    # وملاحظة جوهرية: `_original` **لا يتغير بالطلاء** — الفرشاة
+    # تكتب في `_alpha_manual` وحدها. ولا يتغير `_base` إلا بالعزل.
+    # فنسخهما في كل لقطة هدر خالص.
+    #
+    # الحل: لقطة تحفظ **مرجعًا** للمصفوفات الثابتة لا نسخة،
+    # وتضغط القناعين المتغيرين بـ`zlib`. وأي مسار يغير مصفوفة
+    # ثابتة يستبدلها بكاملها (`self._original = out`) ولا يعدّلها
+    # في موضعها، فالمرجع المحفوظ يبقى سليمًا. ولمنع أي
+    # مفاجأة مستقبلية تُعلَّم المصفوفات المحفوظة للقراءة فقط.
+    _HISTORY_LIMIT = 15
+
+    @staticmethod
+    def _freeze(arr):
+        """يحفظ مرجعًا للقراءة فقط بدل نسخة كاملة."""
+        if arr is None:
+            return None
+        view = arr.view()
+        view.flags.writeable = False
+        return view
+
+    @staticmethod
+    def _pack_mask(mask):
+        """يضغط قناعًا أحادي القناة إلى بايتات قليلة."""
+        if mask is None:
+            return None
+        import zlib
+        return (mask.shape, mask.dtype.str,
+                zlib.compress(mask.tobytes(), 1))
+
+    @staticmethod
+    def _unpack_mask(packed):
+        if packed is None:
+            return None
+        import zlib
+        shape, dtype, blob = packed
+        return np.frombuffer(
+            zlib.decompress(blob), dtype=np.dtype(dtype)).reshape(shape).copy()
+
     def _snapshot(self) -> dict:
         return {
-            "original": None if self._original is None else self._original.copy(),
-            "base": None if self._base is None else self._base.copy(),
-            "alpha": None if self._alpha_manual is None else self._alpha_manual.copy(),
-            "region": None if self._region_mask is None else self._region_mask.copy(),
+            # المصفوفات الثابتة: مرجع لا نسخة
+            "original": self._freeze(self._original),
+            "base": self._freeze(self._base),
+            # الأقنعة المتغيرة بالفرشاة: مضغوطة
+            "alpha": self._pack_mask(self._alpha_manual),
+            "region": self._pack_mask(self._region_mask),
             "cutout": self._cutout_applied,
             "shadow": None if self._shadow_opts is None else self._shadow_opts.to_dict(),
         }
 
     def _restore(self, snap: dict) -> None:
         from engine_v2.shadow_v2 import ShadowOptions
-        self._original = snap["original"]
-        self._base = snap["base"]
-        self._alpha_manual = snap["alpha"]
-        self._region_mask = snap["region"]
-        self._region_active = snap["region"] is not None
+        orig = snap["original"]
+        base = snap["base"]
+        # نعيد الكتابة للمصفوفات المسترجعة لأن مسارات أخرى تكتب
+        # فيها في موضعها (مثل `rgba[:, :, 3] = ...`)؛ والنسخ هنا يحدث
+        # مرة واحدة عند التراجع لا مع كل ضربة فرشاة.
+        self._original = None if orig is None else np.array(orig, copy=True)
+        self._base = None if base is None else np.array(base, copy=True)
+        self._alpha_manual = self._unpack_mask(snap["alpha"])
+        self._region_mask = self._unpack_mask(snap["region"])
+        self._region_active = self._region_mask is not None
         self._cutout_applied = snap["cutout"]
         self._shadow_opts = None if snap["shadow"] is None \
             else ShadowOptions.from_dict(snap["shadow"])
@@ -1643,23 +1852,58 @@ class V2PhotoEditorDialog(QDialog):
 
     def _push_history(self) -> None:
         self._history.append(self._snapshot())
-        if len(self._history) > 15:
+        if len(self._history) > self._HISTORY_LIMIT:
             self._history.pop(0)
         self._redo.clear()
 
     def _undo(self) -> None:
         if not self._history:
+            self.status_label.setText("لا يوجد ما يُتراجع عنه")
             return
         self._redo.append(self._snapshot())
+        # 2.9.13 (م-13): سقف لـ`_redo` أيضًا — كان بلا سقف إطلاقًا
+        # فينمو بلا حد ويضاعف ذروة الذاكرة.
+        if len(self._redo) > self._HISTORY_LIMIT:
+            self._redo.pop(0)
         self._restore(self._history.pop())
         self.status_label.setText("تراجع ✓")
 
     def _redo_action(self) -> None:
         if not self._redo:
+            self.status_label.setText("لا يوجد ما يُعاد")
             return
         self._history.append(self._snapshot())
+        if len(self._history) > self._HISTORY_LIMIT:
+            self._history.pop(0)
         self._restore(self._redo.pop())
         self.status_label.setText("إعادة ✓")
+
+    def history_bytes(self) -> int:
+        """حجم التاريخ الفعلي بالبايت — للاختبار والقياس.
+
+        لا يحتسب المراجع المشتركة (`original`/`base`) لأنها لا
+        تستهلك ذاكرة إضافية — وهذا بالضبط جوهر الإصلاح.
+        """
+        total = 0
+        seen: set[int] = set()
+        for snap in list(self._history) + list(self._redo):
+            for key in ("alpha", "region"):
+                packed = snap.get(key)
+                if packed is not None:
+                    total += len(packed[2])
+            for key in ("original", "base"):
+                arr = snap.get(key)
+                if arr is None:
+                    continue
+                # `or` على مصفوفة numpy يرفع ValueError (قيمة
+                # الصدق ملتبسة)، فلا يُستخدم هنا. والمحفوز في
+                # اللقطة هو `view()` فقاعدته هي المخزن المشترك.
+                owner = arr.base if getattr(arr, "base", None) is not None \
+                    else arr
+                ident = id(owner)
+                if ident not in seen:
+                    seen.add(ident)
+        return total
 
     def _reset_all(self) -> None:
         if self._image_path:
@@ -1678,11 +1922,16 @@ def _wire_manual_buttons(dlg: V2PhotoEditorDialog) -> None:
 
 
 _orig_init = V2PhotoEditorDialog.__init__
-
-
 def _init_with_wiring(self, *a, **kw):
     _orig_init(self, *a, **kw)
     _wire_manual_buttons(self)
+    # 2.9.13 (م-10): المؤشر يُعرض من أول لحظة بحالة الأداة
+    # الافتراضية (تحريك)، فلا يبدأ فارغًا فيطن المستخدم أنه مُعطّل.
+    # يعمل لكلتا الواجهتين لأن `UnifiedEditorWidget` يورّث هذا المسار.
+    try:
+        self._update_active_tool_label()
+    except Exception:
+        pass
 
 
 V2PhotoEditorDialog.__init__ = _init_with_wiring
