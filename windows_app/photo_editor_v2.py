@@ -508,6 +508,17 @@ class V2PhotoEditorDialog(QDialog):
             rb.toggled.connect(self._mode_changed)
             mode_bar.addWidget(rb)
         mode_bar.addStretch(1)
+        # 2.9.13 (م-10) — مؤشر الأداة النشطة.
+        #
+        # بلاغ المالك: يضغط زر أداة ثم يرسم فلا يحدث شيء، أو يرسم
+        # وهو يظن أداة والفعل لأخرى. السبب أن حالة الأداة كانت تُرى
+        # في لون حافة الزر وحده — والأزرار في لوحة جانبية قد تكون
+        # مطوية أو خارج مجال النظر وعين المستخدم على الصورة لا عليها.
+        # المؤشر هنا في مسار البصر مباشرة فوق اللوحة.
+        self.active_tool_label = QLabel("")
+        self.active_tool_label.setObjectName("activeToolLabel")
+        self.active_tool_label.setAlignment(Qt.AlignCenter)
+        mode_bar.addWidget(self.active_tool_label)
         self.status_label = QLabel("افتح صورة للبدء")
         self.status_label.setStyleSheet("color:#555;")
         mode_bar.addWidget(self.status_label)
@@ -898,6 +909,47 @@ class V2PhotoEditorDialog(QDialog):
         return panel
 
     # ------------------------------------------------------------ helpers
+    #: م-10 — وصف كل أداة للمؤشر: (الاسم، اللون، ما يفعله الماوس)
+    #
+    # الألوان ليست تزيينًا: كل لون يطابق لون دائرة الفرشة على
+    # اللوحة (أحمر للتبييض، أخضر للاسترجاع) فيربط المستخدم
+    # المؤشر بما يراه تحت ماوسه بلا تعلّم.
+    TOOL_INFO = {
+        EditorCanvas.TOOL_PAN: (
+            "تحريك", "#475569", "السحب يُحرك الصورة — لا يعدّل شيئًا"),
+        EditorCanvas.TOOL_ERASE: (
+            "قلم تبييض", "#dc2626", "السحب يمسح إلى خلفية بيضاء"),
+        EditorCanvas.TOOL_RESTORE: (
+            "استرجاع", "#15803d", "السحب يُرجع البكسلات من الأصل"),
+        EditorCanvas.TOOL_REGION: (
+            "فرشة منطقة العزل", "#1d4ed8",
+            "السحب يحدد المنطقة التي يعمل فيها العزل"),
+        EditorCanvas.TOOL_REGION_RECT: (
+            "مستطيل منطقة العزل", "#1d4ed8",
+            "ارسم مستطيلًا لتحديد منطقة العزل"),
+        EditorCanvas.TOOL_DATE_BLUR: (
+            "طمس تاريخ", "#b45309",
+            "ارسم مستطيلًا فوق التاريخ لطمسه بلون المنتج"),
+    }
+
+    def _update_active_tool_label(self, tool: str = "") -> None:
+        """يُظهر الأداة النشطة وما يفعله الماوس الآن (م-10)."""
+        label = getattr(self, "active_tool_label", None)
+        if label is None:
+            return
+        tool = tool or getattr(self.canvas, "_tool", EditorCanvas.TOOL_PAN)
+        name, color, hint = self.TOOL_INFO.get(
+            tool, (str(tool), "#475569", ""))
+        label.setText(f"الأداة: {name}")
+        label.setStyleSheet(
+            f"color:#ffffff;background:{color};font-weight:800;"
+            "padding:2px 10px;border-radius:9px;")
+        label.setToolTip(hint)
+        # التلميح يُكتب في الحالة أيضًا لمن لا يُمرّر الماوس
+        status = getattr(self, "status_label", None)
+        if status is not None and hint:
+            status.setText(hint)
+
     def _pick_tool(self, tool: str, on: bool, source_btn) -> None:
         if not on:
             # لو أطفأ المستخدم الزر نرجع للتحريك
@@ -908,6 +960,7 @@ class V2PhotoEditorDialog(QDialog):
             if not any(b.isChecked() for b in _btns):
                 self.pan_btn.setChecked(True)
                 self.canvas.set_tool(EditorCanvas.TOOL_PAN)
+                self._update_active_tool_label(EditorCanvas.TOOL_PAN)
             return
         # أطفئ بقية أزرار الأدوات
         for b in (self.erase_btn, self.restore_btn, self.pan_btn,
@@ -918,6 +971,9 @@ class V2PhotoEditorDialog(QDialog):
                 b.setChecked(False)
                 b.blockSignals(False)
         self.canvas.set_tool(tool)
+        # م-10: المؤشر يتبع الأداة الفعلية لا الزر المضغوط،
+        # فلو رُدّ التعيين داخليًا بقي المؤشر صادقًا.
+        self._update_active_tool_label()
 
     def _mode_changed(self) -> None:
         smart = self.mode_smart_rb.isChecked()
@@ -989,6 +1045,13 @@ class V2PhotoEditorDialog(QDialog):
         self.canvas._first_fit_done = False
         self._recompose(fit=True)
         self.status_label.setText(Path(path).name)
+        # 2.9.13 (م-10): المؤشر يُضبط مع كل صورة جديدة، فلا يبقى
+        # فارغًا حتى أول ضغطة أداة — وأول ما يحتاجه المستخدم أن
+        # يعلم أن الماوس الآن يُحرك ولا يعدّل.
+        try:
+            self._update_active_tool_label()
+        except Exception:
+            pass
 
     def _populate_shadow_presets(self) -> None:
         if self.shadow_combo.count():
@@ -1859,11 +1922,16 @@ def _wire_manual_buttons(dlg: V2PhotoEditorDialog) -> None:
 
 
 _orig_init = V2PhotoEditorDialog.__init__
-
-
 def _init_with_wiring(self, *a, **kw):
     _orig_init(self, *a, **kw)
     _wire_manual_buttons(self)
+    # 2.9.13 (م-10): المؤشر يُعرض من أول لحظة بحالة الأداة
+    # الافتراضية (تحريك)، فلا يبدأ فارغًا فيطن المستخدم أنه مُعطّل.
+    # يعمل لكلتا الواجهتين لأن `UnifiedEditorWidget` يورّث هذا المسار.
+    try:
+        self._update_active_tool_label()
+    except Exception:
+        pass
 
 
 V2PhotoEditorDialog.__init__ = _init_with_wiring
