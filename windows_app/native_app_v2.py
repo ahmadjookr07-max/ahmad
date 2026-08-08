@@ -172,6 +172,13 @@ def _patch_ui(native_app) -> None:
             data_root = getattr(native_app, "DATA_ROOT", Path.home() / "Documents" / "SmartCatalogVision")
             v2_ui.install_v2(self, Path(data_root))
 
+            # v3.1 — رقعة الإصلاحات الثلاثة
+            try:
+                from v31_patch import install_v31_patch
+                install_v31_patch(self)
+            except Exception as _e31:
+                print(f"[V3.1] patch failed: {_e31}", file=sys.stderr)
+
             # 2.9.5 — زر «أداة إعادة التسمية» حُذف مع نافذته نهائيًا.
             # قرار المالك: «الغِ مكان التعديل القديم... كل شيء في واجهة
             # واحدة» — المجلدات المنجزة تُفتح الآن بزر «فتح مجلد منجز»
