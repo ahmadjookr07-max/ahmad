@@ -1733,12 +1733,32 @@ class V2PhotoEditorDialog(QDialog):
         # الظل
         if self._shadow_opts is not None and self._cutout_applied:
             from engine_v2.shadow_v2 import apply_shadow
-            pad = int(rgba.shape[1] * 0.06)
             import cv2
-            padded = cv2.copyMakeBorder(rgba, 0, pad, pad, pad,
+            # 2.9.13 (م-انهيار-الظل): تصغير للمعاينة فقط لتوفير الذاكرة
+            # الصورة الكاملة (4032x3024) تستهلك ~800 ميجا لكل معاينة
+            # فنصغّر إلى 800 بكسل للعرض ثم نُكبّر النتيجة
+            _MAX_PV = 800
+            h0, w0 = rgba.shape[:2]
+            _sc = min(1.0, _MAX_PV / max(h0, w0, 1))
+            if _sc < 0.99:
+                _rw = max(1, int(w0 * _sc))
+                _rh = max(1, int(h0 * _sc))
+                _rgba_pv = cv2.resize(rgba, (_rw, _rh), interpolation=cv2.INTER_AREA)
+            else:
+                _rgba_pv = rgba
+            pad = int(_rgba_pv.shape[1] * 0.06)
+            padded = cv2.copyMakeBorder(_rgba_pv, 0, pad, pad, pad,
                                         cv2.BORDER_CONSTANT,
                                         value=(0, 0, 0, 0))
-            rgba = apply_shadow(padded, self._shadow_opts)
+            _shadowed = apply_shadow(padded, self._shadow_opts)
+            if _sc < 0.99:
+                _out_w = int(w0 + pad * 2 / _sc)
+                _out_h = int(h0 + pad / _sc)
+                rgba = cv2.resize(_shadowed, (_out_w, _out_h),
+                                  interpolation=cv2.INTER_LINEAR)
+                pad = int(w0 * 0.06)  # تقدير pad بالمقاس الأصلي للتحويل
+            else:
+                rgba = _shadowed
         # 2.9.13 (م-8): بناء تحويل المشهد ← الأصل.
         #
         # الترتيب الأمامي: الأصل ← تدوير (M) ← إزاحة هامش
