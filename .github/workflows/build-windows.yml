@@ -1,0 +1,61 @@
+name: Build Windows v3.2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install PySide6==6.8.1 opencv-python-headless numpy onnxruntime openpyxl pillow cryptography arabic-reshaper python-bidi pyinstaller zxing-cpp
+      - name: Download models
+        run: |
+          mkdir -p src/engine_v2/models
+          mkdir -p resources/models
+          curl -L -o src/engine_v2/models/isnet-general-use.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
+          curl -L -o resources/models/u2netp.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "MarketImageStudio-v3.2.0" `
+            --paths "src" `
+            --paths "windows_app" `
+            --add-data "src;src" `
+            --add-data "windows_app;windows_app" `
+            --add-data "resources;resources" `
+            --add-data "VERSION;." `
+            --hidden-import "engine_v2" `
+            --hidden-import "engine_v2.integration_v2" `
+            --hidden-import "engine_v2.segmentation_v2" `
+            --hidden-import "engine_v2.processor_v2" `
+            --hidden-import "engine_v2.naming_v2" `
+            --hidden-import "engine_v2.session_v2" `
+            --hidden-import "engine_v2.quality_v2" `
+            --hidden-import "engine_v2.product_finish_v2" `
+            --hidden-import "engine_v2.shape_aware_v2" `
+            --hidden-import "engine_v2.straighten_v2" `
+            --hidden-import "engine_v2.translucent_v2" `
+            --hidden-import "engine_v2.shadow_v2" `
+            --hidden-import "engine_v2.nutrition_v2" `
+            --hidden-import "v31_patch" `
+            --hidden-import "awareness" `
+            --hidden-import "zxingcpp" `
+            --collect-all "engine_v2" `
+            --collect-all "awareness" `
+            --collect-all "zxingcpp" `
+            windows_app/native_app_v2.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MarketImageStudio-v3.2.0
+          path: dist/MarketImageStudio-v3.2.0.exe
+          retention-days: 30
