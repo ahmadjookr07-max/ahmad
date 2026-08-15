@@ -1,4 +1,4 @@
-name: Build Windows v3.2
+name: Build Windows Standalone v3.2
 
 on:
   push:
@@ -23,10 +23,10 @@ jobs:
           mkdir -p resources/models
           curl -L -o src/engine_v2/models/isnet-general-use.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
           curl -L -o resources/models/u2netp.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
-      - name: Build with PyInstaller
+      - name: Build standalone application
         run: |
           pyinstaller --noconfirm --onefile --windowed `
-            --name "MarketImageStudio-v3.2.0" `
+            --name "MarketImageStudio-v3.2.0-Standalone" `
             --paths "src" `
             --paths "windows_app" `
             --add-data "src;src" `
@@ -53,9 +53,9 @@ jobs:
             --collect-all "awareness" `
             --collect-all "zxingcpp" `
             windows_app/native_app_v2.py
-      - name: Upload artifact
+      - name: Upload standalone artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MarketImageStudio-v3.2.0
-          path: dist/MarketImageStudio-v3.2.0.exe
+          name: MarketImageStudio-v3.2.0-Standalone
+          path: dist/MarketImageStudio-v3.2.0-Standalone.exe
           retention-days: 30

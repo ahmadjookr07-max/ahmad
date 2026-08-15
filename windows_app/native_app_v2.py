@@ -276,12 +276,7 @@ def _patch_ui(native_app) -> None:
             root_layout = self.centralWidget().layout()
             root_layout.insertWidget(1, toolbar)
 
-            # شارة الاشتراك + زر لوحة المالك (تُدرج في صف الأدوات الجديد)
-            try:
-                import license_ui
-                license_ui.install_license_badge(self)
-            except Exception as exc:
-                print(f"[V2] license badge failed: {exc}", file=sys.stderr)
+            # الإصدار المستقل: لا اشتراك ولا شارة ترخيص أو لوحة مالك.
 
             self.v2_nutrition_dialog_cls = v2_ui.NutritionDialog
             _attach_nutrition_button(self, native_app, v2_ui)
@@ -442,8 +437,8 @@ def _show_app_help(window) -> None:
             "<h2>التطبيق يتعلم منك</h2>"
             "<p>كل تعديل تقوم به (حجم الفرشاة، قوة التحسين، مواضع جدول التغذية، تصحيحات القص) يُحفظ كتفضيل محلي ويُقترح تلقائيًا للصور المشابهة — كلما استخدمت البرنامج أصبح أذكى وأسرع لعملك.</p>"
             "<p><b>خصوصية كاملة:</b> التعلم محلي 100% داخل جهازك — لا يُرسل أي شيء للخارج.</p>"
-            "<h2>الاشتراك والتجربة</h2>"
-            "<p>عند أول تشغيل تحصل على تجربة مجانية كاملة الميزات لمدة 3 أيام — الشارة أعلى الشاشة تعرض المدة المتبقية بدقة. للتفعيل الدائم أو الاشتراك تواصل مع المالك للحصول على مفتاح التفعيل.</p>"
+            "<h2>الإصدار المستقل</h2>"
+            "<p>هذا الإصدار يعمل بكامل الميزات مباشرةً، بلا اشتراك أو مفتاح تفعيل.</p>"
         )
         text.setWordWrap(True)
         text.setTextFormat(Qt.RichText)
@@ -581,21 +576,14 @@ def _current_item_number(window) -> str:
 
 
 def _gate_startup(native_app) -> None:
-    """بوابة الترخيص الإلزامية قبل إظهار النافذة الرئيسية.
-
-    تُطبّق داخل MainWindow.__init__ — إن لم تتحقق الموافقة على الاتفاقية
-    والترخيص الصالح، يُغلق التطبيق فورًا (لا طريق لتجاوزها).
-    """
+    """الإصدار المستقل: يبدأ التطبيق مباشرة بلا فحص اشتراك أو تفعيل."""
     original_init = native_app.MainWindow.__init__
 
-    def gated_init(self, *args, **kwargs):
-        import license_ui
-        if not license_ui.ensure_activated(None):
-            raise SystemExit(0)
+    def standalone_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        _close_splash(self)   # أغلق شاشة البدء فور جاهزية النافذة
+        _close_splash()  # أغلق شاشة البدء فور جاهزية النافذة
 
-    native_app.MainWindow.__init__ = gated_init
+    native_app.MainWindow.__init__ = standalone_init
 
 
 def main() -> int:
@@ -607,7 +595,7 @@ def main() -> int:
     # ولا نطمسه بسلسلة فارغة.
     if APP_VERSION_V2:
         native_app.APP_VERSION = APP_VERSION_V2
-    _gate_startup(native_app)   # أولاً: بوابة الترخيص (تلتف حول __init__ الأصلي)
+    _gate_startup(native_app)   # أولاً: تشغيل مستقل بلا بوابة ترخيص
     _patch_ui(native_app)       # ثانيًا: إضافات الواجهة (تلتف حول gated_init)
     try:
         return native_app.main()

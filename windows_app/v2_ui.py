@@ -1761,14 +1761,8 @@ class BatchRefineDialog(QDialog):
         from engine_v2.batch_refine_v2 import RefineOptions
         shadow_map = {0: "", 1: "soft_ground", 2: "strong_ground",
                       3: "cast_right", 4: "cast_left", 5: "studio_3d"}
-        # إعدادات المالك إن وُجدت (workers)
+        # الإصدار المستقل: عدد ثابت وآمن من العاملين بلا إعدادات مالك أو اشتراك.
         workers = 2
-        try:
-            import license_ui
-            workers = int(license_ui.load_owner_settings()
-                          .get("batch_workers", 2))
-        except Exception:
-            pass
         fmt_map = {0: "webp", 1: "jpg", 2: "png"}
         opts = RefineOptions(
             recut=self.chk_recut.isChecked(),
