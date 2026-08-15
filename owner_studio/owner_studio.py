@@ -126,8 +126,14 @@ CUSTOMERS_FILE = DATA / "customers.json"
 
 # ------------------------------------------------- license engine imports
 # يعمل من داخل المشروع (بجانب src) أو نسخة مجمّعة تحمل license_v2 داخلها
+# في PyInstaller onefile تُفك ملفات الموارد في ``sys._MEIPASS``،
+# لا بجانب ملف EXE. كان غياب هذا المسار يجعل `license_v2` غير مرئية
+# في برنامج المالك المجمع رغم تضمينها في البناء.
+_resource_root = Path(getattr(sys, "_MEIPASS", "") or BASE)
 _src_candidates = [
-    BASE.parent / "src",                      # app_v2/owner_studio -> app_v2/src
+    _resource_root,                            # EXE onefile: engine_v2 المضمّن
+    _resource_root / "src",                    # نسخة onedir/اختبار
+    BASE.parent / "src",                       # app_v2/owner_studio -> app_v2/src
     BASE / "src",
     BASE.parent.parent / "app_v2" / "src",
 ]
@@ -142,7 +148,7 @@ except Exception:  # pragma: no cover
     lv = None
 
 APP_TITLE = "استوديو المالك — Market Image Studio"
-VERSION = "1.1.0"
+VERSION = "3.1.0"
 
 # ------------------------------------------------------------------ ألوان
 C_BG = "#101418"          # خلفية داكنة أنيقة
