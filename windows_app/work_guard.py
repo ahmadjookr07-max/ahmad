@@ -46,8 +46,10 @@ CRITICAL_METHODS = (
     "_on_manual_links_done",
     "_set_primary_image",
     "_save_nutrition_result",
-    "_on_individual_edit_done",
+    # الاسم الفعلي في native_app.py — كان الاسم القديم لا يُستدعى مطلقًا
+    "_on_individual_edit_completed",
     "_commit_unified_edit",
+    "_delete_selected_outputs",
     "_apply_rename_all",
     "_on_batch_done",
 )

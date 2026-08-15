@@ -96,19 +96,22 @@ def _patch_session_reset(window: Any) -> None:
             setattr(window, fn_name, make_patched(fn))
             break
 
-    # لفّ v2_restore_session لمنع الدمج عند استئناف جلسة مختلفة
-    from windows_app import v2_ui as _v2ui
-    orig_restore = getattr(_v2ui, "v2_restore_session", None)
+    # لفّ الدالة *المربوطة بالنافذة*؛ ترقيع الوحدة وحدها لا يكفي لأن
+    # install_v2 ينسخ الدالة إلى main_window قبل وصول هذه الرقعة.
+    orig_restore = getattr(window, "v2_restore_session", None)
     if callable(orig_restore) and not getattr(orig_restore, "_v31_patched", False):
-        def patched_restore(win, session_id: str, *args, **kwargs):
-            # أعد تهيئة النتائج قبل استئناف الجلسة
+        def patched_restore(session_id: str, *args, **kwargs):
+            # أعد تهيئة جميع المراجع المرئية قبل استئناف جلسة مختلفة.
             try:
-                win.current_result = None
+                window.current_result = None
+                window._result_items_by_name = {}
+                window._manual_reference_source_name = ""
+                window._editor_drafts = {}
             except Exception:
                 pass
-            return orig_restore(win, session_id, *args, **kwargs)
+            return orig_restore(session_id, *args, **kwargs)
         patched_restore._v31_patched = True
-        _v2ui.v2_restore_session = patched_restore
+        window.v2_restore_session = patched_restore
 
 
 def _patch_barcode_multiangle(window: Any) -> None:

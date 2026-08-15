@@ -224,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.2.0"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -5092,9 +5092,15 @@ class MainWindow(QMainWindow):
         # معالجة دائمًا لصفٍّ له مخرَج قائم، فيجب أن يُكتب فوق
         # الملف نفسه. بدون ذلك يُكتب الناتج في اسم جديد ويبقى
         # الصف مشيرًا للقديم، فيرى المالك أن الطمس لم يُحفظ.
-        _previous_output = str(getattr(item, "output_path", "") or "")
-        if _previous_output and not Path(_previous_output).is_file():
-            _previous_output = ""
+        # م-تعديل-الصنف: المسارات الناتجة تُحفظ غالبًا نسبية لمساحة العمل.
+        # فحص Path النسبي مباشرةً كان ينظر إلى مجلد تشغيل التطبيق، فيحكم
+        # خطأً بأن الناتج غير موجود ثم يولّد نسخة جديدة (-2/-3) عند التعديل.
+        # نحوله إلى مسار مطلق عبر _result_path قبل تمريره لمحرك إعادة المعالجة.
+        _previous_raw = str(getattr(item, "output_path", "") or "")
+        _previous_path = self._result_path(_previous_raw) if _previous_raw else None
+        _previous_output = (str(_previous_path)
+                            if _previous_path is not None and _previous_path.is_file()
+                            else "")
         self._pending_individual_previous_output = _previous_output
 
         if edited_source_path is not None:
@@ -7860,8 +7866,27 @@ class MainWindow(QMainWindow):
             return
         position = self._capture_results_position()
         deleted = 0
+        deleted_sources: set[str] = set()
+
+        # لا تحذف ملفًا يشير إليه صف آخر غير محدد. قد يحدث هذا بعد
+        # تعديل/دمج تغذية أو استئناف جلسة قديمة حيث يتشارك صفان صورة واحدة.
+        selected_ids = {id(it) for it in selected_items}
+        retained_paths: set[str] = set()
+        for other in self.current_result.items:
+            if id(other) in selected_ids:
+                continue
+            for attr in ("output_path", "review_path"):
+                raw = str(getattr(other, attr, "") or "")
+                p = self._result_path(raw) if raw else None
+                if p is not None:
+                    try:
+                        retained_paths.add(str(p.resolve()).casefold())
+                    except OSError:
+                        retained_paths.add(str(p).casefold())
+
         for it in selected_items:
             # حذف الملف الناتج من القرص (إن وجد) — ليس المصدر أبدًا.
+            # وإن كان هناك صف محتفَظ به يشير للملف، يُزال الصف المحدد فقط.
             for attr in ("output_path", "review_path"):
                 raw = getattr(it, attr, "") or ""
                 if not raw:
@@ -7869,16 +7894,50 @@ class MainWindow(QMainWindow):
                 p = self._result_path(raw)
                 if p is not None and p.is_file():
                     try:
+                        path_key = str(p.resolve()).casefold()
+                    except OSError:
+                        path_key = str(p).casefold()
+                    if path_key in retained_paths:
+                        continue
+                    try:
                         p.unlink()
                     except OSError:
                         pass
             try:
                 self.current_result.items.remove(it)
                 deleted += 1
+                deleted_sources.add(str(getattr(it, "source_name", "") or ""))
             except ValueError:
                 pass
         if not deleted:
             return
+
+        # م-حذف-الصنف: لا تترك محررًا/مسودة/مرجعًا يشير إلى صف حُذف.
+        # بقاء هذه الحالة كان يجعل تعديل الصف التالي يعتمد صورة الصف المحذوف
+        # أو يعيد مسودة قديمة إذا ظهر الاسم نفسه في جلسة جديدة.
+        drafts = getattr(self, "_editor_drafts", None)
+        if isinstance(drafts, dict):
+            for source_name in deleted_sources:
+                draft = drafts.pop(source_name, None)
+                try:
+                    if draft is not None and Path(draft).is_file():
+                        Path(draft).unlink()
+                except OSError:
+                    pass
+        if getattr(self, "_manual_reference_source_name", "") in deleted_sources:
+            self._manual_reference_source_name = ""
+        if getattr(self, "_editor_loaded_source_name", "") in deleted_sources:
+            try:
+                if self._editor_ready():
+                    self.unified_editor.clear()
+            except Exception:
+                pass
+            self._editor_loaded_source_name = ""
+            self._individual_editor_dirty = False
+        if getattr(self, "_individual_edit_source_name", "") in deleted_sources:
+            self._individual_edit_source_name = ""
+            self._individual_preview_path = None
+            self._individual_preview_active = False
         self._populate_results(restore_position=position)
         self._refresh_delivery_zip()
         self.status_label.setText(f"حُذفت {deleted} صورة من النتائج")
