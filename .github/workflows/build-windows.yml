@@ -1,4 +1,4 @@
-name: Build Windows Standalone v3.2
+name: Build Windows Standalone v3.2.1
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
       - name: Build standalone application
         run: |
           pyinstaller --noconfirm --onefile --windowed `
-            --name "MarketImageStudio-v3.2.0-Standalone" `
+            --name "MarketImageStudio-v3.2.1-Standalone" `
             --paths "src" `
             --paths "windows_app" `
             --add-data "src;src" `
@@ -47,6 +47,8 @@ jobs:
             --hidden-import "engine_v2.shadow_v2" `
             --hidden-import "engine_v2.nutrition_v2" `
             --hidden-import "v31_patch" `
+            --hidden-import "barcode_linear_v32" `
+            --hidden-import "batch_input_v32" `
             --hidden-import "awareness" `
             --hidden-import "zxingcpp" `
             --collect-all "engine_v2" `
@@ -56,6 +58,6 @@ jobs:
       - name: Upload standalone artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MarketImageStudio-v3.2.0-Standalone
-          path: dist/MarketImageStudio-v3.2.0-Standalone.exe
+          name: MarketImageStudio-v3.2.1-Standalone
+          path: dist/MarketImageStudio-v3.2.1-Standalone.exe
           retention-days: 30

@@ -27,12 +27,20 @@ def install_v31_patch(window: Any) -> dict:
     except Exception as e:
         report["session_reset_err"] = str(e)
 
-    # ── 3. تحسين الباركود: تدوير متعدد ──
+    # ── 3. تحسين الباركود الخطي: مقاييس/مناطق/زوايا متعددة، بلا QR ──
     try:
         _patch_barcode_multiangle(window)
-        report["barcode_multiangle"] = True
+        report["barcode_linear_v32"] = True
     except Exception as e:
-        report["barcode_multiangle_err"] = str(e)
+        report["barcode_linear_v32_err"] = str(e)
+
+    # ── 4. إدخال دفعات الصور بتحديث واحد للقائمة ──
+    try:
+        from batch_input_v32 import install_batch_input_patch
+        install_batch_input_patch(window)
+        report["batch_input_v32"] = True
+    except Exception as e:
+        report["batch_input_v32_err"] = str(e)
 
     return report
 
@@ -115,79 +123,29 @@ def _patch_session_reset(window: Any) -> None:
 
 
 def _patch_barcode_multiangle(window: Any) -> None:
-    """يُحسّن قراءة الباركود بتدوير الصورة بزوايا متعددة."""
-    import sys
-    from pathlib import Path
-    src = Path(__file__).resolve().parent.parent / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
-
-    try:
-        import zxingcpp
-    except ImportError:
-        return
-
-    import cv2
-    import numpy as np
+    """يربط القارئ الخطي المتطور بالمحرك؛ QR والرموز الثنائية مرفوضة."""
+    from barcode_linear_v32 import read_linear_barcodes
 
     def read_barcode_multiangle(img_path: str) -> str | None:
-        """يقرأ الباركود بتدوير الصورة بزوايا متعددة للحصول على أفضل نتيجة."""
-        try:
-            data = np.fromfile(img_path, dtype=np.uint8)
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            if img is None:
-                return None
-        except Exception:
-            return None
+        values = read_linear_barcodes(img_path)
+        return values[0] if values else None
 
-        # تصغير للسرعة إذا كانت كبيرة
-        h, w = img.shape[:2]
-        if max(h, w) > 1500:
-            scale = 1500 / max(h, w)
-            img = cv2.resize(img, (int(w * scale), int(h * scale)))
-            h, w = img.shape[:2]
-
-        angles = [0, 90, 180, 270, 45, -45, 15, -15, 30, -30]
-        for angle in angles:
-            if angle == 0:
-                rotated = img
-            else:
-                M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-                rotated = cv2.warpAffine(img, M, (w, h),
-                                         borderMode=cv2.BORDER_REPLICATE)
-            try:
-                results = zxingcpp.read_barcodes(rotated)
-                for r in results:
-                    text = getattr(r, "text", "") or ""
-                    fmt = str(getattr(r, "format", "")).lower()
-                    # رفض QR و2D
-                    if any(x in fmt for x in ("qr", "data", "aztec",
-                                               "pdf", "maxi")):
-                        continue
-                    if text and len(text) >= 6:
-                        return text
-            except Exception:
-                continue
-        return None
-
-    # تسجيل الدالة للاستخدام من المحرك
     try:
         from smart_catalog_vision import pipeline as _pipeline
-        if not getattr(_pipeline, "_v31_barcode_patched", False):
-            _orig_decode = getattr(_pipeline, "_decode_barcodes", None)
-            if callable(_orig_decode):
-                def _patched_decode(path: str, *args, **kwargs):
-                    result = _orig_decode(path, *args, **kwargs)
+        if not getattr(_pipeline, "_v32_barcode_patched", False):
+            original_decode = getattr(_pipeline, "_decode_barcodes", None)
+            if callable(original_decode):
+                def patched_decode(path: str, *args, **kwargs):
+                    # القارئ الأصلي لا يعيد إلا الباركود الخطي. إن نجح فلا
+                    # ندفع ثمن المسح الموسع؛ وإلا ننتقل إلى خطة V3.2.
+                    result = original_decode(path, *args, **kwargs)
                     if result:
                         return result
-                    # محاولة بالتدوير المتعدد
-                    text = read_barcode_multiangle(path)
-                    return [text] if text else []
-                _patched_decode._v31_barcode_patched = True
-                _pipeline._decode_barcodes = _patched_decode
-                _pipeline._v31_barcode_patched = True
+                    return read_linear_barcodes(path)
+                patched_decode._v32_barcode_patched = True
+                _pipeline._decode_barcodes = patched_decode
+                _pipeline._v32_barcode_patched = True
     except Exception:
         pass
 
-    # تسجيل على الواجهة للاستخدام المباشر
     window._read_barcode_multiangle = read_barcode_multiangle
