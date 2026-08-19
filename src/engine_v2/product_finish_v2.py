@@ -238,8 +238,11 @@ def smart_crop_box(alpha: np.ndarray, pad_ratio: float = 0.02
 
 # ═════════════════ الظل التلقائي المعايَر ═════════════════
 
-def auto_shadow_opts(alpha: np.ndarray):
+def auto_shadow_opts(alpha: np.ndarray, *, subtle: bool = False):
     """يعاير الظل حسب قاعدة المنتج وشكله — لا قيم ثابتة.
+
+    عند ``subtle=True`` يستعمل خط المعالجة ظلًا خفيفًا افتراضيًا بعد
+    العزل، كي تبقى الصورة نظيفة ولا تضطر إلى إضافة الظل يدويًا من المحرر.
 
     المنتج المفلطح (كيس على الطاولة) قاعدته عريضة فظلّه أوسع
     وأخفت؛ والمنتج الطويل النحيل (قنينة) ظلّه أضيق وأكثف. وهذا
@@ -268,6 +271,11 @@ def auto_shadow_opts(alpha: np.ndarray):
     height_ratio = float(np.clip(0.07 + 0.05 * flat, 0.06, 0.14))
     width_ratio = float(np.clip(0.92 + 0.16 * base_ratio, 0.92, 1.08))
     blur = int(np.clip(round(17 + 10 * flat), 15, 33))
+    if subtle:
+        # ظل المعالجة الافتراضي: مرئي بشكل بسيط تحت القاعدة، بلا سواد زائد.
+        opacity = float(np.clip(opacity * 0.48, 0.11, 0.22))
+        height_ratio = float(np.clip(height_ratio * 0.78, 0.045, 0.10))
+        blur = max(13, int(round(blur * 0.9)))
 
     return ShadowOptions(
         kind="contact",

@@ -58,6 +58,7 @@ jobs:
             --hidden-import "barcode_linear_v32" `
             --hidden-import "batch_input_v32" `
             --hidden-import "front_back_patch" `
+            --hidden-import "pipeline_patch" `
             --hidden-import "per_image_unit_patch" `
             --hidden-import "nutrition_patch" `
             --hidden-import "awareness" `

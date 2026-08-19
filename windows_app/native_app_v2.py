@@ -193,6 +193,13 @@ def _patch_ui(native_app) -> None:
             except Exception as _nutrition_exc:
                 print(f"[nutrition] patch failed: {_nutrition_exc}", file=sys.stderr)
 
+            # بعد العزل: ظل تلامس خفيف تلقائيًا، مع مفتاح لإيقافه للدفعة.
+            try:
+                from pipeline_patch import install_pipeline_patch
+                self._pipeline_patch_report = install_pipeline_patch(self)
+            except Exception as _pipeline_exc:
+                print(f"[pipeline] patch failed: {_pipeline_exc}", file=sys.stderr)
+
             # ربط الوجه الأمامي والخلفي باسم الصنف والوزن بعد نجاح باركود الخلف.
             try:
                 from front_back_patch import install_front_back_linking

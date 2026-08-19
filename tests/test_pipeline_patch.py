@@ -18,7 +18,7 @@ except Exception:
     pass
 
 from windows_app.pipeline_patch import (
-    apply_shadow_to_finished, apply_completion_to_finished,
+    apply_finish_to_image, apply_shadow_to_finished, apply_completion_to_finished,
     batch_process_finished, install_pipeline_patch,
 )
 
@@ -42,15 +42,27 @@ def test_shadow_to_finished():
     check(out.shape[:2] == img.shape[:2] or out.shape[0] >= img.shape[0],
           "الأبعاد معقولة")
 
+
+def test_auto_shadow_after_isolation():
+    print("\n[2] ظل خفيف تلقائي بعد العزل")
+    img = np.full((280, 240, 3), 255, np.uint8)
+    img[50:230, 55:185] = 120
+    alpha = np.zeros((280, 240), np.uint8)
+    alpha[50:230, 55:185] = 255
+    out, out_alpha = apply_finish_to_image(img, alpha, auto_shadow=True, straighten=False)
+    background = out[out_alpha < 20]
+    check(background.size > 0 and int(background.min()) < 245,
+          "الخلفية تحتوي ظلًا خفيفًا تلقائيًا")
+
 def test_completion_to_finished():
-    print("\n[2] إكمال المنتجات الناقصة")
+    print("\n[3] إكمال المنتجات الناقصة")
     img = _make_white_product()
     out = apply_completion_to_finished(img)
     check(isinstance(out, np.ndarray), "الناتج مصفوفة")
     check(out.shape == img.shape, "الأبعاد محفوظة")
 
 def test_batch_empty_folder():
-    print("\n[3] معالجة دفعية لمجلد فارغ")
+    print("\n[4] معالجة دفعية لمجلد فارغ")
     with tempfile.TemporaryDirectory() as d:
         res = batch_process_finished(d, add_shadow=True, complete=False)
         check(res["processed"] == 0, "لا معالجة في مجلد فارغ")
@@ -58,7 +70,7 @@ def test_batch_empty_folder():
         check(not res["errors"], "لا أخطاء")
 
 def test_batch_with_images():
-    print("\n[4] معالجة دفعية لصور WebP")
+    print("\n[5] معالجة دفعية لصور WebP")
     import cv2
     with tempfile.TemporaryDirectory() as d:
         for i in range(3):
@@ -75,18 +87,32 @@ def test_batch_with_images():
         check(len(progress) >= 3, "استدعاء التقدم")
 
 def test_install_pipeline_patch():
-    print("\n[5] تركيب pipeline_patch على نافذة وهمية")
+    print("\n[6] تركيب pipeline_patch على نافذة وهمية")
     class FakeWin:
         pass
-    rep = install_pipeline_patch(FakeWin())
+    window = FakeWin()
+    rep = install_pipeline_patch(window)
     check(isinstance(rep, dict), "يعيد قاموس تقرير")
     check("all_patches" in rep, "يحتوي all_patches")
+    check(rep.get("auto_shadow_option_installed") is True,
+          "مفتاح الظل التلقائي رُكّب")
+    cb = getattr(window, "_auto_shadow_after_isolation_cb", None)
+    check(cb is not None and cb.isChecked(), "مفتاح الظل مفعّل افتراضيًا")
+    if cb is not None:
+        import windows_app.pipeline_patch as patch
+        cb.setChecked(False)
+        check(patch._AUTO_SHADOW_AFTER_ISOLATION is False,
+              "المفتاح يوقف الظل للدفعة")
+        cb.setChecked(True)
+        check(patch._AUTO_SHADOW_AFTER_ISOLATION is True,
+              "المفتاح يعيد تفعيل الظل للدفعة")
 
 def main():
     print("=" * 60)
     print("اختبار pipeline_patch")
     print("=" * 60)
     test_shadow_to_finished()
+    test_auto_shadow_after_isolation()
     test_completion_to_finished()
     test_batch_empty_folder()
     test_batch_with_images()

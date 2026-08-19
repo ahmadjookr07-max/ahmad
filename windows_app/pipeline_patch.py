@@ -24,6 +24,9 @@ __all__ = ["install_pipeline_patch", "apply_finish_to_image",
            "apply_shadow_to_finished", "apply_completion_to_finished",
            "batch_process_finished"]
 
+# خيار دفعات مشترك، ويكون الظل الخفيف مفعّلًا ابتداءً كما طلب المالك.
+_AUTO_SHADOW_AFTER_ISOLATION = True
+
 
 def _import_finish():
     from engine_v2.product_finish_v2 import finish_product, auto_shadow_opts
@@ -67,8 +70,18 @@ def apply_finish_to_image(
             pass
 
     try:
-        shadow_opts = auto_shadow_opts(alpha) if (auto_shadow and alpha is not None) else None
-        img_bgr, alpha = finish_product(img_bgr, alpha, shadow_opts=shadow_opts)
+        # finish_product يجهز القناع والاقتصاص؛ تركيب الظل يتم بعده على
+        # خلفية بيضاء، كي يكون الظل خفيفًا وواقعًا تحت المنتج لا داخله.
+        img_bgr, alpha, _ = finish_product(img_bgr, alpha)
+        if auto_shadow and alpha is not None:
+            from engine_v2.shadow_v2 import apply_shadow_on_white
+            import cv2
+            import numpy as np
+            shadow_opts = auto_shadow_opts(alpha, subtle=True)
+            if shadow_opts.kind != "none":
+                rgba = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2BGRA)
+                rgba[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+                img_bgr = apply_shadow_on_white(rgba, shadow_opts)
     except Exception:
         pass
     return img_bgr, alpha
@@ -185,6 +198,8 @@ def _patch_processor() -> bool:
     """يُضيف التشطيب والتقويم إلى `processor_v2.ProcessorV2.process`."""
     try:
         from engine_v2 import processor_v2 as pv2
+        if getattr(pv2.ProcessorV2.process, "_pipeline_patched", False):
+            return True
         orig_process = pv2.ProcessorV2.process
 
         def patched_process(self, source_path, output_path, opts=None):
@@ -192,18 +207,17 @@ def _patch_processor() -> bool:
             res = orig_process(self, source_path, output_path, opts)
             # ثم نُطبّق التشطيب على الناتج إن نجح
             try:
-                if res is not None and getattr(res, "status", "") in (
-                        "matched", "done", "manual"):
+                if res is not None and _AUTO_SHADOW_AFTER_ISOLATION:
                     out = Path(output_path)
                     if out.is_file():
                         import cv2
                         import numpy as np
                         img = cv2.imread(str(out), cv2.IMREAD_COLOR)
                         if img is not None:
-                            # نستخرج القناع من الأبيض
+                            # نستخرج القناع من الخلفية البيضاء ونضيف ظل تلامس خفيف.
                             from engine_v2.shape_aware_v2 import mask_from_white
                             mask = mask_from_white(img)
-                            alpha = mask.astype(np.float32) / 255.0
+                            alpha = mask.astype(np.float32) * 255.0
                             img2, _ = apply_finish_to_image(
                                 img, alpha,
                                 auto_shadow=True,
@@ -236,6 +250,14 @@ def install_pipeline_patch(window: Any) -> dict:
     report["processor_patched"] = _patch_processor()
     if report["processor_patched"]:
         report["all_patches"].append("processor_v2")
+
+    # ── خيار الظل التلقائي للدفعة الجديدة: مفعّل افتراضيًا ──
+    try:
+        _install_auto_shadow_option(window)
+        report["auto_shadow_option_installed"] = True
+        report["all_patches"].append("auto_shadow_after_isolation")
+    except Exception as exc:
+        report["auto_shadow_option_error"] = str(exc)
 
     # ── أداة الصور المنجزة في الواجهة ──
     try:
@@ -272,6 +294,52 @@ def install_pipeline_patch(window: Any) -> dict:
             report[f"{mod_name}_error"] = str(exc)
 
     return report
+
+
+def _install_auto_shadow_option(window: Any) -> None:
+    """يضيف مفتاحًا واضحًا للظل الخفيف في كل معالجة جديدة.
+
+    القيمة الافتراضية مفعّلة؛ عند إلغائها لا يُمس الظل اليدوي في المحرر.
+    """
+    from PySide6.QtWidgets import QCheckBox
+
+    toggle = QCheckBox("ظل تلقائي خفيف بعد عزل الخلفية")
+    toggle.setObjectName("autoShadowAfterIsolation")
+    toggle.setToolTip("يضيف ظل تلامس خفيفًا تلقائيًا لكل صورة تعزلها الدفعة")
+    toggle.setChecked(True)
+
+    def _apply(enabled: bool) -> None:
+        global _AUTO_SHADOW_AFTER_ISOLATION
+        _AUTO_SHADOW_AFTER_ISOLATION = bool(enabled)
+        setattr(window, "auto_shadow_after_isolation", bool(enabled))
+        # ProcessorV2 قد يُنشأ لاحقًا؛ نخزن التفضيل على النافذة أيضًا.
+        try:
+            processor = getattr(window, "processor", None)
+            if processor is not None:
+                processor.auto_shadow_after_isolation = bool(enabled)
+        except Exception:
+            pass
+
+    _apply(True)
+    toggle.toggled.connect(_apply)
+    for attr in ("setup_panel", "options_panel", "controls_panel", "tools_panel"):
+        panel = getattr(window, attr, None)
+        if panel is not None and hasattr(panel, "layout") and panel.layout() is not None:
+            panel.layout().addWidget(toggle)
+            window._auto_shadow_after_isolation_cb = toggle
+            return
+    # الحاوية الفعلية في النافذة الأساسية: «3. تحسين المنتج والإخراج».
+    try:
+        from PySide6.QtWidgets import QGroupBox
+        panel = window.findChild(QGroupBox, "enhancementGroup")
+        if panel is not None and panel.layout() is not None:
+            panel.layout().addWidget(toggle)
+            window._auto_shadow_after_isolation_cb = toggle
+            return
+    except Exception:
+        pass
+    # الاحتفاظ بالمفتاح حتى لو اختلف تخطيط إصدار قديم من الواجهة.
+    window._auto_shadow_after_isolation_cb = toggle
 
 
 def _install_finished_tool(window: Any) -> None:
