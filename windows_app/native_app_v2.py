@@ -193,6 +193,13 @@ def _patch_ui(native_app) -> None:
             except Exception as _nutrition_exc:
                 print(f"[nutrition] patch failed: {_nutrition_exc}", file=sys.stderr)
 
+            # ربط الوجه الأمامي والخلفي باسم الصنف والوزن بعد نجاح باركود الخلف.
+            try:
+                from front_back_patch import install_front_back_linking
+                install_front_back_linking(self)
+            except Exception as _front_back_exc:
+                print(f"[front-back] patch failed: {_front_back_exc}", file=sys.stderr)
+
             # 2.9.5 — زر «أداة إعادة التسمية» حُذف مع نافذته نهائيًا.
             # قرار المالك: «الغِ مكان التعديل القديم... كل شيء في واجهة
             # واحدة» — المجلدات المنجزة تُفتح الآن بزر «فتح مجلد منجز»

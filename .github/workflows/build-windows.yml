@@ -1,4 +1,4 @@
-name: Build Windows Standalone v3.3.0
+name: Build Windows Standalone
 
 on:
   push:
@@ -14,6 +14,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Read VERSION
+        id: ver
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid VERSION: $version" }
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Install dependencies
         run: |
           pip install PySide6==6.8.1 opencv-python-headless numpy onnxruntime openpyxl pillow cryptography arabic-reshaper python-bidi pyinstaller zxing-cpp
@@ -26,7 +33,7 @@ jobs:
       - name: Build standalone application
         run: |
           pyinstaller --noconfirm --onefile --windowed `
-            --name "MarketImageStudio-v3.3.0-Standalone" `
+            --name "MarketImageStudio-v${{ steps.ver.outputs.value }}-Standalone" `
             --paths "src" `
             --paths "windows_app" `
             --add-data "src;src" `
@@ -43,12 +50,14 @@ jobs:
             --hidden-import "engine_v2.product_finish_v2" `
             --hidden-import "engine_v2.shape_aware_v2" `
             --hidden-import "engine_v2.straighten_v2" `
+            --hidden-import "engine_v2.front_back_link_v2" `
             --hidden-import "engine_v2.translucent_v2" `
             --hidden-import "engine_v2.shadow_v2" `
             --hidden-import "engine_v2.nutrition_v2" `
             --hidden-import "v31_patch" `
             --hidden-import "barcode_linear_v32" `
             --hidden-import "batch_input_v32" `
+            --hidden-import "front_back_patch" `
             --hidden-import "per_image_unit_patch" `
             --hidden-import "nutrition_patch" `
             --hidden-import "awareness" `
@@ -60,6 +69,6 @@ jobs:
       - name: Upload standalone artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MarketImageStudio-v3.3.0-Standalone
-          path: dist/MarketImageStudio-v3.3.0-Standalone.exe
+          name: MarketImageStudio-v${{ steps.ver.outputs.value }}-Standalone
+          path: dist/MarketImageStudio-v${{ steps.ver.outputs.value }}-Standalone.exe
           retention-days: 30

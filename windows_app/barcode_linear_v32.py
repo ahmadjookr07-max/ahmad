@@ -62,13 +62,52 @@ def _resize_for_scan(image: np.ndarray, target_longest: int) -> np.ndarray:
                       interpolation=method)
 
 
+def _barcode_regions(image: np.ndarray) -> Iterable[np.ndarray]:
+    """يستخرج مناطق ذات خطوط متوازية شبيهة بالباركود الخطي.
+
+    هذا لا يقرأ QR ولا يبحث عنه: يعتمد على تباين الخطوط الرأسية ونسبة العرض
+    إلى الارتفاع، ثم يرسل قصاصات صغيرة للقارئ. يفيد الباركود البعيد والملتوي
+    ويخفض كلفة مسح صورة المنتج كاملة مرارًا.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    h, w = gray.shape[:2]
+    if h < 80 or w < 80:
+        return
+    grad = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+    grad = cv2.convertScaleAbs(grad)
+    grad = cv2.GaussianBlur(grad, (5, 5), 0)
+    binary = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+    binary = cv2.erode(binary, None, iterations=1)
+    binary = cv2.dilate(binary, None, iterations=2)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    ranked = []
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if bw < 45 or bh < 12 or bw * bh < 800:
+            continue
+        ratio = max(bw / max(1, bh), bh / max(1, bw))
+        if ratio < 1.35:
+            continue
+        ranked.append((bw * bh * ratio, x, y, bw, bh))
+    for _, x, y, bw, bh in sorted(ranked, reverse=True)[:5]:
+        pad_x, pad_y = max(12, bw // 5), max(12, bh * 2)
+        x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+        x1, y1 = min(w, x + bw + pad_x), min(h, y + bh + pad_y)
+        crop = image[y0:y1, x0:x1]
+        if crop.size:
+            yield crop
+
+
 def _candidate_regions(image: np.ndarray) -> Iterable[np.ndarray]:
     """يرتب المناطق الأكثر احتمالًا للباركود قبل المسح الكامل المكلف."""
     h, w = image.shape[:2]
+    # نبدأ بالمناطق المرشحة هندسيًا، ثم نلجأ إلى مسح الصورة والسفلي.
+    yield from _barcode_regions(image)
     yield image
     if h < 80 or w < 80:
         return
-    # أغلب باركود المنتجات بالثلثين السفليين أو في أحد جوانب العبوة.
     top = h // 3
     yield image[top:, :]
     yield image[h // 2:, :]
@@ -103,7 +142,21 @@ def _rotations(image: np.ndarray, include_fine: bool) -> Iterable[np.ndarray]:
 def _read_variant(zxingcpp: object, image: np.ndarray) -> list[str]:
     values: list[str] = []
     try:
-        results = zxingcpp.read_barcodes(image)
+        # formats=AllLinear يمنع QR وكل الرموز الثنائية من أصل الفحص،
+        # وليس مجرد تصفيتها بعد القراءة. تدوير/عكس/تصغير داخلي للمكتبة.
+        formats = getattr(getattr(zxingcpp, "BarcodeFormat", None), "AllLinear", None)
+        if formats is None:
+            # توافق مع بيئات الاختبار/الإصدارات القديمة فقط. تبقى نتيجة QR
+            # مرفوضة صراحةً أدناه؛ أما الإصدار المضمّن فيستخدم AllLinear.
+            results = zxingcpp.read_barcodes(image)
+        else:
+            results = zxingcpp.read_barcodes(
+                image,
+                formats=formats,
+                try_rotate=True,
+                try_downscale=True,
+                try_invert=True,
+            )
     except Exception:
         return values
     for result in results:
@@ -115,7 +168,7 @@ def _read_variant(zxingcpp: object, image: np.ndarray) -> list[str]:
     return values
 
 
-def read_linear_barcodes(path: str | Path, *, max_attempts: int = 28) -> tuple[str, ...]:
+def read_linear_barcodes(path: str | Path, *, max_attempts: int = 38) -> tuple[str, ...]:
     """يعيد مرشحات الباركود الخطي مرتبة بالثقة، ولا يقرأ QR مطلقًا."""
     try:
         import zxingcpp
