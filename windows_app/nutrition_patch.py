@@ -25,6 +25,9 @@ __all__ = ["install_nutrition_patch", "patch_nutrition_crop_dialog"]
 def patch_nutrition_crop_dialog(dialog: Any) -> dict:
     """يُضيف التدوير الدقيق وخيار الاستبدال إلى نافذة التغذية."""
     report: dict[str, Any] = {"fine_rotate": False, "overwrite_mode": False}
+    if getattr(dialog, "_nutrition_controls_patched", False):
+        return {"fine_rotate": True, "overwrite_mode": True, "already_patched": True}
+    dialog._nutrition_controls_patched = True
 
     # ── 1. التدوير الدقيق ──
     try:
@@ -116,7 +119,9 @@ def patch_nutrition_crop_dialog(dialog: Any) -> dict:
         overwrite_cb.setToolTip(
             "عند التفعيل يُكتب الناتج فوق صورة الصنف الحالية مباشرةً "
             "بدل إنشاء صورة جديدة في القائمة.")
-        overwrite_cb.setChecked(False)
+        # الوضع الافتراضي المقصود: جدول التغذية يصبح جزءًا من الصورة
+        # الحالية، فلا ينشأ صف أو ملف مكرر لنفس الصنف.
+        overwrite_cb.setChecked(True)
 
         # أضفه قبل أزرار الحفظ
         btns_widget = getattr(dialog, "buttons_widget", None)
@@ -196,11 +201,33 @@ def install_nutrition_patch(window: Any) -> dict:
                             from engine_v2.nutrition_v2 import merge_label_inset
                             final = merge_label_inset(product_img, cropped,
                                                       placement)
-                            cv2.imwrite(str(p), final,
-                                        [cv2.IMWRITE_WEBP_QUALITY, 100])
+                            # كتابة ذرية: لا يمكن أن يترك الإغلاق أو انقطاع
+                            # الكهرباء WebP فارغًا ثم تختفي الصورة عند الاستئناف.
+                            temp = p.with_name(f".{p.stem}.nutrition.tmp{p.suffix}")
+                            ok = cv2.imwrite(str(temp), final,
+                                             [cv2.IMWRITE_WEBP_QUALITY, 100])
+                            if not ok:
+                                raise RuntimeError("تعذر كتابة صورة حقائق التغذية")
+                            temp.replace(p)
+                            # امسح معاينات Qt المحتفظ بها وأعد بناء الجدول؛
+                            # المسار لم يتغير لكن البكسلات تغيّرت، لذلك لا نُنشئ
+                            # عنصرًا جديدًا ولا نسمح للواجهة بعرض النسخة القديمة.
+                            try:
+                                from PySide6.QtGui import QPixmapCache
+                                QPixmapCache.clear()
+                                position = window._capture_results_position()
+                                window._populate_results(restore_position=position)
+                            except Exception:
+                                pass
+                            try:
+                                saver = getattr(window, "v2_save_session", None)
+                                if callable(saver):
+                                    saver()
+                            except Exception:
+                                pass
                             try:
                                 window.status_label.setText(
-                                    f"تم استبدال الصورة: {p.name}")
+                                    f"تم حفظ حقائق التغذية داخل الصورة نفسها: {p.name}")
                             except Exception:
                                 pass
                             return p.name

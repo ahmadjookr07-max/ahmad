@@ -224,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.2.1"
+APP_VERSION = "3.3.0"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -7692,6 +7692,14 @@ class MainWindow(QMainWindow):
             str(source), alternatives=alternatives,
             product_name=selected.product_name or selected.item_code,
             parent=self)
+        # يجب تركيب أدوات الميل والحفظ قبل exec()؛ تركيبها بعد الإغلاق
+        # يجعل خيار الاستبدال غير مرئي ولا يعمل في الإصدارات المجمعة.
+        self._nutrition_dialog = dialog
+        try:
+            from nutrition_patch import patch_nutrition_crop_dialog
+            patch_nutrition_crop_dialog(dialog)
+        except Exception as _nutrition_patch_error:
+            print(f"[nutrition] dialog patch failed: {_nutrition_patch_error}", file=sys.stderr)
 
         # وضع الدمج (الافتراضي): نزود النافذة بصورة الصنف
         # الناتجة ليجري لصق الجدول داخلها في الزاوية المختارة.
@@ -7713,7 +7721,11 @@ class MainWindow(QMainWindow):
                     f"{selected.item_code} — يمكنك تحديد جزء آخر أو الإغلاق")
 
         dialog.save_requested.connect(_on_save)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            if getattr(self, "_nutrition_dialog", None) is dialog:
+                self._nutrition_dialog = None
 
     def _nutrition_merge_target(self, selected: BatchItemResult):
         """يختار صورة الصنف الناتجة التي سيُدمج الجدول داخلها.

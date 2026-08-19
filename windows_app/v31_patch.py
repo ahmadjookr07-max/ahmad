@@ -54,8 +54,17 @@ def _patch_nutrition_overwrite_default(window: Any) -> None:
     def patched_save(selected: Any, cropped: Any, on_canvas: bool,
                      product_img: Any = None,
                      placement: Any = None) -> str:
-        # عند الدمج (placement موجود) — اكتب فوق الأصل مباشرةً
-        if product_img is not None and placement is not None:
+        # عند الدمج (placement موجود) — اكتب فوق الأصل فقط إن بقي خيار
+        # الاستبدال مفعّلًا. النسخة الأحدث تكتب ذريًا في الغلاف الخارجي.
+        overwrite = True
+        try:
+            dialog = getattr(window, "_nutrition_dialog", None)
+            check = getattr(dialog, "_overwrite_cb", None)
+            if check is not None:
+                overwrite = bool(check.isChecked())
+        except Exception:
+            pass
+        if overwrite and product_img is not None and placement is not None:
             try:
                 out_path = str(getattr(selected, "output_path", "") or "")
                 if out_path:

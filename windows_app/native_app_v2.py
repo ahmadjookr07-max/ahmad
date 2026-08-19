@@ -179,6 +179,20 @@ def _patch_ui(native_app) -> None:
             except Exception as _e31:
                 print(f"[V3.1] patch failed: {_e31}", file=sys.stderr)
 
+            # اختيار الوحدة لكل صورة: يُقرأ من الإكسل ويخدم الصور الجديدة والمنجزة.
+            try:
+                from per_image_unit_patch import install_per_image_unit
+                install_per_image_unit(self)
+            except Exception as _unit_exc:
+                print(f"[units] patch failed: {_unit_exc}", file=sys.stderr)
+
+            # رقعة التغذية: حفظ ذري فوق الصورة واستعادة ثابتة عند فتح الجلسة.
+            try:
+                from nutrition_patch import install_nutrition_patch
+                install_nutrition_patch(self)
+            except Exception as _nutrition_exc:
+                print(f"[nutrition] patch failed: {_nutrition_exc}", file=sys.stderr)
+
             # 2.9.5 — زر «أداة إعادة التسمية» حُذف مع نافذته نهائيًا.
             # قرار المالك: «الغِ مكان التعديل القديم... كل شيء في واجهة
             # واحدة» — المجلدات المنجزة تُفتح الآن بزر «فتح مجلد منجز»
