@@ -33,6 +33,7 @@ class _Window:
         self.current_workspace = root
         self.rebuilt = 0
         self.saved = 0
+        self.zipped = 0
         self._save_nutrition_result = self._unexpected_save
 
     def _unexpected_save(self, *args, **kwargs):
@@ -49,6 +50,9 @@ class _Window:
 
     def v2_save_session(self):
         self.saved += 1
+
+    def _refresh_delivery_zip(self):
+        self.zipped += 1
 
 
 def run() -> None:
@@ -71,7 +75,7 @@ def run() -> None:
         assert saved_name == target.name
         assert target.is_file() and target.read_bytes() != before
         assert not list(root.glob("*.nutrition.tmp*"))
-        assert window.rebuilt == 1 and window.saved == 1
+        assert window.rebuilt == 1 and window.saved == 1 and window.zipped == 1
         assert "داخل الصورة نفسها" in window.status_label.value
     print("OK: nutrition merges atomically into the original output and persists session")
 

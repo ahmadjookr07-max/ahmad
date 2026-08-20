@@ -259,6 +259,14 @@ def install_pipeline_patch(window: Any) -> dict:
     except Exception as exc:
         report["auto_shadow_option_error"] = str(exc)
 
+    # ── تقريب المنتج اليدوي وحفظ موضعه على الصورة المحددة ──
+    try:
+        _install_product_framing_controls(window)
+        report["product_framing_installed"] = True
+        report["all_patches"].append("product_framing")
+    except Exception as exc:
+        report["product_framing_error"] = str(exc)
+
     # ── أداة الصور المنجزة في الواجهة ──
     try:
         _install_finished_tool(window)
@@ -340,6 +348,139 @@ def _install_auto_shadow_option(window: Any) -> None:
         pass
     # الاحتفاظ بالمفتاح حتى لو اختلف تخطيط إصدار قديم من الواجهة.
     window._auto_shadow_after_isolation_cb = toggle
+
+
+def _install_product_framing_controls(window: Any) -> None:
+    """واجهة تقريب وحفظ موضع المنتج؛ الكتابة فوق نفس الملف فقط."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmapCache
+    from PySide6.QtWidgets import (QGroupBox, QHBoxLayout, QLabel, QPushButton,
+                                   QSlider, QSpinBox, QVBoxLayout, QWidget)
+
+    group = window.findChild(QGroupBox, "enhancementGroup")
+    if group is None or group.layout() is None:
+        return
+    host = QWidget(group)
+    host.setObjectName("productFramingControls")
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(0, 4, 0, 0)
+    layout.setSpacing(4)
+    title = QLabel("تقريب وتمركز المنتج بعد العزل")
+    title.setToolTip("يتم تمركز المنتج تلقائيًا في الدفعات؛ هذه الأدوات لتعديل الصورة المحددة وحفظها.")
+    layout.addWidget(title)
+
+    zoom_row = QHBoxLayout()
+    zoom_row.addWidget(QLabel("التقريب:"))
+    zoom = QSlider(Qt.Horizontal)
+    zoom.setObjectName("productZoomPercent")
+    zoom.setLayoutDirection(Qt.LeftToRight)
+    zoom.setRange(100, 130)
+    zoom.setValue(106)
+    zoom.setSingleStep(1)
+    value = QLabel("106%")
+    value.setMinimumWidth(42)
+    zoom.valueChanged.connect(lambda v: value.setText(f"{v}%"))
+    zoom_row.addWidget(zoom, 1)
+    zoom_row.addWidget(value)
+    layout.addLayout(zoom_row)
+
+    move_row = QHBoxLayout()
+    move_row.addWidget(QLabel("الموضع:"))
+    offset_x = QSpinBox(); offset_x.setRange(-20, 20); offset_x.setSuffix("% أفقي")
+    offset_y = QSpinBox(); offset_y.setRange(-20, 20); offset_y.setSuffix("% رأسي")
+    offset_x.setToolTip("قيمة موجبة = يمين، سالبة = يسار")
+    offset_y.setToolTip("قيمة موجبة = أسفل، سالبة = أعلى")
+    move_row.addWidget(offset_x)
+    move_row.addWidget(offset_y)
+    reset = QPushButton("توسيط")
+    reset.setToolTip("يعيد المنتج إلى الوسط مع تقريب تلقائي خفيف")
+    reset.clicked.connect(lambda: (zoom.setValue(106), offset_x.setValue(0), offset_y.setValue(0)))
+    move_row.addWidget(reset)
+    layout.addLayout(move_row)
+
+    apply_btn = QPushButton("تطبيق وحفظ التقريب للصورة المحددة")
+    apply_btn.setObjectName("saveProductFraming")
+    apply_btn.setToolTip("يحفظ التقريب والموضع فوق نفس صورة الصنف بلا إنشاء ملف أو صف جديد")
+    layout.addWidget(apply_btn)
+
+    settings = getattr(window, "_product_frame_settings", None)
+    if not isinstance(settings, dict):
+        settings = {}
+        window._product_frame_settings = settings
+
+    def _selected():
+        fn = getattr(window, "_selected_result_item", None)
+        return fn() if callable(fn) else None
+
+    def _key(item) -> str:
+        return str(getattr(item, "output_path", "") or getattr(item, "source_name", ""))
+
+    def _load_selected() -> None:
+        item = _selected()
+        data = settings.get(_key(item), {}) if item is not None else {}
+        zoom.blockSignals(True); offset_x.blockSignals(True); offset_y.blockSignals(True)
+        try:
+            zoom.setValue(int(data.get("zoom_percent", 106)))
+            offset_x.setValue(int(data.get("offset_x_percent", 0)))
+            offset_y.setValue(int(data.get("offset_y_percent", 0)))
+        finally:
+            zoom.blockSignals(False); offset_x.blockSignals(False); offset_y.blockSignals(False)
+        value.setText(f"{zoom.value()}%")
+
+    def _save_current() -> None:
+        item = _selected()
+        if item is None:
+            try:
+                window.status_label.setText("حدد صورة من النتائج أولًا لتطبيق التقريب.")
+            except Exception:
+                pass
+            return
+        out_value = str(getattr(item, "output_path", "") or "")
+        path = window._result_path(out_value) if out_value and hasattr(window, "_result_path") else Path(out_value)
+        if not out_value or path is None or not Path(path).is_file():
+            try:
+                window.status_label.setText("لا توجد صورة ناتجة صالحة لحفظ التقريب عليها.")
+            except Exception:
+                pass
+            return
+        from framing_zoom_patch import ProductFrame, save_framed_image
+        frame = ProductFrame(zoom.value(), offset_x.value(), offset_y.value()).normalized()
+        if not save_framed_image(path, frame):
+            try:
+                window.status_label.setText("تعذر حفظ التقريب؛ بقيت الصورة الأصلية دون تغيير.")
+            except Exception:
+                pass
+            return
+        settings[_key(item)] = {
+            "zoom_percent": frame.zoom_percent,
+            "offset_x_percent": frame.offset_x_percent,
+            "offset_y_percent": frame.offset_y_percent,
+        }
+        try:
+            QPixmapCache.clear()
+            position = window._capture_results_position()
+            window._populate_results(restore_position=position)
+            saver = getattr(window, "v2_save_session", None)
+            if callable(saver):
+                saver()
+        except Exception:
+            pass
+        try:
+            window.status_label.setText(
+                f"حُفظ التقريب {frame.zoom_percent}% وموضعه داخل الصورة نفسها: {Path(path).name}")
+        except Exception:
+            pass
+
+    apply_btn.clicked.connect(_save_current)
+    table = getattr(window, "results_table", None)
+    if table is not None and hasattr(table, "itemSelectionChanged"):
+        table.itemSelectionChanged.connect(_load_selected)
+    group.layout().addWidget(host)
+    window._product_framing_controls = host
+    window._product_zoom_slider = zoom
+    window._product_offset_x = offset_x
+    window._product_offset_y = offset_y
+    window._save_product_framing = _save_current
 
 
 def _install_finished_tool(window: Any) -> None:

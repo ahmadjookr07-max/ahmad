@@ -97,6 +97,12 @@ def load_engine() -> Any:
         except Exception as exc:                      # noqa: BLE001
             print(f"[integrity] تعذر تطبيق ترقيعات السلامة: {exc}",
                   file=sys.stderr)
+        # تقريب آمن بعد العزل: المنتج يبقى في المنتصف ولا تُقص حوافه.
+        try:
+            from framing_zoom_patch import install_final_framing_patch
+            install_final_framing_patch(_final)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[framing] تعذر تطبيق تقريب المنتج: {exc}", file=sys.stderr)
         _real_final_images = _final
         _real_pipeline = _pipeline
         return _real_pipeline

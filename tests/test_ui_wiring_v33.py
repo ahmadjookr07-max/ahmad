@@ -27,7 +27,11 @@ def run() -> None:
         assert shadow_toggle.isChecked()
         enhancement_group = window.findChild(QGroupBox, "enhancementGroup")
         assert enhancement_group is not None and shadow_toggle.parent() is enhancement_group
-        print("OK: unit, nutrition, and automatic-shadow patches are mounted in the real MainWindow")
+        assert window._pipeline_patch_report["product_framing_installed"]
+        assert window._product_framing_controls.parent() is enhancement_group
+        assert window._product_zoom_slider.value() == 106
+        assert callable(window._save_product_framing)
+        print("OK: unit, nutrition, automatic-shadow, and product-framing patches are mounted")
     finally:
         window.close()
         app.processEvents()

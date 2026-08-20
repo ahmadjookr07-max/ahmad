@@ -877,6 +877,11 @@ def install_v2(main_window, data_root: Path) -> None:
                     setup["source_folder"] = str(Path(paths[0]).parent)
             except Exception:
                 pass
+            # تحفظ إعدادات تقريب المنتج لكل صورة حتى تبقى المقابض على
+            # موضعها عند فتح الجلسة من جديد؛ الملف نفسه يُحفظ فوقه أيضًا.
+            frame_settings = getattr(main_window, "_product_frame_settings", None)
+            if isinstance(frame_settings, dict):
+                setup["product_frame_settings"] = dict(frame_settings)
             state["setup"] = setup
             result = getattr(main_window, "current_result", None)
             if result is not None:
@@ -997,6 +1002,16 @@ def install_v2(main_window, data_root: Path) -> None:
                     add_paths(new_paths)
             except Exception:
                 pass
+            frame_settings = setup.get("product_frame_settings", {})
+            if isinstance(frame_settings, dict):
+                # لا نستبدل القاموس إن كانت واجهة التقريب التقطت مرجعه عند
+                # الإقلاع؛ نحدّثه في مكانه كي تظهر القيم المستعادة وتُحفظ.
+                current_frame_settings = getattr(main_window, "_product_frame_settings", None)
+                if isinstance(current_frame_settings, dict):
+                    current_frame_settings.clear()
+                    current_frame_settings.update(frame_settings)
+                else:
+                    main_window._product_frame_settings = dict(frame_settings)
             if hasattr(state, "images"):  # SessionState object
                 # ملاحظة: الصور تُخزّن قواميس في JSON لا كائنات؛
                 # القراءة بصيغة img.attr كانت ترمي AttributeError يُبتلع

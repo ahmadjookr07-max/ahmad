@@ -201,13 +201,21 @@ def install_nutrition_patch(window: Any) -> dict:
                             from engine_v2.nutrition_v2 import merge_label_inset
                             final = merge_label_inset(product_img, cropped,
                                                       placement)
-                            # كتابة ذرية: لا يمكن أن يترك الإغلاق أو انقطاع
-                            # الكهرباء WebP فارغًا ثم تختفي الصورة عند الاستئناف.
+                            # كتابة ذرية ومتوافقة مع المسارات العربية: نرّمز
+                            # أولًا ثم نكتب باسم مؤقت ونستبدله في اللحظة الأخيرة.
+                            # بذلك لا تظهر صفحة بيضاء أو ملف مفقود إن انقطع الحفظ.
                             temp = p.with_name(f".{p.stem}.nutrition.tmp{p.suffix}")
-                            ok = cv2.imwrite(str(temp), final,
-                                             [cv2.IMWRITE_WEBP_QUALITY, 100])
+                            ext = p.suffix.lower() or ".webp"
+                            if ext == ".webp":
+                                params = [cv2.IMWRITE_WEBP_QUALITY, 101]
+                            elif ext in (".jpg", ".jpeg"):
+                                params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+                            else:
+                                params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
+                            ok, encoded = cv2.imencode(ext, final, params)
                             if not ok:
-                                raise RuntimeError("تعذر كتابة صورة حقائق التغذية")
+                                raise RuntimeError("تعذر ترميز صورة حقائق التغذية")
+                            encoded.tofile(str(temp))
                             temp.replace(p)
                             # امسح معاينات Qt المحتفظ بها وأعد بناء الجدول؛
                             # المسار لم يتغير لكن البكسلات تغيّرت، لذلك لا نُنشئ
@@ -217,6 +225,14 @@ def install_nutrition_patch(window: Any) -> dict:
                                 QPixmapCache.clear()
                                 position = window._capture_results_position()
                                 window._populate_results(restore_position=position)
+                            except Exception:
+                                pass
+                            # حزمة التسليم قد تكون بُنيت قبل الدمج؛ نعيدها كي
+                            # لا يحصل المستخدم على نسخة قديمة من الصورة المعدلة.
+                            try:
+                                refresh_zip = getattr(window, "_refresh_delivery_zip", None)
+                                if callable(refresh_zip):
+                                    refresh_zip()
                             except Exception:
                                 pass
                             try:
