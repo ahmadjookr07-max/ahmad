@@ -98,6 +98,9 @@ class CatalogIndex:
         self.by_barcode: dict[str, int] = {}
         self.by_code: dict[str, int] = {}
         self.by_code_all: dict[str, list[int]] = {}
+        # أسماء مطبّعة → كل الصفوف المطابقة حرفيًا؛ تستخدم في الربط اليدوي
+        # لتفادي مسح ملف Excel أو قائمة 20–40 ألف صنف مع كل نقرة.
+        self.by_normalized_name: dict[str, list[int]] = {}
         self._name_grams: dict[str, set[int]] = {}
         self.columns: dict[str, int] = {}
         self.source_path = ""
@@ -260,6 +263,7 @@ class CatalogIndex:
         self.by_barcode.clear()
         self.by_code.clear()
         self.by_code_all.clear()
+        self.by_normalized_name.clear()
         self._name_grams.clear()
         for idx, r in enumerate(self.rows):
             bc = r.get("barcode", "")
@@ -270,6 +274,8 @@ class CatalogIndex:
                 self.by_code[code] = idx
             self.by_code_all.setdefault(code, []).append(idx)
             norm = normalize_text(r.get("name", ""))
+            if norm:
+                self.by_normalized_name.setdefault(norm, []).append(idx)
             for g in self._grams(norm):
                 self._name_grams.setdefault(g, set()).add(idx)
 
@@ -297,6 +303,30 @@ class CatalogIndex:
     def lookup_code(self, code: str) -> dict | None:
         idx = self.by_code.get(_clean_code(code))
         return self.rows[idx] if idx is not None else None
+
+    def resolve_reference(self, reference: str) -> dict | None:
+        """يحل مرجع الربط اليدوي فورًا دون قبول تخمين غامض.
+
+        الترتيب: رقم صنف ثم باركود ثم اسم مطابق بعد التطبيع. إذا تكرر
+        الاسم بين أكواد مختلفة يعيد ``None`` كي تبقى آلية المراجعة
+        الحالية مسؤولة عن القرار ولا يقع ربط خاطئ من أجل السرعة.
+        """
+        raw = str(reference or "").strip()
+        if not raw:
+            return None
+        exact = self.lookup_code(raw)
+        if exact is not None:
+            return exact
+        # الربط اليدوي لا يطبق تسامح حذف check-digit: يجب أن يكون الباركود
+        # المكتوب مطابقًا حرفيًا حتى لا تتحول سرعة البحث إلى ربط خاطئ.
+        barcode_idx = self.by_barcode.get(_clean_code(raw))
+        if barcode_idx is not None:
+            return self.rows[barcode_idx]
+        matches = self.by_normalized_name.get(normalize_text(raw), [])
+        codes = {self.rows[i].get("code", "") for i in matches}
+        if len(codes) != 1 or not matches:
+            return None
+        return self.rows[matches[0]]
 
     def rows_for_code(self, code: str) -> list[dict]:
         return [self.rows[i] for i in self.by_code_all.get(_clean_code(code), [])]

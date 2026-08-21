@@ -117,6 +117,16 @@ except Exception:
 
 h.editor.load_image(str(tmp))
 check("الصورة محمّلة قبل التوسيع", h.editor.has_image())
+# بطاقة تقريب المنتج جزء من الأدوات المتقدمة في المحرر نفسه، بدقة 1%.
+h.editor._smart_frame()
+check("بطاقة التقريب موجودة داخل المحرر", hasattr(h.editor, "editor_product_zoom_slider"))
+check("خطوة التقريب دقيقة 1%", h.editor.editor_product_zoom_slider.singleStep() == 1)
+check("خطوة الموضع الدقيقة 1%", h.editor.editor_product_offset_x_slider.singleStep() == 1)
+h.editor.editor_product_zoom_slider.setValue(112)
+h.editor.editor_product_offset_x_slider.setValue(5)
+from PySide6.QtTest import QTest
+QTest.qWait(90)
+check("تعديل التقريب طُبّق داخل المحرر", h.editor.get_result_bgr() is not None)
 
 editor_id_before = id(h.editor)
 h._toggle_expanded_editor()

@@ -271,7 +271,9 @@ class EditorCanvas(QGraphicsView):
         # زووم نحو موضع المؤشر
         if self._item.pixmap().isNull():
             return
-        factor = 1.18 if event.angleDelta().y() > 0 else 1 / 1.18
+        # 8% لكل نقرة عجلة: التحكم السابق (18%) كان يقفز فوق
+        # التفاصيل ويجعل ضبط موضع المنتج غير دقيق.
+        factor = 1.08 if event.angleDelta().y() > 0 else 1 / 1.08
         new_zoom = self._zoom * factor
         if not (self.ZOOM_MIN <= new_zoom <= self.ZOOM_MAX):
             return
@@ -412,6 +414,13 @@ class V2PhotoEditorDialog(QDialog):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(120)
         self._preview_timer.timeout.connect(self._recompose)
+        # بطاقة تقريب المنتج تُحرّك الصورة على مؤقت قصير؛ السحب يبقى
+        # ناعمًا ولا يعيد تركيب 800×700 مع كل درجة من المنزلق.
+        self._product_frame_source: np.ndarray | None = None
+        self._product_frame_timer = QTimer(self)
+        self._product_frame_timer.setSingleShot(True)
+        self._product_frame_timer.setInterval(35)
+        self._product_frame_timer.timeout.connect(self._apply_product_frame)
 
         self._build_ui()
         if image_path:
@@ -1022,6 +1031,7 @@ class V2PhotoEditorDialog(QDialog):
         self._region_active = False
         self._cutout_applied = False
         self._shadow_opts = None
+        self._product_frame_source = None
         self._history.clear()
         self._redo.clear()
         # 2.9.13 (م-8): لا يُترك تحويل الصورة السابقة حيًا مع صورة
@@ -1212,6 +1222,10 @@ class V2PhotoEditorDialog(QDialog):
         # اجعلها الأساس الجديد وصفّر الطبقات المكررة
         self._original = self._flatten_white(canvas)
         self._base = canvas
+        # نحفظ لوحة التأطير كمرجع ثابت؛ منزلقات التقريب اللاحقة تُعاد
+        # منها دائمًا، فلا يتراكم التكبير مع كل حركة للمقبض.
+        self._product_frame_source = canvas.copy()
+        self._reset_product_frame_controls(apply=False)
         self._cutout_applied = True
         self._alpha_manual = None
         self._region_mask = None
@@ -1229,6 +1243,83 @@ class V2PhotoEditorDialog(QDialog):
         self.canvas._first_fit_done = False
         self.status_label.setText("تم التوسيط والتأطير 800×700 ✓")
         self._recompose(fit=True)
+
+    def _reset_product_frame_controls(self, *, apply: bool = True) -> None:
+        """يعيد بطاقة التقريب للوضع الموصى به: تكبير هادئ + وسط الصورة."""
+        controls = (
+            ("editor_product_zoom_slider", 106),
+            ("editor_product_offset_x_slider", 0),
+            ("editor_product_offset_y_slider", 0),
+        )
+        for name, value in controls:
+            slider = getattr(self, name, None)
+            if slider is None:
+                continue
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+        if apply:
+            self._schedule_product_frame()
+
+    def _schedule_product_frame(self, *_args) -> None:
+        """يؤجل إعادة التأطير 35ms ليبقى سحب المنزلق سلسًا ودقيقًا."""
+        if self._product_frame_source is None:
+            self.status_label.setText("اضغط «توسيط واعتماد الإطار» أولًا بعد العزل.")
+            return
+        self._product_frame_timer.start()
+
+    def _apply_product_frame(self) -> None:
+        """يطبّق التقريب والموضع على لوحته المرجعية مع منع قص حواف المنتج."""
+        source = self._product_frame_source
+        if source is None or source.size == 0:
+            return
+        import cv2
+        alpha = source[:, :, 3] if source.ndim == 3 and source.shape[2] == 4 else None
+        if alpha is None:
+            return
+        points = cv2.findNonZero(np.where(alpha > 10, 255, 0).astype(np.uint8))
+        if points is None:
+            return
+        h, w = source.shape[:2]
+        x, y, bw, bh = cv2.boundingRect(points)
+        mask = np.where(alpha > 10, 255, 0).astype(np.uint8)
+        moments = cv2.moments(mask, binaryImage=True)
+        cx = moments["m10"] / moments["m00"] if moments["m00"] else x + bw / 2
+        cy = moments["m01"] / moments["m00"] if moments["m00"] else y + bh / 2
+        zoom_slider = getattr(self, "editor_product_zoom_slider", None)
+        x_slider = getattr(self, "editor_product_offset_x_slider", None)
+        y_slider = getattr(self, "editor_product_offset_y_slider", None)
+        zoom = (zoom_slider.value() if zoom_slider is not None else 106) / 100.0
+        off_x = (x_slider.value() if x_slider is not None else 0) / 100.0
+        off_y = (y_slider.value() if y_slider is not None else 0) / 100.0
+        pad = max(3, int(round(min(w, h) * 0.012)))
+        safe_zoom = min((w - 2 * pad) / max(1, bw),
+                        (h - 2 * pad) / max(1, bh))
+        scale = max(1.0, min(float(zoom), safe_zoom))
+        target_x = w / 2.0 + off_x * w
+        target_y = h / 2.0 + off_y * h
+        # نحصر الإزاحة داخل مساحة آمنة فلا يخرج المنتج من الإطار.
+        target_x = max(pad + bw * scale / 2.0,
+                       min(w - pad - bw * scale / 2.0, target_x))
+        target_y = max(pad + bh * scale / 2.0,
+                       min(h - pad - bh * scale / 2.0, target_y))
+        matrix = np.float32(((scale, 0.0, target_x - cx * scale),
+                             (0.0, scale, target_y - cy * scale)))
+        framed = cv2.warpAffine(source, matrix, (w, h),
+                                 flags=cv2.INTER_LANCZOS4,
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=(0, 0, 0, 0))
+        self._base = framed
+        self._original = self._flatten_white(framed)
+        self._alpha_manual = None
+        self._region_mask = None
+        self._region_active = False
+        self._cutout_applied = True
+        self._scene_to_image = None
+        self._rot_inverse = None
+        self.status_label.setText(
+            f"تقريب المنتج {int(round(scale * 100))}% — الموضع محفوظ داخل التعديل")
+        self._recompose()
 
     def _smart_full(self) -> None:
         """معالجة ذكية كاملة: قص ← تحسين ← ظل أرضي ← تأطير."""

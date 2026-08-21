@@ -224,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.4.3"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -726,6 +726,13 @@ class ManualLinkWorker(QThread):
         return trace
 
 
+class EditorDirectSaveResult:
+    """نتيجة حفظ مباشر لبكسلات المحرر فوق مخرج الصنف القائم."""
+
+    def __init__(self, output_path: str) -> None:
+        self.output_path = str(output_path)
+
+
 class IndividualEditWorker(QThread):
     progress_changed = Signal(int, int, str)
     completed = Signal(object)
@@ -749,6 +756,7 @@ class IndividualEditWorker(QThread):
         manual_rotation: float = 0.0,
         edited_source_path: "Path | None" = None,
         previous_output: str = "",
+        editor_output=None,
     ) -> None:
         super().__init__()
         self.workspace = workspace
@@ -769,6 +777,9 @@ class IndividualEditWorker(QThread):
         self.manual_rotation = float(manual_rotation)
         # 2.6: مسار صورة معدّلة مسبقًا من المحرر الموحد — تحل محل المصدر الأصلي
         self.edited_source_path = Path(edited_source_path) if edited_source_path else None
+        # إن كان المحرر أنتج بالفعل الصورة النهائية، لا نعيد إدخالها إلى
+        # pipeline ثم نعيد تأطيرها وكتابتها مرة أخرى. نسخة مستقلة للخيط.
+        self.editor_output = editor_output.copy() if editor_output is not None else None
 
     def _post_process_file(self, path: "Path | str | None") -> None:
         """تطبيق الميل اليدوي وطمس التواريخ وإزالة الانعكاسات على الملف الناتج."""
@@ -809,8 +820,40 @@ class IndividualEditWorker(QThread):
         except Exception:
             pass
 
+    def _save_editor_output_directly(self) -> bool:
+        """كتابة بكسلات المحرر فوق الناتج القائم ذرّيًا وبلا pipeline."""
+        if self.editor_output is None or self.preview_only or not self.previous_output:
+            return False
+        try:
+            import cv2
+            target = Path(self.previous_output)
+            if not target.is_file():
+                return False
+            ext = target.suffix.lower() or ".webp"
+            if ext == ".webp":
+                params = [cv2.IMWRITE_WEBP_QUALITY, 101]
+            elif ext in (".jpg", ".jpeg"):
+                params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+            else:
+                params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
+            ok, encoded = cv2.imencode(ext, self.editor_output, params)
+            if not ok:
+                return False
+            temp = target.with_name(f".{target.stem}.editor.tmp{target.suffix}")
+            encoded.tofile(str(temp))
+            temp.replace(target)
+            self.progress_changed.emit(1, 1, "حُفظ تعديل المحرر مباشرة")
+            self.completed.emit(EditorDirectSaveResult(str(target)))
+            return True
+        except Exception:
+            return False
+
     def run(self) -> None:
         try:
+            # مسار سريع: الصورة عُزلت وأُطّرت داخل المحرر، فإعادة تشغيل
+            # pipeline لا تضيف شيئًا وتؤخر الحفظ. نكتبها فوق الملف نفسه.
+            if self._save_editor_output_directly():
+                return
             # 2.9.6: أهم إصلاح في هذا المسار — «حفظ واعتماد التعديل» كان
             # يفشل لأن المحرك يعود للمسار المطلق المخزّن وقت الدفعة.
             # الاسترجاع يسبق أي قراءة للحالة.
@@ -1892,6 +1935,12 @@ class MainWindow(QMainWindow):
         self._pending_manual_source_names: tuple[str, ...] = ()
         self._manual_reference_source_name = ""
         self._result_items_by_name: dict[str, BatchItemResult] = {}
+        # نص جاهز لكل صف؛ لا نعيد التطبيع الثقيل عند كل حرف في مربع البحث.
+        self._result_search_cache: dict[str, str] = {}
+        self._result_filter_timer = QTimer(self)
+        self._result_filter_timer.setSingleShot(True)
+        self._result_filter_timer.setInterval(80)
+        self._result_filter_timer.timeout.connect(self._apply_result_filters)
         self._result_thumbnail_cache: dict[str, QIcon] = {}
         # 2.9.9 — أُلغيت نسبة التشابه من جذورها بطلب المالك، فحُذفت معها كل
         # منطقة البصمات البصرية: كاش LRU بسعة 2000، العامل الخلفي، مؤقّت
@@ -3112,7 +3161,7 @@ class MainWindow(QMainWindow):
         # المقياس، فتفرض 36px على 800×600 حيث ينبغي ≈22px — وهي جزء من
         # عجز 54px في resultsListPane الذي يقص أسفل اللوحة.
         self._register_metric(self.result_search_edit, "min_height", 36)
-        self.result_search_edit.textChanged.connect(self._apply_result_filters)
+        self.result_search_edit.textChanged.connect(self._schedule_result_filters)
 
         self.result_status_filter = QComboBox()
         self.result_status_filter.setObjectName("resultStatusFilter")
@@ -5037,6 +5086,7 @@ class MainWindow(QMainWindow):
         # 2.6: إذا عدّل المستخدم الصورة في المحرر الموحد، نحفظ ناتج المحرر
         # كمصدر معدّل ونمرره للـ pipeline (التأطير 800×700 + التقارير تبقى كما هي)
         edited_source_path: Path | None = None
+        editor_output = None
         editor = getattr(self, "unified_editor", None)
         # 2.9.13 (م-12) — حرس فساد البيانات: لا تُعتمد بكسلات من
         # المحرر إلا إن كان محمّلًا على هذا الصف بعينه. قبل هذا
@@ -5057,15 +5107,9 @@ class MainWindow(QMainWindow):
             try:
                 result_bgr = editor.get_result_bgr()
                 if result_bgr is not None:
-                    staging_dir = Path(self.current_workspace) / "staging"
-                    staging_dir.mkdir(parents=True, exist_ok=True)
-                    tmp_path = staging_dir / "unified-edited-source.png"
-                    import cv2 as _cv2
-
-                    ok, buffer = _cv2.imencode(".png", result_bgr)
-                    if ok:
-                        buffer.tofile(str(tmp_path))
-                        edited_source_path = tmp_path
+                    # تؤجَّل الكتابة إلى ما بعد معرفة وجود مخرج سابق؛ عند
+                    # وجوده يحفظ العامل البكسلات فوقه مباشرة بلا PNG مرحلي.
+                    editor_output = result_bgr
             except Exception as exc:
                 QMessageBox.warning(
                     self,
@@ -5078,7 +5122,7 @@ class MainWindow(QMainWindow):
         # لكن هناك **مسوّدة محفوطة** لهذه الصورة (حُفِظت قبل الربط)،
         # فالمعالجة تعتمد المسوّدة لا الأصل — وهذا يمنع فقد العمل
         # اليدوي الذي كان يضيع سابقًا.
-        if edited_source_path is None:
+        if editor_output is None and edited_source_path is None:
             drafts = getattr(self, "_editor_drafts", None) or {}
             draft = drafts.get(item.source_name)
             if draft is None:
@@ -5103,7 +5147,26 @@ class MainWindow(QMainWindow):
                             else "")
         self._pending_individual_previous_output = _previous_output
 
-        if edited_source_path is not None:
+        # لا يوجد مخرج سابق (أو المطلوب معاينة فقط): نحتاج pipeline
+        # مرة واحدة. نخزن WebP بلا فقدان بدل PNG أبطأ وأكبر.
+        if editor_output is not None and (preview_only or not _previous_output):
+            staging_dir = Path(self.current_workspace) / "staging"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = staging_dir / "unified-edited-source.webp"
+            try:
+                import cv2 as _cv2
+                ok, buffer = _cv2.imencode(
+                    ".webp", editor_output, [_cv2.IMWRITE_WEBP_QUALITY, 101])
+                if not ok:
+                    raise RuntimeError("فشل ترميز ناتج المحرر")
+                buffer.tofile(str(tmp_path))
+                edited_source_path = tmp_path
+            except Exception as exc:
+                QMessageBox.warning(self, APP_NAME,
+                                    f"تعذر تجهيز ناتج المحرر الموحد: {exc}")
+                return
+
+        if edited_source_path is not None or editor_output is not None:
             # التعديلات طُبقت داخل المحرر — نعطل المعالجات المكررة في الـ pipeline
             self.individual_worker = IndividualEditWorker(
                 self.current_workspace,
@@ -5121,6 +5184,7 @@ class MainWindow(QMainWindow):
                 manual_rotation=0.0,
                 edited_source_path=edited_source_path,
                 previous_output=_previous_output,
+                editor_output=editor_output,
             )
         else:
             self.individual_worker = IndividualEditWorker(
@@ -5188,6 +5252,35 @@ class MainWindow(QMainWindow):
             self._update_controls()
             return
 
+        if isinstance(payload, EditorDirectSaveResult):
+            # المسار السريع: نفس output_path بقي كما هو، فلا نعيد تشغيل
+            # pipeline ولا ننشئ صورة/صفًا جديدًا. نحدّث الواجهة فقط.
+            self._individual_editor_dirty = False
+            self._individual_preview_active = False
+            self._individual_preview_path = None
+            self.individual_show_preview_button.setEnabled(False)
+            if self._editor_ready():
+                self.unified_editor.clear()
+            self._populate_results(restore_position=restore_position)
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            self.progress.setFormat("حُفظ تعديل المحرر مباشرة")
+            self.status_label.setText(
+                "تم حفظ تعديل المحرر فوق صورة الصنف نفسها سريعًا — دون إعادة معالجة أو نسخة جديدة.")
+            self.individual_editor_state_label.setText("تم الحفظ المباشر")
+            self.individual_editor_state_label.setProperty("previewPending", False)
+            self._update_individual_editor_hint()
+            try:
+                saver = getattr(self, "v2_save_session", None)
+                if callable(saver):
+                    saver()
+                # المجدول يحدّث ZIP بالخلفية ويجمع التعديلات المتلاحقة.
+                self._refresh_delivery_zip()
+            except Exception:
+                pass
+            self._update_controls()
+            self._exit_individual_edit_mode()
+            return
         if not isinstance(payload, BatchRunResult):
             self._on_individual_edit_failed("نتيجة غير متوقعة من عامل تعديل الصورة الفردية")
             return
@@ -6413,6 +6506,14 @@ class MainWindow(QMainWindow):
         else:
             self.table_position_label.setText(f"عرض {visible_count} من إجمالي {total}")
 
+    def _schedule_result_filters(self, *_args: object) -> None:
+        """يؤخر التصفية 80ms لتجميع ضغطات الكتابة المتتابعة بلا بطء."""
+        timer = getattr(self, "_result_filter_timer", None)
+        if timer is not None:
+            timer.start()
+        else:
+            self._apply_result_filters()
+
     def _apply_result_filters(self, *_args: object) -> None:
         query_tokens = _normalize_search_text(self.result_search_edit.text()).split()
         status_filter = str(self.result_status_filter.currentData() or "all")
@@ -6431,18 +6532,14 @@ class MainWindow(QMainWindow):
                     status_matches = item.status in {"review", "error"}
                 else:
                     status_matches = status_filter == "all" or item.status == status_filter
-                searchable = _normalize_search_text(
-                    " ".join(
-                        (
-                            item.source_name,
-                            item.item_code,
-                            item.product_name,
-                            item.barcode,
-                            STATUS_TEXT.get(item.status, item.status),
-                            item.explanation,
-                        )
-                    )
-                )
+                searchable = self._result_search_cache.get(source_name)
+                if searchable is None:
+                    searchable = _normalize_search_text(
+                        " ".join((item.source_name, item.item_code,
+                                  item.product_name, item.barcode,
+                                  STATUS_TEXT.get(item.status, item.status),
+                                  item.explanation)))
+                    self._result_search_cache[source_name] = searchable
                 text_matches = all(token in searchable for token in query_tokens)
                 self.results_table.setRowHidden(row, not (status_matches and text_matches))
 
@@ -6780,12 +6877,20 @@ class MainWindow(QMainWindow):
         self.first_item_button.setEnabled(False)
         self.last_item_button.setEnabled(False)
         self._result_items_by_name = {}
+        self._result_search_cache = {}
         if self.current_result is None:
             self._update_summary(None)
             return
 
         result_items = list(self.current_result.items)
         self._result_items_by_name = {item.source_name: item for item in result_items}
+        self._result_search_cache = {
+            item.source_name: _normalize_search_text(" ".join((
+                item.source_name, item.item_code, item.product_name,
+                item.barcode, STATUS_TEXT.get(item.status, item.status),
+                item.explanation)))
+            for item in result_items
+        }
         total = len(result_items)
         sorting_enabled = self.results_table.isSortingEnabled()
         self._fill_sorting_was_enabled = sorting_enabled
@@ -7324,6 +7429,20 @@ class MainWindow(QMainWindow):
         if not reference:
             QMessageBox.warning(self, APP_NAME, "اكتب رقم الصنف أو رقم الباركود الموجود في ملف Excel.")
             return
+        # مسار فوري من فهرس Excel المحمّل: الرقم والباركود والاسم المطابق
+        # حرفيًا يتحولان إلى code مؤكد قبل العامل؛ الغامض يمر للمسار المحافظ.
+        resolved = None
+        index = getattr(self, "v2_catalog_index", None)
+        resolver = getattr(index, "resolve_reference", None)
+        if callable(resolver):
+            try:
+                resolved = resolver(reference)
+            except Exception:
+                resolved = None
+        if resolved is not None and resolved.get("code"):
+            reference = str(resolved["code"])
+            self.manual_item_edit.setText(reference)
+            self.status_label.setText("تم العثور على الصنف فورًا من فهرس Excel — جارٍ الربط.")
         if len(targets) > 1 and not self._confirm_link_scope(targets, reference):
             self.status_label.setText("أُلغي الربط الجماعي؛ لم تتغير النتائج.")
             return
