@@ -157,9 +157,11 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(slot)
 
-        add("Ctrl+=", lambda: self.canvas.zoom_step(1.25))
-        add("Ctrl++", lambda: self.canvas.zoom_step(1.25))
-        add("Ctrl+-", lambda: self.canvas.zoom_step(1 / 1.25))
+        # 8% لكل خطوة: نفس سرعة عجلة الفأرة حتى لا يقفز المنتج عند
+        # استخدام الأزرار أو الاختصارات بين موضعي فحص وضبط.
+        add("Ctrl+=", lambda: self.canvas.zoom_step(1.08))
+        add("Ctrl++", lambda: self.canvas.zoom_step(1.08))
+        add("Ctrl+-", lambda: self.canvas.zoom_step(1 / 1.08))
         add("Ctrl+0", lambda: self.canvas.zoom_actual())
         add("Ctrl+9", lambda: self.canvas.fit_view())
 
@@ -333,10 +335,10 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         # والسحب كانا متوفرين في `EditorCanvas` لكن بلا أي زر مرئي،
         # ومن لا يعرف أن العجلة تزوّم يظن المحرر بلا زوم. فأُضيفت
         # ثلاثة أزرار صريحة مع اختصارات Ctrl+= / Ctrl+- / Ctrl+0.
-        self.zoom_in_btn = btn("＋", "تكبير (Ctrl+=) — أو عجلة الفأرة للأعلى",
-                               lambda: self.canvas.zoom_step(1.25))
-        self.zoom_out_btn = btn("－", "تصغير (Ctrl+-) — أو عجلة الفأرة للأسفل",
-                                lambda: self.canvas.zoom_step(1 / 1.25))
+        self.zoom_in_btn = btn("＋", "تكبير دقيق 8% (Ctrl+=) — أو عجلة الفأرة للأعلى",
+                               lambda: self.canvas.zoom_step(1.08))
+        self.zoom_out_btn = btn("－", "تصغير دقيق 8% (Ctrl+-) — أو عجلة الفأرة للأسفل",
+                                lambda: self.canvas.zoom_step(1 / 1.08))
         self.zoom_reset_btn = btn(
             "1:1", "الحجم الحقيقي 100% (Ctrl+0) — لفحص النص والباركود بدقة",
             lambda: self.canvas.zoom_actual(), wide=True)
