@@ -78,6 +78,12 @@ SCHEME_CLASSIC = "classic"  # نمط 2.1
 SCHEME_CUSTOM = "custom"
 VALID_SCHEMES = (SCHEME_DASH, SCHEME_CLASSIC, SCHEME_CUSTOM)
 
+# مرجع الربط والتسمية النهائي من سجل Excel. يبقى item_code افتراضيًا
+# لتتوافق الجلسات والمجلدات السابقة، والباركود خيار صريح قبل المعالجة.
+REFERENCE_ITEM_CODE = "item_code"
+REFERENCE_BARCODE = "barcode"
+VALID_REFERENCE_MODES = (REFERENCE_ITEM_CODE, REFERENCE_BARCODE)
+
 
 @dataclass
 class ParsedName:
@@ -692,6 +698,8 @@ class NamingSettings:
     seq_start: int = 1            # بدء الترقيم (1 أو 0)
     seq_pad: int = 0              # أصفار بادئة: 0=بلا، 2=01،02...
     always_number_single: bool = False  # رقّم حتى الصورة الوحيدة
+    # ``barcode`` يعني: الاسم النهائي هو باركود Excel فقط، بلا وحدة.
+    reference_mode: str = REFERENCE_ITEM_CODE
 
     def _fmt_seq(self, seq: int) -> str:
         """رقم الصورة الإضافية — قاعدة المالك.
@@ -735,6 +743,18 @@ class NamingSettings:
         """اسم صورة واحدة. ``total`` = عدد صور المجموعة إن عُرف (لنمط الشرطة)."""
         item = sanitize_item(item)
         unit = clean_unit(unit) or self.default_unit or UNIT_SUFFIX_DEFAULT
+        if self.reference_mode == REFERENCE_BARCODE:
+            # هذا ليس قالبًا تجميليًا: اختيار المالك «الباركود» يعني أن
+            # الباركود الآتي من Excel هو المرجع الوحيد للاسم، بلا وحدة.
+            ref = sanitize_item(str(barcode or ""))
+            if not ref:
+                return item  # حارس توافق؛ طبقة الإنتاج ترفضه وتبقي الأصل.
+            if self.always_number_single and total <= 1 and seq <= 1:
+                return f"{ref}-{self._fmt_seq_single(seq)}"
+            # يطابق النمط السابق: الواجهة بلا رقم، ثم -1، -2…
+            shown = max(0, int(seq) + int(self.seq_start) - 2)
+            suffix = str(shown).zfill(int(self.seq_pad)) if self.seq_pad else str(shown)
+            return ref if seq <= 1 else f"{ref}-{suffix}"
         if self.scheme == SCHEME_DASH:
             if self.always_number_single and total <= 1 and seq <= 1:
                 return normalize_stem(f"{item}_{unit}") + \
@@ -781,7 +801,8 @@ class NamingSettings:
                 "enabled": bool(self.enabled),
                 "seq_start": int(self.seq_start),
                 "seq_pad": int(self.seq_pad),
-                "always_number_single": bool(self.always_number_single)}
+                "always_number_single": bool(self.always_number_single),
+                "reference_mode": self.reference_mode}
 
     @classmethod
     def from_dict(cls, d: dict) -> "NamingSettings":
@@ -812,6 +833,9 @@ class NamingSettings:
         except (TypeError, ValueError):
             s.seq_pad = 0
         s.always_number_single = bool(d.get("always_number_single", False))
+        s.reference_mode = str(d.get("reference_mode", REFERENCE_ITEM_CODE) or REFERENCE_ITEM_CODE)
+        if s.reference_mode not in VALID_REFERENCE_MODES:
+            s.reference_mode = REFERENCE_ITEM_CODE
         return s
 
     def save(self, path: str | Path) -> None:
@@ -849,7 +873,7 @@ def save_settings(data_root: str | Path, settings: NamingSettings) -> None:
 def plan_stems_for_policy(item: str, units: list[str] | tuple[str, ...],
                           seq: int, total: int,
                           settings: NamingSettings,
-                          chosen_unit: str = "") -> list[str]:
+                          chosen_unit: str = "", barcode: str = "") -> list[str]:
     """أسماء صورة **واحدة** وفق السياسة — مصدر الحقيقة الوحيد.
 
     يعيد قائمة: اسمًا واحدًا في السياسات الثلاث، و**اسمًا لكل وحدة**
@@ -870,6 +894,12 @@ def plan_stems_for_policy(item: str, units: list[str] | tuple[str, ...],
     ``units`` وحدات الصنف من الإكسل بترتيب الإكسل حرفيًا.
     ``seq`` رتبة الصورة الحقيقية (1 = الواجهة ★ بلا رقم).
     """
+    # في نمط الباركود لا تُكرّر الصورة لكل وحدة؛ جميع النسخ ستكون
+    # بالاسم نفسه. الباركود من Excel مطلوب، وإلا يُترك الاسم القديم.
+    if settings.reference_mode == REFERENCE_BARCODE:
+        if not str(barcode or "").strip():
+            return []
+        return [settings.render(item, seq, "", total=total, barcode=barcode)]
     clean = [u for u in (units or []) if str(u).strip()]
     if not clean:
         clean = [settings.default_unit or UNIT_SUFFIX_DEFAULT]
@@ -882,17 +912,17 @@ def plan_stems_for_policy(item: str, units: list[str] | tuple[str, ...],
         out: list[str] = []
         for u in dedupe_units([clean_unit(sanitize_item(str(u)))
                               for u in clean]):
-            stem = settings.render(item, seq, u, total=total)
+            stem = settings.render(item, seq, u, total=total, barcode=barcode)
             if stem not in out:
                 out.append(stem)
-        return out or [settings.render(item, seq, clean[0], total=total)]
+        return out or [settings.render(item, seq, clean[0], total=total, barcode=barcode)]
     if policy == UNIT_POLICY_DEFAULT:
         # الوحدة الواحدة: **وحدة الإكسل الأولى** هي الأصل، والافتراضية
         # ``حبه`` احتياط لصنف بلا وحدة في الإكسل. العكس (تصدير حبه
         # دائمًا) هو العطب الذي أبلغ عنه المالك حرفيًا.
         unit = clean_unit(sanitize_item(str(clean[0]))) or \
             settings.default_unit or UNIT_SUFFIX_DEFAULT
-        return [settings.render(item, seq, unit, total=total)]
+        return [settings.render(item, seq, unit, total=total, barcode=barcode)]
     # per_image: وحدة اختارها المالك لهذه الصورة، أو أولى وحدات الإكسل
     unit = clean_unit(sanitize_item(str(chosen_unit))) if chosen_unit else ""
     unit = unit or clean_unit(sanitize_item(str(clean[0])))

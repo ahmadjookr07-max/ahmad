@@ -257,6 +257,31 @@ def set_catalog_index(index) -> None:
     _CATALOG_REF["index"] = index
 
 
+def _barcode_from_catalog(item: str, preferred: str = "") -> str:
+    """باركود الصنف من Excel فقط، مع تفضيل الباركود المطابق للسجل.
+
+    لا يعتمد هذا على OCR أو اسم ملف؛ ``preferred`` يستخدم فقط لاختيار
+    صف Excel مطابق حين تكون للصنف وحدات متعددة ذات باركودات مختلفة.
+    """
+    idx = _CATALOG_REF.get("index")
+    if idx is None:
+        return ""
+    try:
+        rows = list(idx.rows_for_code(str(item)) or [])
+    except Exception:
+        return ""
+    preferred = str(preferred or "").strip()
+    for row in rows:
+        barcode = str(row.get("barcode", "") or "").strip()
+        if barcode and barcode == preferred:
+            return barcode
+    for row in rows:
+        barcode = str(row.get("barcode", "") or "").strip()
+        if barcode:
+            return barcode
+    return ""
+
+
 def _units_from_catalog(item: str, excel_order: bool = False) -> list[str]:
     """وحدات الصنف من الإكسل — تعيد [] إن لم يتوفر الكتالوج.
 
@@ -481,9 +506,16 @@ def build_output_stems(out_dir: str | Path, item: str,
     # الوسيط ``unit`` احتياط أخير حين لا كتالوج للصنف.
     units = (_units_from_catalog(item, excel_order=True)
              or ([unit] if unit else []))
-    seq = _next_free_sequence(stems, item)
-    return plan_stems_for_policy(item, units, seq, total=seq,
-                                 settings=settings, chosen_unit=unit)
+    barcode = _barcode_from_catalog(item)
+    # في نمط الباركود، عدّ التسلسل على بادئة الباركود لا رقم الصنف.
+    identity = barcode if getattr(settings, "reference_mode", "item_code") == "barcode" else item
+    seq = _next_free_sequence(stems, identity)
+    planned = plan_stems_for_policy(item, units, seq, total=seq,
+                                    settings=settings, chosen_unit=unit,
+                                    barcode=barcode)
+    # لا اسم بديل برقم الصنف عند اختيار الباركود وغياب قيمته في Excel.
+    # يُترك الاسم للمحرك ثم تظهر الحالة للمراجعة؛ لا ربط مضلل.
+    return planned or [build_name(item, next_sequence(stems, item), unit)]
 
 
 def build_output_stem(out_dir: str | Path, item: str,

@@ -224,7 +224,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.4"
+APP_VERSION = "3.4.5"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2479,6 +2479,21 @@ class MainWindow(QMainWindow):
             "يُحفظ اختيارك ويُستعاد في المرة القادمة.")
         self.join_units_check.toggled.connect(self._on_join_units_toggled)
         catalog_layout.addWidget(self.join_units_check)
+        # نفس مسار Excel السابق، مع اختيار المرجع الذي يظهر في الاسم النهائي.
+        reference_row = QHBoxLayout()
+        reference_label = QLabel("مرجع الربط والتسمية من Excel:")
+        self.reference_mode_combo = QComboBox()
+        self.reference_mode_combo.setObjectName("referenceModeCombo")
+        self.reference_mode_combo.addItem("رقم الصنف + الوحدة", "item_code")
+        self.reference_mode_combo.addItem("رقم الباركود", "barcode")
+        self.reference_mode_combo.setToolTip(
+            "رقم الصنف + الوحدة: 10011205_حبه-1\n"
+            "رقم الباركود: 6287021750464-1\n\n"
+            "في الحالتين يتم الربط من سجل Excel نفسه؛ يتغير المرجع الظاهر فقط.")
+        self.reference_mode_combo.currentIndexChanged.connect(self._on_reference_mode_changed)
+        reference_row.addWidget(reference_label)
+        reference_row.addWidget(self.reference_mode_combo, 1)
+        catalog_layout.addLayout(reference_row)
         # معاينة حيّة للاسم الناتج: المالك يرى أثر الخيار بعينه
         # قبل تشغيل المعالجة بدل أن يكتشفه في 991 ملفًا بعد فوات الأوان.
         self.naming_preview_label = QLabel("")
@@ -5784,6 +5799,51 @@ class MainWindow(QMainWindow):
             self.join_units_check.blockSignals(True)
             self.join_units_check.setChecked(join_on)
             self.join_units_check.blockSignals(False)
+        self._load_reference_mode_state()
+        self._update_naming_preview()
+
+    def _load_reference_mode_state(self) -> None:
+        """استعادة مرجع Excel المختار دون كتابة الإعداد من جديد."""
+        mode = "item_code"
+        try:
+            p = self._naming_settings_path()
+            if p.exists():
+                mode = str(json.loads(p.read_text(encoding="utf-8")).get(
+                    "reference_mode", mode) or mode)
+        except Exception as exc:
+            print(f"[naming] load reference mode failed: {exc}", file=sys.stderr)
+        if mode not in {"item_code", "barcode"}:
+            mode = "item_code"
+        combo = getattr(self, "reference_mode_combo", None)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(mode)))
+            combo.blockSignals(False)
+
+    def _on_reference_mode_changed(self, _index: int) -> None:
+        """يحفظ خيار المرجع فورًا كي تبدأ الدفعة التالية بنفس الاختيار."""
+        combo = getattr(self, "reference_mode_combo", None)
+        mode = str(combo.currentData() or "item_code") if combo is not None else "item_code"
+        if mode not in {"item_code", "barcode"}:
+            mode = "item_code"
+        try:
+            p = self._naming_settings_path()
+            data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+            data["reference_mode"] = mode
+            data.setdefault("unit_policy", "default_unit")
+            data.setdefault("unit_policy_explicit", True)
+            data.setdefault("default_unit", "حبه")
+            data.setdefault("scheme", "dash")
+            data.setdefault("template", "{item}_{unit}-{seq}")
+            data.setdefault("enabled", True)
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.v2_naming_policy = data
+        except Exception as exc:
+            print(f"[naming] save reference mode failed: {exc}", file=sys.stderr)
+            if hasattr(self, "status_label"):
+                self.status_label.setText(f"تعذّر حفظ مرجع التسمية: {exc}")
+            return
+        self._after_naming_policy_changed()
         self._update_naming_preview()
 
     def _on_join_units_toggled(self, checked: bool) -> None:
@@ -5810,6 +5870,7 @@ class MainWindow(QMainWindow):
             data.setdefault("scheme", "dash")
             data.setdefault("template", "{item}_{unit}-{seq}")
             data.setdefault("enabled", True)
+            data.setdefault("reference_mode", "item_code")
             p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                          encoding="utf-8")
             self.v2_naming_policy = data
@@ -5832,6 +5893,8 @@ class MainWindow(QMainWindow):
             return
         join_on = (hasattr(self, "join_units_check")
                    and self.join_units_check.isChecked())
+        mode = (str(self.reference_mode_combo.currentData() or "item_code")
+                if hasattr(self, "reference_mode_combo") else "item_code")
         item = "10011205"
         units: list[str] = []
         idx = getattr(self, "v2_catalog_index", None)
@@ -5863,7 +5926,24 @@ class MainWindow(QMainWindow):
         try:
             from engine_v2.naming_v2 import (
                 build_name_join_all, NamingSettings)
-            if join_on:
+            barcode = ""
+            if idx is not None:
+                try:
+                    record = idx.lookup_code(item)
+                    barcode = str((record or {}).get("barcode", "") or "")
+                except Exception:
+                    barcode = ""
+            if mode == "barcode":
+                s = NamingSettings(reference_mode="barcode")
+                if barcode:
+                    base = s.render(item, 1, "", total=3, barcode=barcode)
+                    second = s.render(item, 2, "", total=3, barcode=barcode)
+                    third = s.render(item, 3, "", total=3, barcode=barcode)
+                    head = "مُفعّل — باركود الصنف من Excel"
+                else:
+                    base, second, third = "باركود_Excel_مفقود", "—", "—"
+                    head = "معلّق — الصنف لا يملك باركودًا في Excel"
+            elif join_on:
                 base = build_name_join_all(item, units, 1, total=3)
                 second = build_name_join_all(item, units, 2, total=3)
                 third = build_name_join_all(item, units, 3, total=3)
@@ -5893,9 +5973,12 @@ class MainWindow(QMainWindow):
             if settings is not None:
                 scheme = getattr(settings, "scheme", "")
                 policy = getattr(settings, "unit_policy", "")
+                reference = ("باركود Excel" if getattr(settings, "reference_mode", "item_code") == "barcode"
+                             else "رقم الصنف")
                 if hasattr(self, "status_label"):
                     self.status_label.setText(
-                        f"تم اعتماد سياسة التسمية — النمط: {scheme}"
+                        f"تم اعتماد سياسة التسمية — المرجع: {reference}"
+                        f"، النمط: {scheme}"
                         f"{'، الوحدات: ' + policy if policy else ''}")
         except Exception as exc:
             print(f"[naming] reload after save failed: {exc}",
@@ -5973,7 +6056,10 @@ class MainWindow(QMainWindow):
         # النهائية مباشرة، ومعه نسخة احتياطية خارج المجلد.
         migration = self._migrate_legacy_naming(folder)
 
-        groups, unparsed = scan_legacy_folder(folder)
+        index = getattr(self, "v2_catalog_index", None)
+        # يمرر Excel للمسح نفسه: الاسم الذي أصبح باركودًا يُعاد إلى
+        # رقم الصنف المناظر قبل بناء الصفوف وخطة إعادة الربط.
+        groups, unparsed = scan_legacy_folder(folder, index=index)
         if not groups:
             QMessageBox.information(
                 self, APP_NAME,
@@ -5981,7 +6067,6 @@ class MainWindow(QMainWindow):
                 "الأسماء المدعومة: رقم_الوحدة أو رقم_الوحدة-1 أو رقم_الوحدة_2.")
             return
 
-        index = getattr(self, "v2_catalog_index", None)
         plan = plan_legacy_renames(groups, index, unparsed)
         applied = {"renames": {}, "errors": [], "items_done": 0}
         if plan.changed_rows:

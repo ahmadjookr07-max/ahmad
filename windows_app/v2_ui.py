@@ -1354,6 +1354,9 @@ class UnitNamingDialog(QDialog):
             data = json.loads(self._settings_path().read_text(encoding="utf-8"))
         except Exception:
             data = {}
+        self._reference_mode = str(data.get("reference_mode", "item_code") or "item_code")
+        if self._reference_mode not in {"item_code", "barcode"}:
+            self._reference_mode = "item_code"
         pol = data.get("unit_policy", "per_image")
         {"per_image": self.rb_per_image,
          "join_all_units": self.rb_join_all,
@@ -1435,6 +1438,8 @@ class UnitNamingDialog(QDialog):
             "seq_start": int(self.seq_start_combo.currentData() or 1),
             "seq_pad": int(self.seq_pad_combo.currentData() or 0),
             "always_number_single": self.chk_number_single.isChecked(),
+            # يحفظه دون تكرار واجهة الخيار الرئيسي قبل المعالجة.
+            "reference_mode": getattr(self, "_reference_mode", "item_code"),
         }
 
     def _update_preview(self):

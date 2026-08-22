@@ -46,6 +46,8 @@ IMAGE_SUFFIXES = (".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 # {رقم}_{وحدة}          → واجهة
 # {رقم}_{وحدة}_{عدد}    → نمط قديم (يبدأ من 2)
 # {رقم}_{وحدة}-{عدد}    → قاعدة المالك (تبدأ من 1)
+# اسم الباركود الجديد: 6287021750464 أو 6287021750464-1.
+_RE_BARE_DASH = re.compile(r"^(?P<item>\d+)-(?P<seq>\d+)$")
 _RE_DASH = re.compile(r"^(?P<item>\d+)_(?P<unit>.+?)-(?P<seq>\d+)$")
 _RE_USCORE = re.compile(r"^(?P<item>\d+)_(?P<unit>.+?)_(?P<seq>\d+)$")
 _RE_PLAIN = re.compile(r"^(?P<item>\d+)_(?P<unit>.+?)$")
@@ -177,6 +179,9 @@ def parse_legacy_stem(stem: str) -> tuple[str, str, int, str] | None:
     s = (stem or "").strip()
     if not s:
         return None
+    m = _RE_BARE_DASH.match(s)
+    if m:
+        return (m.group("item"), "", max(1, int(m.group("seq"))), "barcode_dash")
     m = _RE_DASH.match(s)
     if m:
         return (m.group("item"), m.group("unit"),
@@ -206,7 +211,8 @@ def parse_legacy_stem(stem: str) -> tuple[str, str, int, str] | None:
 
 
 def scan_legacy_folder(folder: str | Path,
-                       suffixes: tuple[str, ...] = IMAGE_SUFFIXES
+                       suffixes: tuple[str, ...] = IMAGE_SUFFIXES,
+                       index=None
                        ) -> tuple[dict[str, LegacyGroup], list[Path]]:
     """يمسح مجلدًا منجزًا ويجمع صوره برقم الصنف.
 
@@ -243,6 +249,15 @@ def scan_legacy_folder(folder: str | Path,
             continue
         seen_stems.add(stem)
         item, unit, seq, pattern = parsed
+        # عند فتح مجلد سُمّي بالباركود، نعيده إلى code من Excel كي
+        # تتجمع الصور وتُربط بنفس الصنف مثل سياق الملفات السابق.
+        if index is not None:
+            try:
+                record = index.lookup_code(item) or index.lookup_barcode(item)
+                if record and record.get("code"):
+                    item = str(record["code"])
+            except Exception:
+                pass
         grp = groups.get(item)
         if grp is None:
             grp = groups[item] = LegacyGroup(item)
@@ -303,7 +318,7 @@ def _units_for_group(item: str, index, unit_in_name: str,
 
 
 def _target_stems_policy(item: str, units: list[str], count: int,
-                         settings, fallback_unit: str = ""
+                         settings, fallback_unit: str = "", barcode: str = ""
                          ) -> list[list[str]]:
     """أسماء المجموعة عبر **نفس دالة الدفعة الجديدة**.
 
@@ -323,7 +338,7 @@ def _target_stems_policy(item: str, units: list[str], count: int,
         unit_list = [fallback_unit]
     return [plan_stems_for_policy(item, unit_list, seq=i + 1, total=count,
                                   settings=settings,
-                                  chosen_unit=fallback_unit)
+                                  chosen_unit=fallback_unit, barcode=barcode)
             for i in range(count)]
 
 
@@ -386,6 +401,7 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
     # السياسات التي تحتاج كل وحدات الإكسل بترتيبه الحرفي.
     needs_units = policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE,
                              UNIT_POLICY_DEFAULT)
+    barcode_mode = str(getattr(settings, "reference_mode", "item_code")) == "barcode"
 
     for item in sorted(groups):
         grp = groups[item]
@@ -393,7 +409,14 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
         unit = unit_in_name
         units: list[str] = []
         note = ""
+        barcode = ""
         if index is not None:
+            try:
+                rows_for_code = list(index.rows_for_code(item) or [])
+                barcode = next((str(r.get("barcode", "") or "").strip()
+                                for r in rows_for_code if str(r.get("barcode", "") or "").strip()), "")
+            except Exception:
+                barcode = ""
             try:
                 excel_unit = str(index.primary_unit_for_code(item) or "")
             except Exception:
@@ -422,10 +445,14 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
                     note = (f"وحدات الإكسل المجموعة: "
                             f"{'، '.join(units)}")
 
-        if active:
+        if barcode_mode and not barcode:
+            plan.missing_in_excel.append(item)
+            note = "لا باركود لهذا الصنف في Excel — لم يُعد تسمية الملف"
+            names = [[im.stem] for im in grp.images]
+        elif active:
             # مسار السياسات الأربع — نفس دالة الدفعة الجديدة.
             names = _target_stems_policy(item, units, grp.count, settings,
-                                         fallback_unit=unit)
+                                         fallback_unit=unit, barcode=barcode)
         else:
             names = [[s] for s in _target_stems(item, unit, grp.count,
                                                 units=units,

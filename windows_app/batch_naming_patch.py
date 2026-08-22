@@ -199,7 +199,7 @@ def _policy_active() -> tuple[bool, bool, str]:
 
 def _target_stems(item: str, units: list[str], seq: int,
                   default_unit: str, settings=None,
-                  join: bool = False) -> list[str]:
+                  join: bool = False, barcode: str = "") -> list[str]:
     """**كل** الأسماء المطلوبة لصورة واحدة وفق السياسة.
 
     تمر عبر ``naming_v2.plan_stems_for_policy`` — **مصدر الحقيقة
@@ -214,7 +214,7 @@ def _target_stems(item: str, units: list[str], seq: int,
         try:
             from engine_v2.naming_v2 import plan_stems_for_policy
             out = plan_stems_for_policy(item, units, seq, total=seq,
-                                        settings=settings)
+                                        settings=settings, barcode=barcode)
             if out:
                 return list(out)
         except Exception as exc:
@@ -238,7 +238,7 @@ def _target_stem(item: str, units: list[str], seq: int,
 def _free_path(folder: Path, item: str, units: list[str],
                default_unit: str, ext: str,
                taken: set[str], join: bool = False,
-               settings=None) -> tuple[Path, list[str]]:
+               settings=None, barcode: str = "") -> tuple[Path, list[str]]:
     """أول مسار حر للصنف: الرئيسي بلا رقم ثم -2، -3 ...
 
     ``taken`` يمنع تصادم دفعة واحدة تكتب عدة صور للصنف نفسه قبل أن
@@ -250,7 +250,8 @@ def _free_path(folder: Path, item: str, units: list[str],
     """
     seq = 1
     while True:
-        stems = _target_stems(item, units, seq, default_unit, settings, join)
+        stems = _target_stems(item, units, seq, default_unit, settings, join,
+                              barcode=barcode)
         cands = [folder / f"{s}{ext}" for s in stems]
         if all(str(c).casefold() not in taken and not c.exists()
                for c in cands):
@@ -383,6 +384,7 @@ def apply_join_all_units(result: Any) -> Any:
 
     mapping: dict[str, str] = {}
     taken: set[str] = set()
+    barcode_mode = bool(getattr(settings, "reference_mode", "item_code") == "barcode")
     renamed = 0
     copied = 0
 
@@ -400,11 +402,22 @@ def apply_join_all_units(result: Any) -> Any:
             if not src.is_file() or src.suffix.casefold() not in _OUT_EXTS:
                 continue
             units = _units_for(str(item_code), join)
-            if not units:
+            observed_barcode = str(getattr(it, "barcode", "") or "")
+            try:
+                from engine_v2.integration_v2 import _barcode_from_catalog
+                barcode = _barcode_from_catalog(str(item_code), observed_barcode)
+            except Exception:
+                barcode = ""
+            if barcode_mode and not barcode:
+                _log(f"تُرك {src.name}: لا باركود لهذا الصنف في Excel ({item_code})")
+                continue
+            if not units and not barcode_mode:
                 # لا كتالوج للصنف: لا مرجع نصحّح إليه.
                 continue
             want = _target_stems(str(item_code), units, 1, default_unit,
-                                 settings, join)
+                                 settings, join, barcode=barcode)
+            if not want:
+                continue
             want_stem = want[0]
             matched = (src.stem == want_stem
                        or src.stem.startswith(want_stem + "-"))
@@ -417,7 +430,7 @@ def apply_join_all_units(result: Any) -> Any:
                 continue
             dst, stems = _free_path(src.parent, str(item_code), units,
                                     default_unit, src.suffix, taken,
-                                    join, settings)
+                                    join, settings, barcode=barcode)
             os.replace(src, dst)
             # حدّث النتيجة لتشير للملف الجديد. العناصر مُجمّدة
             # (frozen dataclass) فلا ينفع setattr — نستبدل العنصر.
