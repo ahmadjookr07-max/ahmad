@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.18"
+APP_VERSION = "3.4.19"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -712,6 +712,13 @@ class ManualLinkWorker(QThread):
                         final_image_options=self.image_options,
                     )
             self._apply_rotation_to_outputs(result)
+            # مطابق للخطوة الأخيرة في محرر الفيديو: بعد أن ينفذ الربط
+            # العزل/التحسين/الظل في الخلفية، نقرّب المنتج 106% ونوسّطه
+            # فوق نفس الملف تلقائيًا. لا يُشغّل عند إلغاء العزل صراحةً.
+            self.auto_finished_count = (
+                auto_finish_linked_outputs(result, self.workspace)
+                if self.remove_background else 0
+            )
             self.completed.emit(result)
         except Exception:
             self.failed.emit(self._augment_failure(traceback.format_exc()))
@@ -752,6 +759,39 @@ def _manual_source_key(item: object) -> str:
         return "path:" + path.replace("\\", "/").casefold()
     name = str(getattr(item, "source_name", "") or "").strip()
     return "name:" + name.replace("\\", "/").casefold() if name else ""
+
+
+def auto_finish_linked_outputs(result: object, workspace: Path | None = None) -> int:
+    """يطبّق آخر خطوة من فيديو المالك بعد ربط الصورة مباشرة.
+
+    العزل والخلفية البيضاء والتحسين والظل تمر أصلًا عبر خط الربط الرسمي
+    في الخلفية. هذه الدالة تضيف الجزء الذي كان يُنفذ يدويًا في المحرر:
+    تقريب آمن 106% وتمركز المنتج فوق **نفس** ملف النتيجة، بلا إعادة تسمية
+    أو نسخ إضافية. يُستدعى فقط عند تفعيل العزل، لأن الصور التي يختار
+    المستخدم إبقاء خلفيتها لا ينبغي أن تُؤطر كمنتج معزول.
+    """
+    try:
+        from framing_zoom_patch import DEFAULT_AUTO_FRAME, save_framed_image
+    except Exception:
+        return 0
+    completed = 0
+    seen: set[str] = set()
+    for item in getattr(result, "items", []) or ():
+        raw = str(getattr(item, "output_path", "") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw)
+        if not path.is_file() and workspace is not None and not path.is_absolute():
+            path = Path(workspace) / path
+        if not path.is_file():
+            continue
+        key = str(path.resolve()).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if save_framed_image(path, DEFAULT_AUTO_FRAME):
+            completed += 1
+    return completed
 
 
 def merge_manual_link_result(current_result, update_result, source_names=()):
@@ -9157,7 +9197,13 @@ class MainWindow(QMainWindow):
             message = f"تم تعديل/ربط {count} صور دفعة واحدة. رقم الصنف النهائي: {resolved_code}"
         else:
             message = f"تم تعديل/ربط {count} صور وتحديث أرقام الأصناف النهائية."
-        self.status_label.setText(f"{message} تم تحديث التقارير وحزمة ZIP في الخلفية.")
+        auto_finished = int(getattr(self.manual_worker, "auto_finished_count", 0) or 0)
+        auto_note = (
+            f" نُفّذت معالجة النتيجة تلقائيًا ({auto_finished} صورة: عزل وتحسين وتمركز)."
+            if auto_finished else ""
+        )
+        self.status_label.setText(
+            f"{message}{auto_note} تم تحديث التقارير وحزمة ZIP في الخلفية.")
         # 2.9.9 — أُلغي تسخين البصمات البصرية مع إلغاء نسبة التشابه:
         # كان يقرأ كل صور الدفعة من القرص لبناء بصمات لم يبق لها فائدة.
 
