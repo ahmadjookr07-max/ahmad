@@ -898,7 +898,7 @@ def install_v2(main_window, data_root: Path) -> None:
         return state
 
     def v2_save_session(name: str = "") -> str:
-        from engine_v2.session_v2 import SessionState
+        from engine_v2.session_v2 import SessionState, image_identity_key
         store = main_window.v2_session_store
         snap = _capture_state()
         if store.state is None or not getattr(store.state, "session_id", ""):
@@ -929,9 +929,19 @@ def install_v2(main_window, data_root: Path) -> None:
             _src_name = _d.get("source_name") or _d.get("source_path") or ""
         store.state.position = {"source_name": _src_name, "row": _row, "col": 0}
         for d in snap.get("items", []):
-            key = d.get("source_name") or d.get("source_path")
+            source_name = str(d.get("source_name") or "")
+            source_path = str(d.get("source_path") or "")
+            key = image_identity_key(source_path, source_name)
             if not key:
                 continue
+            # ترحيل مفتاح الجلسة القديم (اسم مجرد) عندما تتوافر هوية
+            # المسار. ذلك يمنع صفًا قديمًا من استبدال صورة شقيقة تحمل
+            # الباركود نفسه عند الحفظ التالي.
+            legacy_key = source_name or source_path
+            if legacy_key and legacy_key != key:
+                old = store.state.images.get(legacy_key)
+                if isinstance(old, dict) and not old.get("source_path"):
+                    store.state.images.pop(legacy_key, None)
             store.upsert_image(
                 key,
                 source_path=d.get("source_path", ""),
@@ -1026,6 +1036,11 @@ def install_v2(main_window, data_root: Path) -> None:
                 items_data = []
                 for key, img in (state.images or {}).items():
                     _sp = str(_g(img, "source_path"))
+                    _key = str(key or "")
+                    # مفاتيح 3.4.17 تحمل مسار المصدر ببادئة path:؛ أما
+                    # الجلسات القديمة فتبقى مدعومة باسمها المجرد.
+                    if not _sp and _key.startswith("path:"):
+                        _sp = _key[5:]
                     # 2.9.13 (م-5): القاموس الخام إن حُفِط هو المصدر الأدق
                     _raw = _g(img, "raw", None)
                     if isinstance(_raw, dict) and _raw.get("source_name"):
@@ -1035,9 +1050,9 @@ def install_v2(main_window, data_root: Path) -> None:
                     _rev = str(_g(img, "review_path"))
                     items_data.append({
                         "source_path": _sp,
-                        "source_name": (key if "." in str(key)
-                                        else (Path(_sp).name if _sp
-                                              else str(key))),
+                        "source_name": (Path(_sp).name if _sp
+                                        else (_key[5:] if _key.startswith("name:")
+                                              else _key)),
                         "status": str(_g(img, "status") or "review"),
                         "item_code": str(_g(img, "item_code")),
                         "product_name": str(_g(img, "item_name")),

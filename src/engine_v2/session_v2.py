@@ -18,6 +18,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def image_identity_key(source_path: str = "", source_name: str = "") -> str:
+    """مفتاح جلسة ثابت للصورة، مستقل تمامًا عن الباركود ورقم الصنف.
+
+    قد تظهر عدة صور للباركود نفسه أو حتى تحمل الاسم المجرد نفسه في
+    مجلدات مختلفة. مسار المصدر هو الهوية الأقوى؛ الاسم لا يُستخدم إلا
+    عندما يغيب المسار. البادئة تمنع التباس اسم ملف مع مسار كامل.
+    """
+    path = str(source_path or "").strip()
+    if path:
+        return "path:" + path.replace("\\", "/").casefold()
+    name = str(source_name or "").strip()
+    return "name:" + name.replace("\\", "/").casefold() if name else ""
+
+
 @dataclass
 class SessionState:
     session_id: str = ""
@@ -27,7 +41,7 @@ class SessionState:
     excel_path: str = ""
     source_folder: str = ""
     output_folder: str = ""
-    images: dict = field(default_factory=dict)   # key=source_name -> dict
+    images: dict = field(default_factory=dict)   # key=هوية مسار المصدر -> dict
     position: dict = field(default_factory=dict)  # {source_name,row,col}
     # --- جديد 2.2 ---
     setup: dict = field(default_factory=dict)     # حالة صفحة الإعداد كاملة

@@ -86,9 +86,11 @@ def install_session_fidelity(main_window: Any) -> dict:
                 store = getattr(main_window, "v2_session_store", None)
                 result = getattr(main_window, "current_result", None)
                 if store is not None and result is not None:
+                    from engine_v2.session_v2 import image_identity_key
                     for it in getattr(result, "items", []) or []:
-                        key = (getattr(it, "source_name", "")
-                               or getattr(it, "source_path", ""))
+                        source_name = str(getattr(it, "source_name", "") or "")
+                        source_path = str(getattr(it, "source_path", "") or "")
+                        key = image_identity_key(source_path, source_name)
                         if not key:
                             continue
                         fields: dict[str, Any] = {}
@@ -127,10 +129,15 @@ def install_session_fidelity(main_window: Any) -> dict:
                 elif hasattr(state, "images"):
                     imgs = state.images or {}
                 if result is not None and imgs:
+                    from engine_v2.session_v2 import image_identity_key
                     for it in getattr(result, "items", []) or []:
-                        key = (getattr(it, "source_name", "")
-                               or getattr(it, "source_path", ""))
-                        d = imgs.get(key) or {}
+                        source_name = str(getattr(it, "source_name", "") or "")
+                        source_path = str(getattr(it, "source_path", "") or "")
+                        key = image_identity_key(source_path, source_name)
+                        # الجلسات السابقة كانت تحفظ بالاسم المجرد؛ نقرأها
+                        # للتوافق ثم يحولها الحفظ القادم إلى المفتاح الفريد.
+                        d = (imgs.get(key) or imgs.get(source_name)
+                             or imgs.get(source_path) or {})
                         if not isinstance(d, dict):
                             continue
                         op = str(d.get("output_path", "") or "")

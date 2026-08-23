@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.16"
+APP_VERSION = "3.4.17"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -7014,7 +7014,9 @@ class MainWindow(QMainWindow):
 
         status_cell = QTableWidgetItem(status_text)
         # تحميل كسول للمصغرات: لا نقرأ الصورة هنا — تُعبأ على دفعات لاحقاً لسلاسة الواجهة
-        status_cell.setData(Qt.UserRole, result_item.source_name)
+        # هوية الصف هي مسار المصدر لا اسم الصورة أو الباركود؛ قد تتكرر
+        # الأخيرة بين صور متعددة ولا يجوز أن تتشارك معاينة واحدة.
+        status_cell.setData(Qt.UserRole, _manual_source_key(result_item))
         status_cell.setTextAlignment(Qt.AlignCenter)
         status_cell.setToolTip(tooltip)
         color = STATUS_COLORS.get(result_item.status)
@@ -7259,9 +7261,13 @@ class MainWindow(QMainWindow):
                     self.current_result.items[:] = result_items
                 except Exception:
                     pass
-        self._result_items_by_name = {item.source_name: item for item in result_items}
+        # الاسم والباركود حقول وصفية قابلة للتكرار. المفتاح الوحيد
+        # للعرض والاختيار هو مسار مصدر الصورة (مع بديل آمن عند غيابه).
+        self._result_items_by_name = {
+            _manual_source_key(item): item for item in result_items
+        }
         self._result_search_cache = {
-            item.source_name: _normalize_search_text(" ".join((
+            _manual_source_key(item): _normalize_search_text(" ".join((
                 item.source_name, item.item_code, item.product_name,
                 item.barcode, STATUS_TEXT.get(item.status, item.status),
                 item.explanation)))
@@ -7347,6 +7353,18 @@ class MainWindow(QMainWindow):
         self.review_card.value.setText(str(summary["review"]))
         self.error_card.value.setText(str(summary["errors"]))
 
+    def _result_item_for_identity(self, key: str):  # type: ignore[no-untyped-def]
+        """يعيد عنصر النتيجة بالهوية الفريدة، أو باسم وحيد للتوافق القديم."""
+        wanted = str(key or "")
+        item = self._result_items_by_name.get(wanted)
+        if item is not None:
+            return item
+        if self.current_result is None or not wanted:
+            return None
+        matches = [candidate for candidate in self.current_result.items
+                   if str(getattr(candidate, "source_name", "") or "") == wanted]
+        return matches[0] if len(matches) == 1 else None
+
     def _selected_result_item(self):  # type: ignore[no-untyped-def]
         if self.current_result is None:
             return None
@@ -7357,7 +7375,7 @@ class MainWindow(QMainWindow):
         if source_cell is None:
             return None
         source_name = str(source_cell.data(Qt.UserRole) or "")
-        return self._result_items_by_name.get(source_name)
+        return self._result_item_for_identity(source_name)
 
     def _selected_result_items(self) -> list[BatchItemResult]:
         if self.current_result is None:
@@ -7372,7 +7390,7 @@ class MainWindow(QMainWindow):
             if source_cell is None:
                 continue
             source_name = str(source_cell.data(Qt.UserRole) or "")
-            item = self._result_items_by_name.get(source_name)
+            item = self._result_item_for_identity(source_name)
             if item is not None:
                 selected.append(item)
         return selected
@@ -7394,16 +7412,22 @@ class MainWindow(QMainWindow):
         return item.status == "matched" and float(item.confidence or 0.0) >= 0.98
 
     def _manual_reference_item(self) -> BatchItemResult | None:
-        item = self._result_items_by_name.get(self._manual_reference_source_name)
+        item = self._result_item_for_identity(self._manual_reference_source_name)
         if not self._is_high_confidence_reference(item):
             self._manual_reference_source_name = ""
             return None
         return item
 
     def _row_for_source_name(self, source_name: str) -> int:
+        # يدعم هوية الصف الحديثة أو اسم المصدر القديم إذا كان فريدًا فقط.
+        wanted = str(source_name or "")
+        if wanted not in self._result_items_by_name:
+            candidate = self._result_item_for_identity(wanted)
+            if candidate is not None:
+                wanted = _manual_source_key(candidate)
         for row in range(self.results_table.rowCount()):
             source_cell = self.results_table.item(row, 0)
-            if source_cell is not None and str(source_cell.data(Qt.UserRole) or "") == source_name:
+            if source_cell is not None and str(source_cell.data(Qt.UserRole) or "") == wanted:
                 return row
         return -1
 
@@ -7454,7 +7478,7 @@ class MainWindow(QMainWindow):
                 "لا يمكن اعتماد هذا الصف مرجعًا. اختر صورة باركود مطابقة بثقة 98% فأعلى، أو صورة سبق ربطها يدويًا.",
             )
             return
-        self._manual_reference_source_name = item.source_name
+        self._manual_reference_source_name = _manual_source_key(item)
         self._update_manual_selection_context()
         self.status_label.setText(
             f"تم اعتماد الصنف {item.item_code} مرجعًا. حدّد صور الواجهة والجانب غير المؤكدة ثم اربط المحدد."
@@ -7466,7 +7490,7 @@ class MainWindow(QMainWindow):
         if reference is None:
             current = self._selected_result_item()
             if self._is_high_confidence_reference(current):
-                self._manual_reference_source_name = current.source_name
+                self._manual_reference_source_name = _manual_source_key(current)
                 reference = current
         if reference is None:
             QMessageBox.information(self, APP_NAME, "اعتمد أولًا صف صورة الباركود المطابقة كمرجع.")
@@ -8182,7 +8206,7 @@ class MainWindow(QMainWindow):
         # يتوقعه المستخدم عند الضغط من داخل مكان التحرير.
         edit_name = getattr(self, "_individual_edit_source_name", "") or ""
         if edit_name:
-            selected = self._result_items_by_name.get(edit_name)
+            selected = self._result_item_for_identity(edit_name)
         if selected is None:
             selected = self._selected_result_item()
         if selected is None:
@@ -9079,7 +9103,7 @@ class MainWindow(QMainWindow):
         resolved_codes = sorted({item.item_code for item in linked_items if item.item_code})
         resolved_code = resolved_codes[0] if len(resolved_codes) == 1 else ""
         if linked_items:
-            self._manual_reference_source_name = linked_items[0].source_name
+            self._manual_reference_source_name = _manual_source_key(linked_items[0])
         # لا تستبدل الجلسة الكاملة بنتيجة الربط الجزئية؛ هذا هو سبب
         # اختفاء صور من الجدول رغم بقائها في المجلد النهائي.
         self.current_result = merge_manual_link_result(
