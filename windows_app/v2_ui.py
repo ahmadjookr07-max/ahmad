@@ -1104,6 +1104,12 @@ def install_v2(main_window, data_root: Path) -> None:
             main_window.current_result = result
             if state.get("workspace"):
                 main_window.current_workspace = Path(state["workspace"])
+            # قبل عرض الصفوف، أصلح مسارات نتائج قديمة صارت باسم الباركود
+            # أو تغيّر تسلسلها على القرص. لا يختار إصلاح المسار صورة شقيقة
+            # عند الغموض؛ يبقى الصف آمنًا بدل خلط المعاينات.
+            repair_paths = getattr(main_window, "_repair_restored_result_paths", None)
+            if callable(repair_paths):
+                repair_paths()
             row = int(state.get("current_row", -1))
             restore_pos = None
             if 0 <= row < len(items):

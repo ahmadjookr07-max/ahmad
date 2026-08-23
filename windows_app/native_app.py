@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.15"
+APP_VERSION = "3.4.16"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -5150,7 +5150,7 @@ class MainWindow(QMainWindow):
         pane.viewer.clear_crop()
         pane.viewer.set_crop_mode(False)
         item = self._individual_editable_item()
-        source = self._result_path(item.source_path) if item is not None else None
+        source = self._editor_input_path(item)
         if source is not None and source.is_file():
             pane.set_image(source)
             pane.viewer.fit_image()
@@ -7609,6 +7609,28 @@ class MainWindow(QMainWindow):
             candidate = self.current_workspace / candidate
         return candidate
 
+    def _editor_input_path(self, item) -> Path | None:
+        """أفضل ملف صالح لتحرير صف: النتيجة ثم المراجعة ثم المصدر.
+
+        لا يجوز أن يعيد فتح جلسةٍ محفوظة المحرر إلى صورة الكاميرا الخام
+        بينما ناتج العزل/التحرير موجود. كما لا نُخمّن صورة شقيقة عند
+        تكرر الباركود؛ الاستعادة لا تقع إلا عند مسار حتمي.
+        """
+        if item is None:
+            return None
+        for attr in ("output_path", "review_path"):
+            path = self._result_path(str(getattr(item, attr, "") or ""))
+            if path is not None and path.is_file():
+                return path
+        code = str(getattr(item, "item_code", "") or "")
+        if code:
+            recovered = self._recover_output_path(item, code)
+            if recovered is not None:
+                self._adopt_recovered_output_path(item, recovered)
+                return recovered
+        source = self._result_path(str(getattr(item, "source_path", "") or ""))
+        return source if source is not None and source.is_file() else None
+
     def _sync_editor_to_selection(self, item) -> None:
         """يُزامن المحرر الموحّد مع الصف المحدد (بند م-12).
 
@@ -7634,8 +7656,8 @@ class MainWindow(QMainWindow):
                 pass
             self._editor_loaded_source_name = ""
             return
-        source = self._result_path(item.source_path)
-        # المسودة المحفوطة لهذا الصف أولى من الأصل إن وجدت
+        source = self._editor_input_path(item)
+        # المسودة المحفوطة لهذا الصف أولى من النتيجة أو الأصل إن وجدت
         try:
             drafts = getattr(self, "_editor_drafts", None) or {}
             draft = drafts.get(item.source_name)
@@ -7736,7 +7758,15 @@ class MainWindow(QMainWindow):
             self._update_controls()
             return
         source = self._result_path(item.source_path)
-        target = self._result_path(item.output_path or item.review_path)
+        target = self._result_path(item.output_path)
+        if target is None or not target.is_file():
+            review_target = self._result_path(item.review_path)
+            target = review_target if review_target is not None and review_target.is_file() else None
+        if target is None and item.item_code:
+            recovered = self._recover_output_path(item, item.item_code)
+            if recovered is not None:
+                item = self._adopt_recovered_output_path(item, recovered)
+                target = recovered
         if target is None:
             target = source
         self._set_preview(self.source_preview, source)
@@ -8669,18 +8699,125 @@ class MainWindow(QMainWindow):
                 q = self._result_path(other.output_path)
                 if q is not None and q.is_file():
                     taken.add(self._norm_path_key(q))
+        # قد يكون الاسم النهائي برقم الصنف أو بباركود Excel حسب خيار
+        # المستخدم؛ المسار القديم قد يحمل الأول بينما الملف الفعلي يحمل
+        # الثاني، كما في `10003933_حبه` ⇐ `4823077615009_حبه`.
+        references = [str(code)]
+        barcode_ref = str(getattr(item, "barcode", "") or "").strip()
+        if barcode_ref and barcode_ref not in references:
+            references.append(barcode_ref)
         for folder in dirs:
             try:
-                pool = sorted(folder.glob(f"{code}_*"))
+                pool = []
+                for reference in references:
+                    pool.extend(folder.glob(f"{reference}_*"))
             except OSError:
                 continue
-            for cand in pool:
-                if not cand.is_file() or cand.suffix.lower() not in exts:
-                    continue
-                if self._norm_path_key(cand) in taken:
-                    continue
-                return cand
+            candidates_by_path = {
+                self._norm_path_key(cand): cand for cand in pool
+                if cand.is_file() and cand.suffix.lower() in exts
+                and self._norm_path_key(cand) not in taken
+            }
+            candidates = sorted(candidates_by_path.values(), key=lambda p: p.name)
+            # لا تختَر أول صورة شقيقة للصنف عند وجود أكثر من مرشح؛ ذلك
+            # يجعل صفًا يعرض صورة غيره. الاسترجاع مسموح فقط عند الحسم.
+            if len(candidates) == 1:
+                return candidates[0]
         return None
+
+    def _adopt_recovered_output_path(self, item, path: Path):
+        """يثبت المسار المستعاد في الذاكرة وملف الجلسة دون إسقاط الصف.
+
+        هذه الخطوة تمنع تكرار رسالة «ملف الصورة غير موجود» في كل معاينة،
+        وتحفظ الربط بين الصورة نفسها ومسارها الفعلي بعد إعادة التسمية.
+        """
+        current = self.current_result
+        if current is None:
+            return item
+        try:
+            replacement = _dc.replace(item, output_path=str(path))
+        except Exception:
+            try:
+                object.__setattr__(item, "output_path", str(path))
+                replacement = item
+            except Exception:
+                return item
+        items = list(getattr(current, "items", []) or [])
+        try:
+            index = next(i for i, existing in enumerate(items)
+                         if existing is item)
+        except StopIteration:
+            key = _manual_source_key(item)
+            matches = [i for i, existing in enumerate(items)
+                       if _manual_source_key(existing) == key]
+            if len(matches) != 1:
+                return replacement
+            index = matches[0]
+        items[index] = replacement
+        try:
+            if _dc.is_dataclass(current):
+                self.current_result = _dc.replace(current, items=items)
+            else:
+                current.items = items
+        except Exception:
+            return replacement
+        if self.current_workspace is not None:
+            try:
+                from engine_v2.state_sync_v2 import sync_result_items
+                sync_result_items(self.current_workspace, items)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[state_sync] تعذرت مزامنة المسار المستعاد: {exc}",
+                      file=sys.stderr)
+        return replacement
+
+    def _repair_restored_result_paths(self) -> int:
+        """يصلح المسارات المحسومة عند استعادة جلسة قبل أن يراها المستخدم.
+
+        لا يعيد معالجة الصور ولا يلمس الملفات؛ يطابق فقط مسارًا مفقودًا
+        بملف نتيجة وحيد غير مستخدم يحمل رقم الصنف أو باركود Excel. عند
+        تعدد المرشحات يترك الصف كما هو بدل خلط صورتين شقيقتين.
+        """
+        current = self.current_result
+        if current is None:
+            return 0
+        items = list(getattr(current, "items", []) or [])
+        repaired = 0
+        for index, item in enumerate(items):
+            output = self._result_path(str(getattr(item, "output_path", "") or ""))
+            if output is not None and output.is_file():
+                continue
+            code = str(getattr(item, "item_code", "") or "")
+            if not code:
+                continue
+            recovered = self._recover_output_path(item, code)
+            if recovered is None:
+                continue
+            try:
+                items[index] = _dc.replace(item, output_path=str(recovered))
+            except Exception:
+                try:
+                    object.__setattr__(item, "output_path", str(recovered))
+                    items[index] = item
+                except Exception:
+                    continue
+            repaired += 1
+        if not repaired:
+            return 0
+        try:
+            if _dc.is_dataclass(current):
+                self.current_result = _dc.replace(current, items=items)
+            else:
+                current.items = items
+        except Exception:
+            return 0
+        if self.current_workspace is not None:
+            try:
+                from engine_v2.state_sync_v2 import sync_result_items
+                sync_result_items(self.current_workspace, items)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[state_sync] تعذرت مزامنة إصلاح الجلسة: {exc}",
+                      file=sys.stderr)
+        return repaired
 
     def _set_primary_image(self) -> None:
         """يجعل الصورة المحددة صورة الواجهة الرئيسية للصنف (بلا رقم)،
