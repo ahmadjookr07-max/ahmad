@@ -24,6 +24,9 @@ def build_index() -> CatalogIndex:
         {"code": "10002234", "unit": "حبه", "size": "1", "barcode": "6287039470071"},
         {"code": "10002234", "unit": "حبه", "size": "1", "barcode": "6287039470095"},
         {"code": "10002234", "unit": "باكت", "size": "2", "barcode": "6287039480353"},
+        # قد يأتي EAN بمسافات ويتكرر في تصدير السعر؛ يُطبع ويُقبل عند قراءته.
+        {"code": "10002037", "unit": "كيس", "size": "4", "barcode": "62810 4499 3549"},
+        {"code": "10002037", "unit": "كيس", "size": "4", "barcode": "62810 4499 3549"},
     ]
     index._build_maps()
     return index
@@ -40,6 +43,11 @@ def run() -> None:
     assert ambiguous["barcode"] == "" and ambiguous["status"] == "ambiguous", ambiguous
     observed = index.resolve_retail_barcode("10002234", observed="6287039470095")
     assert observed["barcode"] == "6287039470095" and observed["unit"] == "حبه", observed
+    spaced = index.resolve_retail_barcode("10002037", unit="كيس",
+                                          observed="62810 4499 3549")
+    assert spaced["barcode"] == "6281044993549", spaced
+    assert spaced["status"] == "observed_excel_match", spaced
+    assert index.lookup_barcode("62810 4499 3549")["code"] == "10002037"
 
     old_root = integ.NAMING_DATA_ROOT
     try:

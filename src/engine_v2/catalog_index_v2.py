@@ -33,6 +33,16 @@ def _clean_code(v) -> str:
     return s
 
 
+def _normalize_barcode(value: object) -> str:
+    """يوحّد باركود Excel/الماسح قبل الفهرسة والمقارنة.
+
+    بعض ملفات المورد تضع مسافات بين أرقام EAN مثل ``62810 4499 3549``.
+    تبقى القيمة الحرفية محفوظة في الصف، لكن كل مفاتيح الربط تستخدم
+    الرقم المتصل حتى يطابق ناتج قارئ الباركود الخطي.
+    """
+    return re.sub(r"\s+", "", _clean_code(value).translate(_AR_DIGITS))
+
+
 def _unit_key(value: object) -> str:
     """مفتاح مقارنة داخلي للوحدة؛ الإخراج يحتفظ بنص Excel الحرفي."""
     return normalize_text(str(value or "")).replace(" ", "")
@@ -44,7 +54,7 @@ def is_valid_linear_retail_barcode(value: object) -> bool:
     لا يكفي أن تكون خلية Excel غير فارغة: قيم مثل ``3P-DT-10`` و
     ``006-090`` مراجع داخلية وليست باركودات بيع رقمية.
     """
-    barcode = _clean_code(value).translate(_AR_DIGITS).replace(" ", "")
+    barcode = _normalize_barcode(value)
     if not barcode.isdigit() or len(barcode) not in {8, 12, 13, 14}:
         return False
     total = 0
@@ -286,7 +296,7 @@ class CatalogIndex:
         self.by_normalized_name.clear()
         self._name_grams.clear()
         for idx, r in enumerate(self.rows):
-            bc = r.get("barcode", "")
+            bc = _normalize_barcode(r.get("barcode", ""))
             if bc and bc not in self.by_barcode:
                 self.by_barcode[bc] = idx
             code = r["code"]
@@ -306,7 +316,7 @@ class CatalogIndex:
 
     # ------------------------------------------------------------ lookup
     def lookup_barcode(self, barcode: str) -> dict | None:
-        bc = _clean_code(barcode)
+        bc = _normalize_barcode(barcode)
         idx = self.by_barcode.get(bc)
         if idx is not None:
             return self.rows[idx]
@@ -326,7 +336,7 @@ class CatalogIndex:
         rows: list[dict] = []
         wanted_unit = _unit_key(unit)
         for row in self.rows_for_code(code):
-            barcode = _clean_code(row.get("barcode", "")).translate(_AR_DIGITS).replace(" ", "")
+            barcode = _normalize_barcode(row.get("barcode", ""))
             if not is_valid_linear_retail_barcode(barcode):
                 continue
             if wanted_unit and _unit_key(row.get("unit", "")) != wanted_unit:
@@ -344,14 +354,21 @@ class CatalogIndex:
         Excel، أو إذا بقي مرشح رقمي واحد بعد تقييد الوحدة. لا يختار أول
         صف عند تعدد المرشحات؛ ``status`` يوضح سبب التوقف للمراجعة.
         """
-        observed = _clean_code(observed).translate(_AR_DIGITS).replace(" ", "")
+        observed = _normalize_barcode(observed)
         all_rows = self.retail_barcode_rows_for_code(code)
         scoped_rows = self.retail_barcode_rows_for_code(code, unit=unit)
         if observed:
             matches = [row for row in all_rows if row["barcode"] == observed]
-            if len(matches) == 1:
-                return {"barcode": observed, "unit": str(matches[0].get("unit", "")),
-                        "status": "observed_excel_match", "candidates": matches}
+            # تصدير السعر قد يكرر السطر نفسه عدة مرات. التكرار لا يجعل
+            # الباركود المقروء غامضًا ما دام الرقم مطابقًا حرفيًا للصنف؛
+            # وتُقدّم وحدة الصورة المطابقة إن كانت متاحة.
+            wanted_unit = _unit_key(unit)
+            scoped_matches = [row for row in matches
+                              if not wanted_unit or _unit_key(row.get("unit", "")) == wanted_unit]
+            chosen = scoped_matches or matches
+            if chosen:
+                return {"barcode": observed, "unit": str(chosen[0].get("unit", "")),
+                        "status": "observed_excel_match", "candidates": chosen}
             return {"barcode": "", "unit": unit, "status": "observed_not_in_excel",
                     "candidates": scoped_rows or all_rows}
         # قد يحمل اسم قديم «حبه» بينما صف الباركود الوحيد في Excel
@@ -391,7 +408,7 @@ class CatalogIndex:
             return exact
         # الربط اليدوي لا يطبق تسامح حذف check-digit: يجب أن يكون الباركود
         # المكتوب مطابقًا حرفيًا حتى لا تتحول سرعة البحث إلى ربط خاطئ.
-        barcode_idx = self.by_barcode.get(_clean_code(raw))
+        barcode_idx = self.by_barcode.get(_normalize_barcode(raw))
         if barcode_idx is not None:
             return self.rows[barcode_idx]
         matches = self.by_normalized_name.get(normalize_text(raw), [])
