@@ -103,10 +103,12 @@ class NutritionCropCanvas(QWidget):
             return None
         r = self._sel.normalized()
         H, W = self._img.shape[:2]
-        x0 = max(0, min(W - 1, int(round(r.left()))))
-        y0 = max(0, min(H - 1, int(round(r.top()))))
-        x1 = max(0, min(W, int(round(r.right()))))
-        y1 = max(0, min(H, int(round(r.bottom()))))
+        # QRectF.right/bottom موضع شامل؛ نعتمد x + width وy + height
+        # حتى تكون أبعاد الـ NumPy slice مطابقة لما يراه المستخدم.
+        x0 = max(0, min(W - 1, int(round(r.x()))))
+        y0 = max(0, min(H - 1, int(round(r.y()))))
+        x1 = max(0, min(W, int(round(r.x() + r.width()))))
+        y1 = max(0, min(H, int(round(r.y() + r.height()))))
         if x1 - x0 < 8 or y1 - y0 < 8:
             return None
         return (x0, y0, x1 - x0, y1 - y0)
@@ -163,12 +165,52 @@ class NutritionCropCanvas(QWidget):
         self._offset = QPointF((self.width() - w) / 2.0,
                                (self.height() - h) / 2.0)
 
+    def _clamp_offset(self) -> None:
+        """يبقي الصورة كاملة أو جزءًا كافيًا منها مرئيًا أثناء التحريك."""
+        if self._pixmap is None:
+            return
+        s = self._scale()
+        shown_w = self._pixmap.width() * s
+        shown_h = self._pixmap.height() * s
+        view_w, view_h = float(self.width()), float(self.height())
+        if shown_w <= view_w:
+            x = (view_w - shown_w) / 2.0
+        else:
+            x = min(0.0, max(view_w - shown_w, self._offset.x()))
+        if shown_h <= view_h:
+            y = (view_h - shown_h) / 2.0
+        else:
+            y = min(0.0, max(view_h - shown_h, self._offset.y()))
+        self._offset = QPointF(x, y)
+
+    def fit_image(self) -> None:
+        """إعادة الصورة كاملة إلى المنتصف بلا فقد للرؤية أو للتحديد."""
+        self._zoom = 1.0
+        self._update_fit()
+        self._center_image()
+        self.update()
+
+    def zoom_by(self, factor: float, anchor: QPointF | None = None) -> None:
+        """تقريب دقيق ومقيد حول المؤشر أو منتصف مساحة الاقتصاص."""
+        if self._pixmap is None:
+            return
+        anchor = anchor or QPointF(self.width() / 2.0, self.height() / 2.0)
+        image_point = self._screen_to_image(anchor)
+        self._zoom = max(0.7, min(8.0, self._zoom * float(factor)))
+        scale = self._scale()
+        self._offset = QPointF(anchor.x() - image_point.x() * scale,
+                               anchor.y() - image_point.y() * scale)
+        self._clamp_offset()
+        self.update()
+
     # ---------- أحداث ----------
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         old = self._fit_scale
         self._update_fit()
         if self._pixmap is not None and (self._zoom <= 1.001 or old <= 0):
             self._center_image()
+        else:
+            self._clamp_offset()
         super().resizeEvent(event)
 
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -180,18 +222,9 @@ class NutritionCropCanvas(QWidget):
         if self._pixmap is None:
             return
         delta = event.angleDelta().y()
-        factor = 1.15 if delta > 0 else 1 / 1.15
-        new_zoom = max(0.6, min(12.0, self._zoom * factor))
-        if abs(new_zoom - self._zoom) < 1e-6:
-            return
-        # تكبير حول موضع المؤشر: نثبت نقطة الصورة تحت المؤشر
-        mouse = QPointF(event.position())
-        img_pt = self._screen_to_image(mouse)
-        self._zoom = new_zoom
-        s = self._scale()
-        self._offset = QPointF(mouse.x() - img_pt.x() * s,
-                               mouse.y() - img_pt.y() * s)
-        self.update()
+        # 8% فقط: يسهّل تموضع جدول صغير ولا يقفز خارج الصورة.
+        factor = 1.08 if delta > 0 else 1 / 1.08
+        self.zoom_by(factor, QPointF(event.position()))
 
     def _hit_test(self, pos: QPointF) -> str | None:
         """يحدد ماذا تحت المؤشر: مقبض (tl,tr,bl,br,l,r,t,b) أو inside."""
@@ -255,6 +288,7 @@ class NutritionCropCanvas(QWidget):
         if self._mode == "pan":
             d = pos - self._press_pos
             self._offset = self._press_offset + d
+            self._clamp_offset()
             self.update()
             return
         if self._img is None:
@@ -375,7 +409,9 @@ class NutritionCropDialog(QDialog):
         self.setWindowTitle("حقائق التغذية — اقتصاص بجودة كاملة")
         self.setLayoutDirection(Qt.RightToLeft)
         self.setModal(True)
-        self.resize(880, 660)
+        # أبعاد عملية للصور الطولية والعرضية مع حد أدنى آمن للشاشات الأصغر.
+        self.setMinimumSize(680, 520)
+        self.resize(980, 740)
         self._alternatives = list(alternatives or [])
         self._current_path = str(source_path)
         self._img: np.ndarray | None = None
@@ -396,15 +432,33 @@ class NutritionCropDialog(QDialog):
         root.addWidget(title)
 
         hint = QLabel(
-            "اسحب لتحديد الجدول • حرّك الحواف بالمقابض • عجلة الماوس للتكبير"
-            " • السحب بالزر الأيمن لتحريك العرض")
+            "اسحب لتحديد الجدول • حرّك الحواف بالمقابض • التقريب دقيق 8%"
+            " • حرّك العرض بالسحب بالزر الأيمن • زر «عرض كامل» يعيد الصورة كاملة")
         hint.setObjectName("nutritionCropHint")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         self.canvas = NutritionCropCanvas(self)
+        self.canvas.setMinimumHeight(280)
         self.canvas.selection_changed.connect(self._refresh_state)
         root.addWidget(self.canvas, 1)
+
+        view_tools = QHBoxLayout()
+        view_tools.setSpacing(8)
+        self.zoom_out_button = QPushButton("− تقليل")
+        self.zoom_fit_button = QPushButton("عرض كامل")
+        self.zoom_in_button = QPushButton("+ تقريب")
+        self.zoom_out_button.setToolTip("تقليل دقيق 8%")
+        self.zoom_fit_button.setToolTip("إعادة الصورة كاملة إلى الوسط دون مسح تحديدك")
+        self.zoom_in_button.setToolTip("تقريب دقيق 8%")
+        self.zoom_out_button.clicked.connect(lambda: self.canvas.zoom_by(1 / 1.08))
+        self.zoom_fit_button.clicked.connect(self.canvas.fit_image)
+        self.zoom_in_button.clicked.connect(lambda: self.canvas.zoom_by(1.08))
+        view_tools.addWidget(self.zoom_out_button)
+        view_tools.addWidget(self.zoom_fit_button)
+        view_tools.addWidget(self.zoom_in_button)
+        view_tools.addStretch(1)
+        root.addLayout(view_tools)
 
         root.addWidget(self._build_mode_bar())
 
@@ -442,7 +496,8 @@ class NutritionCropDialog(QDialog):
             "يحفظ الاقتصاص كصورة جديدة مرتبطة برقم الصنف —\n"
             "النافذة تبقى مفتوحة لتقتص وتحفظ المزيد من نفس الصورة")
         self.save_button.clicked.connect(self._save_current)
-        for b in (self.detect_button, self.rotate_button,
+        for b in (self.zoom_out_button, self.zoom_fit_button, self.zoom_in_button,
+                  self.detect_button, self.rotate_button,
                   self.preview_button, self.switch_button, self.clear_button,
                   self.cancel_button, self.save_button):
             b.setMinimumHeight(36)

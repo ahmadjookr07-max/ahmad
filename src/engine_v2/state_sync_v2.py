@@ -36,6 +36,8 @@ from typing import Any, Iterable, Mapping
 __all__ = [
     "STATE_NAME",
     "sync_renamed_outputs",
+    "sync_removed_outputs",
+    "sync_result_items",
     "normalize_path_key",
 ]
 
@@ -103,6 +105,122 @@ def _iter_state_items(state: Any) -> Iterable[dict]:
         for entry in container:
             if isinstance(entry, dict):
                 yield entry
+
+
+def sync_result_items(workspace: str | Path, items: Iterable[Any]) -> dict:
+    """يستبدل عناصر نتيجة المهمة بالحالة الحية للواجهة كتابةً ذرية.
+
+    يلزم ذلك بعد اقتصاص التغذية: الصورة تُضاف في الذاكرة فورًا، لكن
+    العامل اللاحق لا يعرفها ما لم تُكتب أيضًا في ``job_state.json``.
+    """
+    report = {"count": 0, "written": False, "reason": ""}
+    try:
+        state_path = Path(workspace) / STATE_NAME
+        if not state_path.is_file():
+            report["reason"] = "لا توجد حالة محفوظة"
+            return report
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        serial: list[dict] = []
+        for item in items or ():
+            if isinstance(item, dict):
+                serial.append(dict(item))
+                continue
+            try:
+                from dataclasses import asdict, is_dataclass
+                value = asdict(item) if is_dataclass(item) else None
+            except Exception:
+                value = None
+            if not isinstance(value, dict):
+                value = {name: getattr(item, name) for name in (
+                    "source_path", "source_name", "status", "item_code",
+                    "product_name", "barcode", "confidence", "explanation",
+                    "output_path", "review_path", "match_source")
+                    if hasattr(item, name)}
+            serial.append(value)
+        result = state.get("result") if isinstance(state, dict) else None
+        if isinstance(result, dict):
+            result["items"] = serial
+        elif isinstance(state, dict):
+            state["items"] = serial
+        else:
+            report["reason"] = "شكل حالة غير مدعوم"
+            return report
+        report["count"] = len(serial)
+        report["written"] = _atomic_write_json(state_path, state)
+        if not report["written"]:
+            report["reason"] = "تعذرت كتابة الحالة"
+    except Exception as exc:  # noqa: BLE001
+        report["reason"] = f"فشل غير متوقع: {exc}"
+    return report
+
+
+def sync_removed_outputs(workspace: str | Path,
+                         source_names: Iterable[str] = (),
+                         output_paths: Iterable[str] = ()) -> dict:
+    """يحذف سجلات النتائج المحذوفة من ``job_state.json`` كتابةً ذرية.
+
+    حذف الصف من الواجهة وحدها ينهزم أمام عامل خلفي أو استعادة جلسة تقرأ
+    الحالة القديمة. لذلك يعدّ حذفًا نهائيًا فقط عندما يزال من الذاكرة
+    **ومن الحالة على القرص** معًا.
+    """
+    report = {"removed": 0, "written": False, "reason": ""}
+    try:
+        state_path = Path(workspace) / STATE_NAME
+        if not state_path.is_file():
+            report["reason"] = "لا توجد حالة محفوظة"
+            return report
+        names = {str(name or "") for name in source_names if str(name or "")}
+        paths = {normalize_path_key(path) for path in output_paths if str(path or "")}
+        if not names and not paths:
+            report["reason"] = "لا عناصر للحذف"
+            return report
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        changed = 0
+        containers: list[list] = []
+        result = state.get("result") if isinstance(state, dict) else None
+        if isinstance(result, dict) and isinstance(result.get("items"), list):
+            containers.append(result["items"])
+        if isinstance(state, dict) and isinstance(state.get("items"), list):
+            containers.append(state["items"])
+        def _matches_removed(value: str) -> bool:
+            raw = str(value or "")
+            if not raw:
+                return False
+            keys = {normalize_path_key(raw)}
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                keys.add(normalize_path_key(Path(workspace) / candidate))
+            return bool(keys & paths)
+
+        for items in containers:
+            kept = []
+            for entry in items:
+                if not isinstance(entry, dict):
+                    kept.append(entry)
+                    continue
+                entry_has_output = any(str(entry.get(field) or "")
+                                       for field in _PATH_FIELDS)
+                # لا نحذف باسم المصدر إذا كان للسجل مخرج: اقتصاص التغذية
+                # قد يشترك في source_name مع صورة الصنف الأساسية.
+                by_name = (not entry_has_output
+                           and str(entry.get("source_name") or "") in names)
+                by_path = any(_matches_removed(str(entry.get(field) or ""))
+                              for field in _PATH_FIELDS if entry.get(field))
+                if by_name or by_path:
+                    changed += 1
+                else:
+                    kept.append(entry)
+            items[:] = kept
+        report["removed"] = changed
+        if changed:
+            report["written"] = _atomic_write_json(state_path, state)
+            if not report["written"]:
+                report["reason"] = "تعذرت كتابة الحالة"
+        else:
+            report["reason"] = "لا سجل مطابق"
+    except Exception as exc:  # noqa: BLE001
+        report["reason"] = f"فشل غير متوقع: {exc}"
+    return report
 
 
 def sync_renamed_outputs(workspace: str | Path,

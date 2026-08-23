@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import dataclasses as _dc
 import json  # 2.9.11: كان مفقودًا — فكل حفظ/استعادة لخيار التسمية
                # ينفجر بـ NameError، والاستعادة تكتمه وتعود للوحدة الواحدة
 import math
@@ -224,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.5"
+APP_VERSION = "3.4.6"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -6073,6 +6074,7 @@ class MainWindow(QMainWindow):
             applied = apply_legacy_plan(plan)
 
         self._legacy_folder = folder
+        self._clear_deleted_result_tombstones()
         self.current_workspace = folder
         self.current_result = self._legacy_result(plan, folder)
         # 2.9.7 (يغلق A1 + A4): يجب أن يصير المجلد المنجز مساحة
@@ -6477,6 +6479,7 @@ class MainWindow(QMainWindow):
 
     def _on_batch_completed(self, result: BatchRunResult) -> None:
         self._pending_batch_workspace = None
+        self._clear_deleted_result_tombstones()
         self.current_result = result
         self.current_workspace = Path(result.workspace)
         self.progress.setRange(0, max(result.summary["total"], 1))
@@ -6955,6 +6958,112 @@ class MainWindow(QMainWindow):
             )
         self._fill_restore_position = None
 
+    def _remember_nutrition_result_item(self, item) -> None:
+        """يحجز اقتصاص تغذية مستقلًا حتى تلحق به أي نتيجة عامل قديمة."""
+        raw = str(getattr(item, "output_path", "") or "")
+        if not raw:
+            return
+        p = self._result_path(raw)
+        key = self._norm_path_key(str(p or raw))
+        registry = getattr(self, "_nutrition_result_items", None)
+        if not isinstance(registry, dict):
+            registry = self._nutrition_result_items = {}
+        registry[key] = item
+
+    def _restore_nutrition_result_items(self, items):
+        """يعيد فقط اقتصاصات التغذية الموجودة فعليًا إذا أسقطتها لقطة قديمة."""
+        registry = getattr(self, "_nutrition_result_items", None)
+        if not isinstance(registry, dict) or not registry:
+            return list(items or ())
+        result = list(items or ())
+        seen = set()
+        for item in result:
+            for field in ("output_path", "review_path"):
+                raw = str(getattr(item, field, "") or "")
+                if raw:
+                    p = self._result_path(raw)
+                    seen.add(self._norm_path_key(str(p or raw)))
+        for key, nutrition in list(registry.items()):
+            raw = str(getattr(nutrition, "output_path", "") or "")
+            p = self._result_path(raw) if raw else None
+            if p is None or not p.is_file():
+                registry.pop(key, None)
+                continue
+            if key in seen:
+                continue
+            code = str(getattr(nutrition, "item_code", "") or "")
+            insert_at = -1
+            for idx, existing in enumerate(result):
+                if str(getattr(existing, "item_code", "") or "") == code:
+                    insert_at = idx
+            result.insert(insert_at + 1 if insert_at >= 0 else len(result), nutrition)
+            seen.add(key)
+        return result
+
+    def _forget_deleted_nutrition_items(self, items) -> None:
+        registry = getattr(self, "_nutrition_result_items", None)
+        if not isinstance(registry, dict):
+            return
+        for item in items or ():
+            for field in ("output_path", "review_path"):
+                raw = str(getattr(item, field, "") or "")
+                if raw:
+                    p = self._result_path(raw)
+                    registry.pop(self._norm_path_key(str(p or raw)), None)
+
+    def _remember_deleted_result_items(self, items) -> tuple[set[str], set[str]]:
+        """يسجل حذفًا مقصودًا حتى لا تعيده نتيجة عامل متأخرة أو جلسة قديمة."""
+        path_keys = getattr(self, "_deleted_result_path_keys", None)
+        if not isinstance(path_keys, set):
+            path_keys = self._deleted_result_path_keys = set()
+        names = getattr(self, "_deleted_result_source_names", None)
+        if not isinstance(names, set):
+            names = self._deleted_result_source_names = set()
+        raw_paths: set[str] = set()
+        for item in items or ():
+            found_path = False
+            for field in ("output_path", "review_path"):
+                raw = str(getattr(item, field, "") or "")
+                if not raw:
+                    continue
+                p = self._result_path(raw)
+                key = self._norm_path_key(str(p or raw))
+                path_keys.add(key)
+                raw_paths.add(str(p or raw))
+                found_path = True
+            # لا نستعمل source_name حين توجد صورة ناتجة: اقتصاص التغذية
+            # يشارك المصدر مع صورة الصنف، وحظره سيخفي الصورتين خطأً.
+            if not found_path:
+                names.add(str(getattr(item, "source_name", "") or ""))
+        return names, raw_paths
+
+    def _drop_deleted_result_items(self, items):
+        """يحجب فقط الصفوف المحذوفة صراحةً من لقطة عامل قديمة."""
+        path_keys = getattr(self, "_deleted_result_path_keys", set())
+        names = getattr(self, "_deleted_result_source_names", set())
+        if not path_keys and not names:
+            return list(items or ())
+        kept = []
+        for item in items or ():
+            paths = []
+            for field in ("output_path", "review_path"):
+                raw = str(getattr(item, field, "") or "")
+                if raw:
+                    p = self._result_path(raw)
+                    paths.append(self._norm_path_key(str(p or raw)))
+            if any(key in path_keys for key in paths):
+                continue
+            if not paths and str(getattr(item, "source_name", "") or "") in names:
+                continue
+            kept.append(item)
+        return kept
+
+    def _clear_deleted_result_tombstones(self) -> None:
+        """دفعة/مجلد جديد مستقل، فلا ترث حذف مساحة العمل السابقة."""
+        self._deleted_result_path_keys = set()
+        self._deleted_result_source_names = set()
+        self._nutrition_result_items = {}
+
     def _populate_results(self, restore_position: tuple[str, int, int] | None = None) -> None:
         self._stop_progressive_fill()
         self.results_table.setRowCount(0)
@@ -6967,7 +7076,18 @@ class MainWindow(QMainWindow):
             self._update_summary(None)
             return
 
-        result_items = list(self.current_result.items)
+        result_items = self._drop_deleted_result_items(list(self.current_result.items))
+        result_items = self._restore_nutrition_result_items(result_items)
+        if len(result_items) != len(self.current_result.items):
+            # النتيجة قد تكون لقطة أقدم من عامل خلفي؛ نوحّد الذاكرة معها
+            # حتى لا يحفظ autosave العناصر المحذوفة من جديد.
+            try:
+                self.current_result = _dc.replace(self.current_result, items=result_items)
+            except Exception:
+                try:
+                    self.current_result.items[:] = result_items
+                except Exception:
+                    pass
         self._result_items_by_name = {item.source_name: item for item in result_items}
         self._result_search_cache = {
             item.source_name: _normalize_search_text(" ".join((
@@ -7968,17 +8088,27 @@ class MainWindow(QMainWindow):
         وإن لم يُوجد صفٌّ للصنف (حالة نادرة) يُلحَق في الذيل
         كالسابق — لا نفقد الصف أبدًا.
         """
-        items = self.current_result.items
+        if self.current_result is None:
+            return
+        # بعض محركات النتائج تستعمل dataclass مجمّدًا أو tuple؛ نعمل
+        # على نسخة ثم نستبدل النتيجة كلها عند الحاجة بدل setattr هش.
+        items = list(self.current_result.items or ())
         code = str(getattr(new_item, "item_code", "") or "")
         last = -1
         if code:
             for index, existing in enumerate(items):
                 if str(getattr(existing, "item_code", "") or "") == code:
                     last = index
-        if last < 0:
-            items.append(new_item)
-        else:
-            items.insert(last + 1, new_item)
+        items.insert(last + 1 if last >= 0 else len(items), new_item)
+        try:
+            self.current_result = _dc.replace(self.current_result, items=items)
+        except Exception:
+            try:
+                self.current_result.items[:] = items
+            except Exception:
+                # لا نرمي خطأ بعد نجاح حفظ الصورة؛ ستلتقط الجلسة والحالة
+                # الصف عند إعادة البناء بدل إتلاف الملف الموجود على القرص.
+                pass
 
     def _save_nutrition_result(self, selected: BatchItemResult,
                                cropped, on_canvas: bool,
@@ -8044,9 +8174,24 @@ class MainWindow(QMainWindow):
             # صنفها، فتنقطع عن أخواتها ويضيع الترتيب المفهوم.
             # الآن تُدرَج بعد آخر صفٍّ يحمل رمز الصنف نفسه.
             self._insert_item_beside_group(new_item)
+            # هوية مستقلة: لا تشارك source_name مع الصورة الأساسية،
+            # وتبقى مرئية حتى إن وصلت نتيجة عامل أقدم بعد دقائق.
+            self._remember_nutrition_result_item(new_item)
+            if self.current_workspace is not None:
+                try:
+                    from engine_v2.state_sync_v2 import sync_result_items
+                    sync_result_items(self.current_workspace, self.current_result.items)
+                except Exception as exc:
+                    print(f"[state_sync] تعذرت مزامنة حقائق التغذية: {exc}", file=sys.stderr)
             self._populate_results(restore_position=position)
             # تحديث حزمة التسليم ZIP لتشمل الصورة الجديدة — بصمت.
             self._refresh_delivery_zip()
+            try:
+                saver = getattr(self, "v2_save_session", None)
+                if callable(saver):
+                    saver()
+            except Exception as exc:
+                print(f"[session] تعذر حفظ حقائق التغذية: {exc}", file=sys.stderr)
         merged_note = ("مدموجة داخل صورة الصنف" if placement is not None
                        else "كصورة منفصلة")
         self.status_label.setText(
@@ -8083,6 +8228,9 @@ class MainWindow(QMainWindow):
         position = self._capture_results_position()
         deleted = 0
         deleted_sources: set[str] = set()
+        # يسجل قبل إزالة العناصر؛ العامل المتأخر قد يحمل نتيجة أقدم.
+        _deleted_names, deleted_output_paths = self._remember_deleted_result_items(selected_items)
+        self._forget_deleted_nutrition_items(selected_items)
 
         # لا تحذف ملفًا يشير إليه صف آخر غير محدد. قد يحدث هذا بعد
         # تعديل/دمج تغذية أو استئناف جلسة قديمة حيث يتشارك صفان صورة واحدة.
@@ -8154,6 +8302,22 @@ class MainWindow(QMainWindow):
             self._individual_edit_source_name = ""
             self._individual_preview_path = None
             self._individual_preview_active = False
+        # لا تبقَ الحالة المحفوظة أقدم من الواجهة؛ وإلا تعيد الجلسة
+        # أو نتيجة عامل لاحقة الصفوف المحذوفة بعد دقائق.
+        if self.current_workspace is not None:
+            try:
+                from engine_v2.state_sync_v2 import sync_removed_outputs
+                sync_removed_outputs(self.current_workspace,
+                                     source_names=_deleted_names,
+                                     output_paths=deleted_output_paths)
+            except Exception as exc:
+                print(f"[state_sync] تعذرت مزامنة الحذف: {exc}", file=sys.stderr)
+        try:
+            saver = getattr(self, "v2_save_session", None)
+            if callable(saver):
+                saver()
+        except Exception as exc:
+            print(f"[session] تعذر حفظ الحذف: {exc}", file=sys.stderr)
         self._populate_results(restore_position=position)
         self._refresh_delivery_zip()
         self.status_label.setText(f"حُذفت {deleted} صورة من النتائج")
@@ -8434,7 +8598,6 @@ class MainWindow(QMainWindow):
         # فالإسناد المباشر يرفع FrozenInstanceError ويترك القرص
         # مُعاد التسمية والجدول قديمًا — ولذلك يُستبدل العنصر
         # بنسخة معدّلة عبر dataclasses.replace داخل قائمة جديدة.
-        import dataclasses as _dc
         # 2.9.9 — تطبيع المسارات قبل المطابقة. مقارنة `str(old)`
         # الخام تفشل بصمت على ويندوز متى اختلفت حالة الأحرف أو
         # الفواصل أو وجد رابط رمزي — فيُعاد التسمية على القرص
