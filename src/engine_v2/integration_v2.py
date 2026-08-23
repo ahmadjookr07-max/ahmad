@@ -502,17 +502,20 @@ def build_output_stems(out_dir: str | Path, item: str,
     settings = _current_naming_settings()
     if settings is None or not settings.enabled:
         return [build_name(item, next_sequence(stems, item), unit)]
-    # وحدات الإكسل حرفيًا وبترتيبه — أمر المالك «بنفس ترتيبها».
-    # الوسيط ``unit`` احتياط أخير حين لا كتالوج للصنف.
+    # ترتيب Excel يُحفظ لسياسات الدمج/التكرار، أما وحدة الصورة الواحدة
+    # فتؤخذ من صف العبوة=1 حتى لا يختار الباركود وحدة صف عشوائي.
     units = (_units_from_catalog(item, excel_order=True)
              or ([unit] if unit else []))
+    preferred_units = _units_from_catalog(item, excel_order=False)
+    chosen_unit = (preferred_units[0] if preferred_units else unit)
     barcode = _barcode_from_catalog(item)
     # في نمط الباركود، عدّ التسلسل على بادئة الباركود لا رقم الصنف.
     identity = barcode if getattr(settings, "reference_mode", "item_code") == "barcode" else item
     seq = _next_free_sequence(stems, identity)
     planned = plan_stems_for_policy(item, units, seq, total=seq,
-                                    settings=settings, chosen_unit=unit,
+                                    settings=settings, chosen_unit=chosen_unit,
                                     barcode=barcode)
+
     # لا اسم بديل برقم الصنف عند اختيار الباركود وغياب قيمته في Excel.
     # يُترك الاسم للمحرك ثم تظهر الحالة للمراجعة؛ لا ربط مضلل.
     return planned or [build_name(item, next_sequence(stems, item), unit)]

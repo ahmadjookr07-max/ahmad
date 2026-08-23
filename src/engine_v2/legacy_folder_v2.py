@@ -235,6 +235,20 @@ def _parse_catalog_barcode_stem(stem: str, index) -> tuple[str, str, int, str] |
     if record and record.get("code"):
         return (str(record["code"]), "", 0, "catalog_barcode")
 
+    # الصيغة المعتمدة الجديدة: ``barcode_unit`` ثم ``barcode_unit-1``.
+    # نقسم من اليمين فقط كي لا نكسر باركودًا يحوي شرطات داخلية.
+    ref, underscore, unit_part = raw.rpartition("_")
+    if underscore and ref and unit_part:
+        unit = unit_part
+        seq = 0
+        unit_base, dash, tail = unit_part.rpartition("-")
+        if dash and unit_base and tail.isdigit():
+            unit, seq = unit_base, max(1, int(tail))
+        record = lookup(ref)
+        if record and record.get("code"):
+            return (str(record["code"]), unit, seq,
+                    "catalog_barcode_unit")
+
     ref, dash, suffix = raw.rpartition("-")
     if dash and ref and suffix.isdigit():
         record = lookup(ref)

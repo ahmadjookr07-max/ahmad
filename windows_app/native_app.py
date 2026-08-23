@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.7"
+APP_VERSION = "3.4.8"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2480,21 +2480,29 @@ class MainWindow(QMainWindow):
             "يُحفظ اختيارك ويُستعاد في المرة القادمة.")
         self.join_units_check.toggled.connect(self._on_join_units_toggled)
         catalog_layout.addWidget(self.join_units_check)
-        # نفس مسار Excel السابق، مع اختيار المرجع الذي يظهر في الاسم النهائي.
+        # خيار المرجع في الواجهة الرئيسية، بعد Excel وسياسة الوحدة مباشرة
+        # وقبل إضافة الصور: اختيار واحد يسري على الدفعة الجديدة والمجلد
+        # المنجز السابق من ملف الإعداد نفسه.
         reference_row = QHBoxLayout()
-        reference_label = QLabel("مرجع الربط والتسمية من Excel:")
+        reference_label = QLabel("الاسم النهائي للصور (من Excel):")
         self.reference_mode_combo = QComboBox()
         self.reference_mode_combo.setObjectName("referenceModeCombo")
-        self.reference_mode_combo.addItem("رقم الصنف + الوحدة", "item_code")
-        self.reference_mode_combo.addItem("رقم الباركود", "barcode")
+        self.reference_mode_combo.addItem("رقم الصنف + وحدة Excel", "item_code")
+        self.reference_mode_combo.addItem("باركود Excel + وحدة Excel", "barcode")
         self.reference_mode_combo.setToolTip(
-            "رقم الصنف + الوحدة: 10011205_حبه-1\n"
-            "رقم الباركود: 6287021750464-1\n\n"
-            "في الحالتين يتم الربط من سجل Excel نفسه؛ يتغير المرجع الظاهر فقط.")
+            "رقم الصنف: 10011205_حبه ثم 10011205_حبه-1\n"
+            "باركود Excel: 6287021750464_حبه ثم 6287021750464_حبه-1\n\n"
+            "الوحدة تُقرأ من Excel في الحالتين. يسري الاختيار فورًا على\n"
+            "الصور الجديدة وعلى «فتح مجلد منجز» للصور السابقة.")
         self.reference_mode_combo.currentIndexChanged.connect(self._on_reference_mode_changed)
         reference_row.addWidget(reference_label)
         reference_row.addWidget(self.reference_mode_combo, 1)
         catalog_layout.addLayout(reference_row)
+        self.reference_mode_hint = QLabel(
+            "اختره قبل إضافة الصور أو فتح مجلد منجز؛ لا يغيّر الربط، بل المرجع الظاهر في الاسم فقط.")
+        self.reference_mode_hint.setObjectName("referenceModeHint")
+        self.reference_mode_hint.setWordWrap(True)
+        catalog_layout.addWidget(self.reference_mode_hint)
         # معاينة حيّة للاسم الناتج: المالك يرى أثر الخيار بعينه
         # قبل تشغيل المعالجة بدل أن يكتشفه في 991 ملفًا بعد فوات الأوان.
         self.naming_preview_label = QLabel("")
@@ -5925,37 +5933,41 @@ class MainWindow(QMainWindow):
         if not units:
             units = ["حبه", "شدة", "كرتون"]
         try:
-            from engine_v2.naming_v2 import (
-                build_name_join_all, NamingSettings)
+            from engine_v2.naming_v2 import NamingSettings, plan_stems_for_policy
+            data = dict(getattr(self, "v2_naming_policy", {}) or {})
+            settings = NamingSettings.from_dict(data)
+            settings.reference_mode = mode
+            # الخانة الرئيسية هي المرجع المباشر للمستخدم؛ نجعلها تغلب
+            # سياسة دمج قديمة محمّلة إلى أن يحفظ المستخدم تغييرًا جديدًا.
+            if join_on:
+                settings.unit_policy = "join_all_units"
             barcode = ""
+            primary_unit = units[0] if units else "حبه"
             if idx is not None:
                 try:
                     record = idx.lookup_code(item)
                     barcode = str((record or {}).get("barcode", "") or "")
+                    primary_unit = str(idx.primary_unit_for_code(item) or primary_unit)
                 except Exception:
                     barcode = ""
-            if mode == "barcode":
-                s = NamingSettings(reference_mode="barcode")
-                if barcode:
-                    base = s.render(item, 1, "", total=3, barcode=barcode)
-                    second = s.render(item, 2, "", total=3, barcode=barcode)
-                    third = s.render(item, 3, "", total=3, barcode=barcode)
-                    head = "مُفعّل — باركود الصنف من Excel"
-                else:
-                    base, second, third = "باركود_Excel_مفقود", "—", "—"
-                    head = "معلّق — الصنف لا يملك باركودًا في Excel"
-            elif join_on:
-                base = build_name_join_all(item, units, 1, total=3)
-                second = build_name_join_all(item, units, 2, total=3)
-                third = build_name_join_all(item, units, 3, total=3)
-                head = f"مُفعّل — دمج {len(units)} وحدات من الإكسل"
+            if mode == "barcode" and not barcode:
+                base, second, third = "باركود_Excel_مفقود", "—", "—"
+                head = "معلّق — الصنف لا يملك باركودًا في Excel"
             else:
-                s = NamingSettings()
-                unit = units[0] if units else "حبه"
-                base = s.render(item, 1, unit, total=3)
-                second = s.render(item, 2, unit, total=3)
-                third = s.render(item, 3, unit, total=3)
-                head = f"مُلغى — وحدة واحدة ({unit})"
+                def preview_for(sequence: int) -> str:
+                    stems = plan_stems_for_policy(
+                        item, units, sequence, total=3, settings=settings,
+                        chosen_unit=primary_unit, barcode=barcode)
+                    return " / ".join(stems) if stems else "—"
+                base, second, third = (preview_for(1), preview_for(2),
+                                       preview_for(3))
+                reference = "باركود Excel + الوحدة" if mode == "barcode" else "رقم الصنف + الوحدة"
+                if settings.unit_policy == "join_all_units":
+                    head = f"مُفعّل — {reference} مع دمج {len(units)} وحدات من Excel"
+                elif settings.unit_policy == "replicate_all_units":
+                    head = f"مُفعّل — {reference} بنسخة لكل وحدة من Excel"
+                else:
+                    head = f"مُفعّل — {reference} بوحدة Excel: {primary_unit}"
             self.naming_preview_label.setText(
                 f"{head}\n"
                 f"الواجهة ★: {base}.webp\n"
@@ -6064,8 +6076,9 @@ class MainWindow(QMainWindow):
         if not groups:
             QMessageBox.information(
                 self, APP_NAME,
-                "لم أجد صورًا بأسماء تبدأ برقم الصنف في هذا المجلد.\n"
-                "الأسماء المدعومة: رقم_الوحدة أو رقم_الوحدة-1 أو رقم_الوحدة_2.")
+                "لم أجد صورًا قابلة للربط في هذا المجلد.\n"
+                "الأسماء المدعومة: رقم_الوحدة أو باركودExcel_الوحدة،\n"
+                "مع الأولى بلا رقم ثم -1 و-2 للصور الإضافية.")
             return
 
         plan = plan_legacy_renames(groups, index, unparsed)

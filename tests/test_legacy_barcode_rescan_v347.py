@@ -34,7 +34,7 @@ def run() -> None:
         for name in (
             "006-090.webp", "006-090-1.webp",
             "3P-DT-10.webp", "3P-DT-10-1.webp",
-            "HWL640.webp", "6287021750464.webp", "6287021750464-1.webp",
+            "HWL640_حبه.webp", "6287021750464_حبه.webp", "6287021750464_حبه-1.webp",
             "غير_معروف.webp",
         ):
             (folder / name).write_bytes(b"image")
@@ -46,6 +46,7 @@ def run() -> None:
         assert sequences(groups["10002"]) == [0, 1]
         assert sequences(groups["10003"]) == [0]
         assert sequences(groups["10004"]) == [0, 1]
+        assert [image.unit for image in groups["10004"].images] == ["حبه", "حبه"]
     print("OK: text and hyphenated Excel barcodes rescan to their item codes")
 
 

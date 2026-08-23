@@ -23,8 +23,12 @@ def run() -> None:
         combo = window.reference_mode_combo
         assert combo.itemData(0) == "item_code"
         assert combo.itemData(1) == "barcode"
+        assert "وحدة Excel" in combo.itemText(0)
+        assert "وحدة Excel" in combo.itemText(1)
+        assert "مجلد منجز" in window.reference_mode_hint.text()
         combo.setCurrentIndex(1)
         app.processEvents()
+        assert "باركود_Excel_مفقود" in window.naming_preview_label.text()
         path = window._naming_settings_path()
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["reference_mode"] == "barcode"
@@ -34,6 +38,7 @@ def run() -> None:
         app.processEvents()
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["reference_mode"] == "item_code"
+        assert "رقم الصنف + الوحدة" in window.naming_preview_label.text()
         window.close()
     print("OK: reference mode is visible before processing and persists safely")
 

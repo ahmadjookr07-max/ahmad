@@ -54,17 +54,17 @@ def run() -> None:
             index = _index()
             integ.set_catalog_index(index)
 
-            # مصدر الحقيقة: الباركود من Excel، الأولى بلا رقم ثم -1.
+            # الباركود من Excel، والوحدة لا تسقط: الأولى بلا رقم ثم -1.
             assert settings.render("10015986", 1, "حبه", total=2,
-                                   barcode="6287021750464") == "6287021750464"
+                                   barcode="6287021750464") == "6287021750464_حبه"
             assert settings.render("10015986", 2, "حبه", total=2,
-                                   barcode="6287021750464") == "6287021750464-1"
+                                   barcode="6287021750464") == "6287021750464_حبه-1"
 
             old = out / "10015986_حبه.webp"
             old.write_bytes(b"image")
             result = Result([Item("10015986", str(old), "6287021750464")], str(root))
             apply_join_all_units(result)
-            renamed = out / "6287021750464.webp"
+            renamed = out / "6287021750464_حبه.webp"
             assert renamed.is_file() and not old.exists()
             assert result.items[0].output_path == str(renamed)
 
@@ -76,10 +76,10 @@ def run() -> None:
             groups, unparsed = scan_legacy_folder(legacy, index=index)
             assert set(groups) == {"10015986"} and not unparsed
             plan = plan_legacy_renames(groups, index=index, unparsed=unparsed)
-            assert plan.rows[0].new_stem == "6287021750464"
+            assert plan.rows[0].new_stem == "6287021750464_حبه"
             applied = apply_legacy_plan(plan)
             assert not applied["errors"]
-            final = legacy / "6287021750464.webp"
+            final = legacy / "6287021750464_حبه.webp"
             assert final.is_file() and not prior.exists()
             # إعادة فتح الاسم الجديد تعيده إلى item code من Excel.
             again, bad = scan_legacy_folder(legacy, index=index)
