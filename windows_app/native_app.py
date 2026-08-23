@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.14"
+APP_VERSION = "3.4.15"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -735,12 +735,17 @@ class EditorDirectSaveResult:
 
 
 def _manual_source_key(item: object) -> str:
-    """مفتاح ثابت لمصدر الصورة عند دمج نتيجة ربط جزئية بالجلسة."""
-    name = str(getattr(item, "source_name", "") or "").strip()
-    if name:
-        return name.replace("\\", "/").casefold()
+    """مفتاح ثابت وفريد لمصدر الصورة عند دمج نتيجة ربط جزئية بالجلسة.
+
+    اسم الملف وحده لا يكفي: قد يرفع المستخدم صورًا من مجلدات مختلفة تحمل
+    الاسم نفسه، أو تعيد طبقة المحرك اسمًا متشابهًا لصور صنف واحد. المسار
+    الأصلي هو الهوية الحاسمة، ويُستخدم الاسم فقط عندما يغيب المسار.
+    """
     path = str(getattr(item, "source_path", "") or "").strip()
-    return Path(path).name.casefold() if path else ""
+    if path:
+        return "path:" + path.replace("\\", "/").casefold()
+    name = str(getattr(item, "source_name", "") or "").strip()
+    return "name:" + name.replace("\\", "/").casefold() if name else ""
 
 
 def merge_manual_link_result(current_result, update_result, source_names=()):

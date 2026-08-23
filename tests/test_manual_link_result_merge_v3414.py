@@ -76,6 +76,30 @@ def run() -> None:
     check(len(with_extra.items) == 4 and with_extra.items[-1] is extra.items[0],
           "مصدر مستعاد غير موجود سابقًا يُضاف ولا يُسقط")
 
+    # صورتان قد تحملان الاسم أو الباركود نفسه، لكن كل واحدة لها مصدر
+    # مستقل. يجب ألا يستبدل الربط إلا الصورة ذات المسار نفسه.
+    repeated_previous = Result(workspace="/workspace", items=[
+        Item("barcode.jpg", "1001", "/out/1001_حبه.webp",
+             source_path="/raw/front/barcode.jpg"),
+        Item("barcode.jpg", "1001", "/out/1001_حبه-1.webp",
+             source_path="/raw/back/barcode.jpg"),
+        Item("no-barcode.jpg", "", "",
+             source_path="/raw/back/no-barcode.jpg", status="review"),
+    ])
+    repeated_update = Result(workspace="/workspace", items=[
+        Item("barcode.jpg", "6287021750464", "/out/6287021750464_كرتون-1.webp",
+             source_path="/raw/back/barcode.jpg", status="manual"),
+    ])
+    repeated_merged = merge_manual_link_result(repeated_previous, repeated_update)
+    check(len(repeated_merged.items) == 3,
+          "تكرار باركود/اسم لا يغير عدد صور الصنف")
+    check(repeated_merged.items[0] is repeated_previous.items[0],
+          "صورة الباركود الشقيقة الأولى لا تتبدل")
+    check(repeated_merged.items[1] is repeated_update.items[0],
+          "تتبدل فقط صورة الباركود ذات مسار المصدر المطابق")
+    check(repeated_merged.items[2] is repeated_previous.items[2],
+          "الصورة غير المقروءة تبقى مستقلة في الواجهة")
+
     empty = Result(workspace="/workspace", items=[])
     check(merge_manual_link_result(previous, empty) is previous,
           "نتيجة ربط فارغة لا تغيّر قائمة الجلسة")

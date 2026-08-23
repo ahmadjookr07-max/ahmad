@@ -310,38 +310,56 @@ def match_item_position(items: Any, source_name: str) -> int | None:
     if not wanted:
         return None
 
-    for index, item in enumerate(pool):
-        if str(getattr(item, "source_name", "")) == wanted:
-            return index
+    def unique_index(predicate) -> int | None:
+        """يعيد موضعًا فقط إن كان الدليل يطابق صورة واحدة بلا لبس.
+
+        اختيار أول تطابق من صور متشابهة قد يكتب الناتج فوق صورة شقيقة
+        فيظهر للمستخدم أن صور الباركود أو الواجهات اختلطت. الغموض يجب أن
+        يتحول إلى فشل آمن قابل للمراجعة، لا إلى تعديل الصورة الخطأ.
+        """
+        matches = [index for index, item in enumerate(pool) if predicate(item)]
+        return matches[0] if len(matches) == 1 else None
+
+    exact = unique_index(
+        lambda item: str(getattr(item, "source_name", "")) == wanted)
+    if exact is not None:
+        return exact
 
     wanted_name = Path(wanted).name
-    for index, item in enumerate(pool):
-        if Path(str(getattr(item, "source_name", ""))).name == wanted_name:
-            return index
+    by_name = unique_index(
+        lambda item: Path(str(getattr(item, "source_name", ""))).name == wanted_name)
+    if by_name is not None:
+        return by_name
 
     wanted_stem = Path(wanted).stem
-    for index, item in enumerate(pool):
-        if Path(str(getattr(item, "source_name", ""))).stem == wanted_stem:
-            return index
+    by_stem = unique_index(
+        lambda item: Path(str(getattr(item, "source_name", ""))).stem == wanted_stem)
+    if by_stem is not None:
+        return by_stem
 
-    for index, item in enumerate(pool):
+    def has_matching_path(item) -> bool:
         for attr in ("output_path", "review_path", "source_path"):
             value = str(getattr(item, attr, "") or "")
-            if not value:
-                continue
-            if Path(value).name == wanted_name or Path(value).stem == wanted_stem:
-                return index
+            if value and (Path(value).name == wanted_name
+                          or Path(value).stem == wanted_stem):
+                return True
+        return False
+
+    by_path = unique_index(has_matching_path)
+    if by_path is not None:
+        return by_path
 
     wanted_base, _ = split_sequence(wanted_stem)
     if wanted_base:
-        for index, item in enumerate(pool):
+        def has_matching_base(item) -> bool:
             for attr in ("output_path", "source_name"):
                 value = str(getattr(item, attr, "") or "")
-                if not value:
-                    continue
-                base, _ = split_sequence(Path(value).stem)
-                if base == wanted_base:
-                    return index
+                if value:
+                    base, _ = split_sequence(Path(value).stem)
+                    if base == wanted_base:
+                        return True
+            return False
+        return unique_index(has_matching_base)
     return None
 
 
