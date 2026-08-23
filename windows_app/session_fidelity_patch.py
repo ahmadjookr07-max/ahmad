@@ -90,7 +90,11 @@ def install_session_fidelity(main_window: Any) -> dict:
                     for it in getattr(result, "items", []) or []:
                         source_name = str(getattr(it, "source_name", "") or "")
                         source_path = str(getattr(it, "source_path", "") or "")
-                        key = image_identity_key(source_path, source_name)
+                        key = image_identity_key(
+                            source_path, source_name,
+                            str(getattr(it, "output_path", "") or ""),
+                            str(getattr(it, "match_source", "") or ""),
+                        )
                         if not key:
                             continue
                         fields: dict[str, Any] = {}
@@ -133,7 +137,11 @@ def install_session_fidelity(main_window: Any) -> dict:
                     for it in getattr(result, "items", []) or []:
                         source_name = str(getattr(it, "source_name", "") or "")
                         source_path = str(getattr(it, "source_path", "") or "")
-                        key = image_identity_key(source_path, source_name)
+                        key = image_identity_key(
+                            source_path, source_name,
+                            str(getattr(it, "output_path", "") or ""),
+                            str(getattr(it, "match_source", "") or ""),
+                        )
                         # الجلسات السابقة كانت تحفظ بالاسم المجرد؛ نقرأها
                         # للتوافق ثم يحولها الحفظ القادم إلى المفتاح الفريد.
                         d = (imgs.get(key) or imgs.get(source_name)

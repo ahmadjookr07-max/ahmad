@@ -85,6 +85,26 @@ def run() -> None:
               "مسار النتيجة للصورة الثانية محفوظ منفردًا")
         check(saved[first_key]["barcode"] == saved[second_key]["barcode"] == barcode,
               "يسمح بتكرار الباركود كدليل ربط دون أن يكون مفتاحًا")
+
+        # اقتصاص التغذية يشترك في source_path مع صورة المنتج، لكنه نتيجة
+        # مستقلة يجب أن تبقى ظاهرة عند حفظ الجلسة واستعادتها.
+        nutrition = Item(front, "nutrition-crop.webp", barcode, "10003933",
+                         "/out/10003933_حبه-1.webp", match_source="nutrition_crop")
+        nutrition_key = image_identity_key(
+            nutrition.source_path, nutrition.source_name,
+            nutrition.output_path, nutrition.match_source)
+        primary_key = image_identity_key(
+            items[0].source_path, items[0].source_name,
+            items[0].output_path, items[0].match_source)
+        check(nutrition_key != primary_key,
+              "اقتصاص التغذية يملك هوية مستقلة رغم مشاركة المصدر")
+        window.current_result = Result([items[0], nutrition])
+        window.v2_save_session()
+        saved = store.state.images
+        check(len(saved) >= 3 and nutrition_key in saved,
+              "حفظ الجلسة لا يسقط اقتصاص التغذية إلى أسفل أو يدمجه بالصورة")
+        check(saved[nutrition_key]["output_path"] == nutrition.output_path,
+              "مسار اقتصاص التغذية محفوظ منفردًا")
     print("OK: repeated barcodes never collapse distinct session images")
 
 

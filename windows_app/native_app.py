@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.17"
+APP_VERSION = "3.4.18"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -741,6 +741,12 @@ def _manual_source_key(item: object) -> str:
     الاسم نفسه، أو تعيد طبقة المحرك اسمًا متشابهًا لصور صنف واحد. المسار
     الأصلي هو الهوية الحاسمة، ويُستخدم الاسم فقط عندما يغيب المسار.
     """
+    # اقتصاص التغذية يستعمل المصدر نفسه للصورة الأساسية عمدًا، لكنه صف
+    # مستقل ومخرج مستقل؛ هويته يجب أن تكون ملف الاقتصاص لا المصدر المشترك.
+    if str(getattr(item, "match_source", "") or "") == "nutrition_crop":
+        output = str(getattr(item, "output_path", "") or "").strip()
+        if output:
+            return "output:" + output.replace("\\", "/").casefold()
     path = str(getattr(item, "source_path", "") or "").strip()
     if path:
         return "path:" + path.replace("\\", "/").casefold()
@@ -8408,7 +8414,30 @@ class MainWindow(QMainWindow):
                     sync_result_items(self.current_workspace, self.current_result.items)
                 except Exception as exc:
                     print(f"[state_sync] تعذرت مزامنة حقائق التغذية: {exc}", file=sys.stderr)
-            self._populate_results(restore_position=position)
+            # بعد الإدراج نعيد بناء الجدول ثم نركز الاقتصاص الجديد نفسه؛
+            # استعادة الصف السابق وحدها كانت تجعل المستخدم يظن أن الاقتصاص
+            # اختفى أو نزل إلى آخر القائمة عند تكرار الحفظ.
+            crop_identity = _manual_source_key(new_item)
+            self._populate_results(restore_position=(
+                crop_identity,
+                position[1] if position is not None else 0,
+                position[2] if position is not None else 0,
+            ))
+
+            def _focus_new_nutrition_crop(identity=crop_identity) -> None:
+                row = self._row_for_source_name(identity)
+                if row < 0:
+                    return
+                index = self.results_table.model().index(row, 0)
+                selection = self.results_table.selectionModel()
+                selection.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                selection.select(index, QItemSelectionModel.ClearAndSelect |
+                                 QItemSelectionModel.Rows)
+                self.results_table.scrollTo(index, QTableWidget.PositionAtCenter)
+                self._update_result_position_label()
+                self._show_selected_preview()
+
+            QTimer.singleShot(0, _focus_new_nutrition_crop)
             # تحديث حزمة التسليم ZIP لتشمل الصورة الجديدة — بصمت.
             self._refresh_delivery_zip()
             try:

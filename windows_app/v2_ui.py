@@ -725,33 +725,62 @@ class SessionDialog(QDialog):
             ["العنوان", "آخر تحديث", "مجلد الصور", "الإجمالي", "المكتمل"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.setStyleSheet(
+            "QTableWidget::item:selected { background:#1f6fb2; color:#ffffff; "
+            "border:2px solid #ffd166; font-weight:800; }")
         root.addWidget(self.table, 1)
 
+        self.selection_label = QLabel("لم تُحدَّد جلسة بعد — اختر صفًا ثم اضغط فتح الجلسة المحددة")
+        self.selection_label.setStyleSheet(
+            "background:#fff4df; color:#6a3b00; padding:9px 12px; "
+            "border:1px solid #e0ae3f; border-radius:7px; font-weight:700;")
+        root.addWidget(self.selection_label)
+
         self._reload_sessions()
-        self.table.doubleClicked.connect(self._resume)
+        self.table.currentCellChanged.connect(self._on_session_selected)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        resume_btn = QPushButton("استئناف الجلسة المحددة")
-        resume_btn.setMinimumSize(210, 48)
-        resume_btn.clicked.connect(self._resume)
+        self.resume_btn = QPushButton("فتح الجلسة المحددة")
+        self.resume_btn.setMinimumSize(230, 48)
+        self.resume_btn.setEnabled(False)
+        self.resume_btn.setToolTip("اختر جلسة من الجدول أولًا؛ لن تُفتح أي جلسة بنقرة عارضة")
+        self.resume_btn.clicked.connect(self._resume)
         del_btn = QPushButton("حذف الجلسة المحددة")
         del_btn.setMinimumSize(170, 48)
         del_btn.clicked.connect(self._delete_selected)
         new_btn = QPushButton("جلسة جديدة")
         new_btn.setMinimumSize(150, 48)
         new_btn.clicked.connect(self.reject)
-        btns.addWidget(resume_btn)
+        btns.addWidget(self.resume_btn)
         btns.addWidget(del_btn)
         btns.addWidget(new_btn)
         root.addLayout(btns)
+
+    def _on_session_selected(self, row: int, _column: int,
+                             _previous_row: int, _previous_column: int) -> None:
+        if row < 0 or row >= len(getattr(self, "_sessions", [])):
+            self.selected_session_id = None
+            self.resume_btn.setEnabled(False)
+            self.selection_label.setText(
+                "لم تُحدَّد جلسة بعد — اختر صفًا ثم اضغط فتح الجلسة المحددة")
+            return
+        session = self._sessions[row]
+        self.selected_session_id = str(session.get("session_id", "") or "")
+        title = str(session.get("title") or self.selected_session_id)
+        self.resume_btn.setEnabled(bool(self.selected_session_id))
+        self.selection_label.setText(
+            f"الجلسة المحددة الآن: {title} — اضغط «فتح الجلسة المحددة» للتأكيد")
 
     def _reload_sessions(self):
         import datetime
         sessions = self.store.list_sessions()
         self._sessions = sessions
+        self.selected_session_id = None
         self.table.setRowCount(len(sessions))
         for i, s in enumerate(sessions):
             dt = datetime.datetime.fromtimestamp(
@@ -764,6 +793,11 @@ class SessionDialog(QDialog):
                 s.get("source_folder", "")))
             self.table.setItem(i, 3, QTableWidgetItem(str(s.get("total", 0))))
             self.table.setItem(i, 4, QTableWidgetItem(str(s.get("done", 0))))
+        if hasattr(self, "resume_btn"):
+            self.resume_btn.setEnabled(False)
+        if hasattr(self, "selection_label"):
+            self.selection_label.setText(
+                "لم تُحدَّد جلسة بعد — اختر صفًا ثم اضغط فتح الجلسة المحددة")
 
     def _delete_selected(self):
         row = self.table.currentRow()
@@ -931,7 +965,11 @@ def install_v2(main_window, data_root: Path) -> None:
         for d in snap.get("items", []):
             source_name = str(d.get("source_name") or "")
             source_path = str(d.get("source_path") or "")
-            key = image_identity_key(source_path, source_name)
+            key = image_identity_key(
+                source_path, source_name,
+                str(d.get("output_path") or ""),
+                str(d.get("match_source") or ""),
+            )
             if not key:
                 continue
             # ترحيل مفتاح الجلسة القديم (اسم مجرد) عندما تتوافر هوية

@@ -18,13 +18,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def image_identity_key(source_path: str = "", source_name: str = "") -> str:
+def image_identity_key(source_path: str = "", source_name: str = "",
+                       output_path: str = "", match_source: str = "") -> str:
     """مفتاح جلسة ثابت للصورة، مستقل تمامًا عن الباركود ورقم الصنف.
 
     قد تظهر عدة صور للباركود نفسه أو حتى تحمل الاسم المجرد نفسه في
     مجلدات مختلفة. مسار المصدر هو الهوية الأقوى؛ الاسم لا يُستخدم إلا
     عندما يغيب المسار. البادئة تمنع التباس اسم ملف مع مسار كامل.
     """
+    # اقتصاص التغذية يشارك source_path مع المنتج لكنه كيان مستقل؛ مخرجه
+    # هو الهوية الوحيدة التي تمنع فقد الصف عند حفظ الجلسة أو استعادتها.
+    if str(match_source or "") == "nutrition_crop":
+        output = str(output_path or "").strip()
+        if output:
+            return "output:" + output.replace("\\", "/").casefold()
     path = str(source_path or "").strip()
     if path:
         return "path:" + path.replace("\\", "/").casefold()
