@@ -100,6 +100,24 @@ def run() -> None:
     check(repeated_merged.items[2] is repeated_previous.items[2],
           "الصورة غير المقروءة تبقى مستقلة في الواجهة")
 
+    # يحاكي محركًا يعيد لقطة جزئية تضم صورة الباركود الموجودة مع الصورة
+    # اليدوية الجديدة. المفتاح المعلق للواجهة يجب أن يمنع تبدل الشقيقة.
+    full_update = Result(workspace="/workspace", items=[
+        Item("barcode.jpg", "1001", "/out/incorrect-replacement.webp",
+             source_path="/raw/back/barcode.jpg", status="matched"),
+        Item("no-barcode.jpg", "1001", "/out/1001_حبه-2.webp",
+             source_path="/raw/back/no-barcode.jpg", status="manual"),
+    ])
+    target_key = "path:/raw/back/no-barcode.jpg"
+    guarded = merge_manual_link_result(
+        repeated_previous, full_update, ("no-barcode.jpg",), (target_key,))
+    check(guarded.items[1] is repeated_previous.items[1],
+          "لقطة العامل لا تستبدل صورة الباركود الشقيقة غير المحددة")
+    check(guarded.items[2] is full_update.items[1],
+          "تتبدل صورة الواجهة المحددة بهويتها الكاملة فقط")
+    check(guarded.items[1].output_path == "/out/1001_حبه-1.webp",
+          "مخرج صورة الباركود الشقيقة لا يُكتب فوقه")
+
     empty = Result(workspace="/workspace", items=[])
     check(merge_manual_link_result(previous, empty) is previous,
           "نتيجة ربط فارغة لا تغيّر قائمة الجلسة")

@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.21"
+APP_VERSION = "3.4.22"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -839,7 +839,7 @@ def auto_finish_linked_outputs(result: object, workspace: Path | None = None) ->
     return completed
 
 
-def merge_manual_link_result(current_result, update_result, source_names=()):
+def merge_manual_link_result(current_result, update_result, source_names=(), source_keys=()):
     """يحدّث صور الربط فقط، ولا يستبدل بقية صفوف جلسة المعالجة.
 
     ``apply_manual_link`` يعيد غالبًا نتيجةً جزئية للصورة أو الصور التي
@@ -849,7 +849,21 @@ def merge_manual_link_result(current_result, update_result, source_names=()):
     """
     if current_result is None:
         return update_result
-    updates = list(getattr(update_result, "items", []) or [])
+    # في بعض إصدارات المحرك يعود ``apply_manual_link`` بنتيجة تضم الصف
+    # الجديد وصفوف باركود موجودة للصنف نفسه. لا نسمح لهذه اللقطة الجزئية
+    # باستبدال أي صف لم يختره المستخدم. المسار الكامل هو الحاكم؛ الاسم
+    # مجرد توافق قديم عندما لا تتاح هوية المسار أصلًا.
+    wanted_keys = {str(key) for key in source_keys if str(key)}
+    wanted_names = {str(name) for name in source_names if str(name)}
+    updates = []
+    for item in list(getattr(update_result, "items", []) or []):
+        key = _manual_source_key(item)
+        if wanted_keys:
+            if key not in wanted_keys:
+                continue
+        elif wanted_names and str(getattr(item, "source_name", "") or "") not in wanted_names:
+            continue
+        updates.append(item)
     if not updates:
         return current_result
 
@@ -2122,7 +2136,13 @@ class MainWindow(QMainWindow):
         self._individual_editor_dirty = False
         self._pending_manual_position: tuple[str, int, int] | None = None
         self._pending_manual_source_names: tuple[str, ...] = ()
+        # الأسماء والباركود قد يتكرران بين الصور؛ هذا المفتاح يحتفظ بمسار
+        # المصدر الكامل للبطاقات التي ضغطها المستخدم أثناء عمل العامل بالخلفية.
+        self._pending_manual_source_keys: tuple[str, ...] = ()
         self._manual_reference_source_name = ""
+        # مرجع الحافظة يسرّع ربط صورة الواجهة لكنه لا يحمل الصورة نفسها؛
+        # الهوية تحفظ فقط للعرض والتحقق، والربط يستمر عبر صف الجدول المحدد.
+        self._clipboard_link_reference: dict[str, str] = {}
         self._result_items_by_name: dict[str, BatchItemResult] = {}
         # نص جاهز لكل صف؛ لا نعيد التطبيع الثقيل عند كل حرف في مربع البحث.
         self._result_search_cache: dict[str, str] = {}
@@ -3486,7 +3506,38 @@ class MainWindow(QMainWindow):
         self.manual_link_button.setObjectName("manualLinkPrimaryButton")
         self._register_metric(self.manual_link_button, "min_height", 36)
         self.manual_link_button.clicked.connect(self._start_manual_link)
+        # مسار سريع للوجه/الخلف: انسخ من بطاقة الباركود المرجعية ثم
+        # حدّد صورة الواجهة واضغط «لصق وربط». لا تُنسخ صورة ولا مسار،
+        # بل قيمة Excel فقط؛ لذلك تبقى هوية كل صورة مستقلة.
+        self.copy_item_code_button = QPushButton("نسخ رقم")
+        self.copy_item_code_button.setObjectName("linkToolButton")
+        self.copy_item_code_button.setToolTip(
+            "انسخ رقم الصنف من البطاقة المحددة إلى الحافظة"
+        )
+        self.copy_item_code_button.clicked.connect(
+            lambda: self._copy_selected_link_reference("item_code")
+        )
+        self.copy_barcode_button = QPushButton("نسخ باركود")
+        self.copy_barcode_button.setObjectName("linkToolButton")
+        self.copy_barcode_button.setToolTip(
+            "انسخ الباركود الخطي من البطاقة المحددة إلى الحافظة — QR غير مدعوم"
+        )
+        self.copy_barcode_button.clicked.connect(
+            lambda: self._copy_selected_link_reference("barcode")
+        )
+        self.paste_link_button = QPushButton("لصق وربط")
+        self.paste_link_button.setObjectName("referenceLinkButton")
+        self.paste_link_button.setToolTip(
+            "الصق رقم الصنف أو الباركود من الحافظة واربط الصورة المحددة فقط"
+        )
+        self.paste_link_button.clicked.connect(self._paste_link_reference_and_start)
+        for _button in (self.copy_item_code_button, self.copy_barcode_button,
+                        self.paste_link_button):
+            self._register_metric(_button, "min_height", 36)
         manual_controls.addWidget(self.manual_item_edit, 1)
+        manual_controls.addWidget(self.copy_item_code_button)
+        manual_controls.addWidget(self.copy_barcode_button)
+        manual_controls.addWidget(self.paste_link_button)
         manual_controls.addWidget(self.manual_link_button)
         manual_layout.addLayout(manual_controls)
 
@@ -6808,6 +6859,7 @@ class MainWindow(QMainWindow):
         restore_position = self._pending_manual_position
         self._pending_manual_position = None
         self._pending_manual_source_names = ()
+        self._pending_manual_source_keys = ()
         self.manual_link_button.setText("ربط الآن")
         self._set_busy(False)
         log_path = DATA_ROOT / "last_manual_link_error.log"
@@ -7936,6 +7988,53 @@ class MainWindow(QMainWindow):
             QMessageBox.No,
         )
         return answer == QMessageBox.Yes
+
+    def _copy_selected_link_reference(self, field: str) -> None:
+        """ينسخ مرجع Excel من البطاقة المحددة دون مشاركة ملف الصورة أو مخرجها."""
+        item = self._selected_result_item()
+        if not self._is_high_confidence_reference(item):
+            QMessageBox.information(
+                self, APP_NAME,
+                "اختر أولًا بطاقة مرتبطة يدويًا أو مطابقة بباركود موثوق لنسخ المرجع منها.")
+            return
+        if field == "barcode":
+            value = str(getattr(item, "barcode", "") or "").strip()
+            label = "الباركود الخطي"
+        else:
+            value = str(getattr(item, "item_code", "") or "").strip()
+            label = "رقم الصنف"
+        if not value:
+            QMessageBox.information(self, APP_NAME, f"لا يوجد {label} صالح في البطاقة المحددة.")
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            QMessageBox.warning(self, APP_NAME, "تعذر الوصول إلى حافظة النظام.")
+            return
+        clipboard.setText(value)
+        self._clipboard_link_reference = {
+            "source_key": _manual_source_key(item),
+            "item_code": str(getattr(item, "item_code", "") or ""),
+            "barcode": str(getattr(item, "barcode", "") or ""),
+            "value": value,
+        }
+        self.manual_item_edit.setText(value)
+        self.status_label.setText(
+            f"نُسخ {label}: {value}. حدّد صورة الواجهة ثم اضغط «لصق وربط»."
+        )
+
+    def _paste_link_reference_and_start(self) -> None:
+        """يلصق مرجعًا ويشغّل الربط المعتاد للبطاقات المحددة فقط."""
+        clipboard = QApplication.clipboard()
+        value = clipboard.text().strip() if clipboard is not None else ""
+        if not value:
+            value = str(getattr(self, "_clipboard_link_reference", {}).get("value", "") or "").strip()
+        if not value:
+            QMessageBox.information(
+                self, APP_NAME,
+                "انسخ رقم الصنف أو الباركود من بطاقة مرجعية أولًا، ثم حدّد صورة الواجهة.")
+            return
+        self.manual_item_edit.setText(value)
+        self._start_manual_link()
 
     def _start_manual_link(self) -> None:
         targets = self._selected_link_targets()
@@ -9154,6 +9253,15 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.current_workspace is None:
             return
+        # الربط اليدوي يمر أيضًا عبر V2؛ يجب تسجيل فهرس Excel قبل بناء
+        # اسم الإخراج، وإلا يسقط المحرك إلى «حبه» بينما صورة الباركود
+        # الشقيقة تحمل وحدة Excel الحقيقية (مثل شدة/كرتون). اختلاف الاسم
+        # يفتح باب استعادة أو حفظ ملف شقيق بالخطأ عند الجلسة اللاحقة.
+        if not self._ensure_catalog_index(timeout=8.0):
+            self.status_label.setText(
+                "تعذر تجهيز فهرس Excel للربط الآمن — لم تتغير أي صورة."
+            )
+            return
         targets = list(targets)
         source_names = tuple(dict.fromkeys(item.source_name for item in targets))
         if not source_names:
@@ -9163,11 +9271,25 @@ class MainWindow(QMainWindow):
         # نمرّر هذا المسار للعامل ليُكتب فوقه بدل توليد
         # اسم جديد (-2 ثم -3…) ثم حذف القديم فتضيع الصورة.
         previous_outputs = {}
+        # مخرجات الجلسة تحفظ غالبًا نسبية لمساحة العمل. فحص ``Path(out)``
+        # مباشرةً ينظر إلى مجلد تشغيل التطبيق ويزعم أن الملف غائب، فينشئ
+        # الربط نسخة جديدة ثم قد تستعيد الواجهة مخرج صورة شقيقة للصنف نفسه.
+        # نحلّ المسار عبر مساحة العمل ونمرر فقط مخرج البطاقة المحددة.
+        # إذا تكرر اسم مصدر بين صور مختلفة فلا نخمن أيهما؛ نترك المحرك
+        # ينشئ ملفًا مستقلاً بدل الكتابة فوق ملف خاطئ.
+        all_items = list(getattr(self.current_result, "items", []) or [])
+        name_counts = {}
+        for candidate in all_items:
+            candidate_name = str(getattr(candidate, "source_name", "") or "")
+            if candidate_name:
+                name_counts[candidate_name] = name_counts.get(candidate_name, 0) + 1
         for item in targets:
-            out = str(getattr(item, "output_path", "") or "")
+            raw_output = str(getattr(item, "output_path", "") or "")
             name = str(getattr(item, "source_name", "") or "")
-            if out and name and Path(out).is_file():
-                previous_outputs[name] = out
+            output = self._result_path(raw_output) if raw_output else None
+            if (name and name_counts.get(name, 0) == 1 and output is not None
+                    and output.is_file()):
+                previous_outputs[name] = str(output)
         # 2.9.6 — حارس التزامن: بدء ربط جديد بينما السابق يعمل كان يستبدل
         # المرجع ويُسقط QThread عاملًا ⇒ SIGABRT وإغلاق التطبيق بلا رسالة.
         # الآن يُرفض الطلب بلطف مع إبقاء الأزرار معطلة حتى ينتهي الجاري.
@@ -9179,6 +9301,10 @@ class MainWindow(QMainWindow):
         # المعالجة الخلفية، لكن العودة يجب أن تكون إلى الصف والتمرير الأصليين.
         self._pending_manual_position = self._capture_results_position()
         self._pending_manual_source_names = source_names
+        self._pending_manual_source_keys = tuple(
+            dict.fromkeys(_manual_source_key(item) for item in targets
+                          if _manual_source_key(item))
+        )
         # الربط قد يتضمن عزلًا وتحسينًا وكتابة ZIP؛ لا نحجب الجدول أو التنقل
         # أثناء ذلك. تُعطل أوامر الربط وحدها لمنع عمليتين متزامنتين.
         self.manual_item_edit.setEnabled(False)
@@ -9207,13 +9333,26 @@ class MainWindow(QMainWindow):
         restore_position = self._pending_manual_position or self._capture_results_position()
         self._pending_manual_position = None
         source_names = self._pending_manual_source_names
+        source_keys = self._pending_manual_source_keys
         if not source_names and self.manual_worker is not None:
             source_names = tuple(getattr(self.manual_worker, "source_names", ()))
             if not source_names:
                 source_name = str(getattr(self.manual_worker, "source_name", "") or "")
                 source_names = (source_name,) if source_name else ()
+        # توافق مع عامل قديم: نستخرج مفاتيح موثوقة من الجلسة الحالية
+        # فقط إن كان الاسم يحدد صفًا واحدًا بلا لبس.
+        if not source_keys and self.current_result is not None:
+            for name in source_names:
+                matches = [item for item in getattr(self.current_result, "items", []) or []
+                           if str(getattr(item, "source_name", "") or "") == name]
+                if len(matches) == 1:
+                    source_keys += (_manual_source_key(matches[0]),)
         self._pending_manual_source_names = ()
-        linked_items = [item for item in result.items if item.source_name in set(source_names)]
+        self._pending_manual_source_keys = ()
+        wanted_keys = set(source_keys)
+        linked_items = [item for item in result.items
+                        if (_manual_source_key(item) in wanted_keys if wanted_keys
+                            else item.source_name in set(source_names))]
         resolved_codes = sorted({item.item_code for item in linked_items if item.item_code})
         resolved_code = resolved_codes[0] if len(resolved_codes) == 1 else ""
         if linked_items:
@@ -9221,7 +9360,7 @@ class MainWindow(QMainWindow):
         # لا تستبدل الجلسة الكاملة بنتيجة الربط الجزئية؛ هذا هو سبب
         # اختفاء صور من الجدول رغم بقائها في المجلد النهائي.
         self.current_result = merge_manual_link_result(
-            self.current_result, result, source_names)
+            self.current_result, result, source_names, source_keys)
         self.manual_item_edit.clear()
         # تصفير الميل اليدوي بعد تطبيقه — كي لا ينتقل سهوًا للصورة التالية
         spin = getattr(self, "manual_tilt_spin", None)

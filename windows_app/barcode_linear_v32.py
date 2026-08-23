@@ -127,13 +127,22 @@ def _variants(region: np.ndarray) -> Iterable[np.ndarray]:
 
 
 def _rotations(image: np.ndarray, include_fine: bool) -> Iterable[np.ndarray]:
+    """نسخ الاتجاهات الخطية ثم تصحيح الميل عند الحاجة فقط.
+
+    لا نعتمد على ``try_rotate`` وحده: بعض إصدارات ZXing تتعامل مع 90°
+    و270° بكفاءة لكن تفوّت 180° أو صورة كاميرا مائلة. يظل التصحيح الدقيق
+    في مسار الاسترداد بعد فشل القراءة السريعة، حتى لا تدفع الصور بلا
+    باركود ثمن تدويرات كثيرة.
+    """
     yield image
     yield cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    yield cv2.rotate(image, cv2.ROTATE_180)
     yield cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
     if not include_fine:
         return
     h, w = image.shape[:2]
-    for angle in (-12, 12, -24, 24):
+    # 18° حالة شائعة عند تصوير العبوة يدويًا؛ نبدأ بها قبل الزوايا الأبعد.
+    for angle in (-18, 18, -10, 10, -26, 26, -34, 34):
         matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
         yield cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_REPLICATE)
@@ -169,7 +178,12 @@ def _read_variant(zxingcpp: object, image: np.ndarray) -> list[str]:
 
 
 def read_linear_barcodes(path: str | Path, *, max_attempts: int = 38) -> tuple[str, ...]:
-    """يعيد مرشحات الباركود الخطي مرتبة بالثقة، ولا يقرأ QR مطلقًا."""
+    """يعيد مرشحات الباركود الخطي مرتبة بالثقة، ولا يقرأ QR مطلقًا.
+
+    التنفيذ مرحلتان: فحص قصير للاتجاهات الأربع، ثم استرداد أدق للميل فقط
+    إذا اكتشفت الصورة منطقة ذات خطوط تشبه الباركود. الإصدار السابق كان
+    يستهلك كل الحد في المرحلة الأولى، فلا يصل فعليًا إلى زوايا الاسترداد.
+    """
     try:
         import zxingcpp
     except Exception:
@@ -178,27 +192,43 @@ def read_linear_barcodes(path: str | Path, *, max_attempts: int = 38) -> tuple[s
     if image is None:
         return ()
 
-    # التدرج مهم: مسح اقتصادي أولًا، ثم توسعة للباركود البعيد إن لم يظهر شيء.
     votes: Counter[str] = Counter()
-    attempts = 0
-    for scan_size, fine_angles in ((1200, False), (1900, True)):
-        base = _resize_for_scan(image, scan_size)
-        for region in _candidate_regions(base):
+
+    def scan(regions: Iterable[np.ndarray], *, fine_angles: bool, budget: int) -> int:
+        attempts = 0
+        for region in regions:
             if region.size == 0:
                 continue
             for variant in _variants(region):
                 for rotated in _rotations(variant, fine_angles):
                     votes.update(_read_variant(zxingcpp, rotated))
                     attempts += 1
-                    # تكرار القراءة يزيد الثقة ويوقف المسح مبكرًا.
-                    if votes and max(votes.values()) >= 2:
-                        return tuple(v for v, _ in votes.most_common())
-                    if attempts >= max_attempts:
-                        break
-                if attempts >= max_attempts:
-                    break
-            if attempts >= max_attempts:
-                break
-        if votes:
-            return tuple(v for v, _ in votes.most_common())
-    return ()
+                    # أول قيمة صحيحة تكفي في المرحلة السريعة؛ التكرار هنا
+                    # لا يغير قرار Excel لاحقًا ويكلف زمنًا ملحوظًا.
+                    if votes:
+                        return attempts
+                    if attempts >= budget:
+                        return attempts
+        return attempts
+
+    # مرحلة سريعة: منطقتان مرشحتان ثم الصورة كاملة عند دقة اقتصادية.
+    # هذا يحافظ على سلاسة الرفع للصور التي لا تحتوي باركودًا.
+    fast_base = _resize_for_scan(image, 1200)
+    fast_regions = list(_barcode_regions(fast_base))
+    fast_plan = fast_regions[:2] + [fast_base]
+    fast_budget = max(4, min(16, int(max_attempts)))
+    scan(fast_plan, fine_angles=False, budget=fast_budget)
+    if votes:
+        return tuple(v for v, _ in votes.most_common())
+
+    # لا تشغّل تصحيح الميل المكلف لصورة لا تملك أي دلائل خطية. هذا المسار
+    # يستعمل أول المناطق الهندسية فقط، ثم يوسّع الحجم لتغطية الباركود البعيد.
+    if not fast_regions or max_attempts <= fast_budget:
+        return ()
+    recovery_base = _resize_for_scan(image, 1900)
+    recovery_regions = list(_barcode_regions(recovery_base))
+    if not recovery_regions:
+        return ()
+    remaining = max(1, int(max_attempts) - fast_budget)
+    scan(recovery_regions[:3], fine_angles=True, budget=remaining)
+    return tuple(v for v, _ in votes.most_common())

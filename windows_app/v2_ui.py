@@ -68,6 +68,46 @@ def _ensure_engine_path() -> None:
         sys.path.insert(0, p)
 
 
+def _session_item_identity(item: dict) -> str:
+    """هوية موضع الجلسة: المصدر قبل الاسم أو رقم الصنف أو الباركود."""
+    from engine_v2.session_v2 import image_identity_key
+    data = item if isinstance(item, dict) else {}
+    return image_identity_key(
+        str(data.get("source_path") or ""),
+        str(data.get("source_name") or ""),
+        str(data.get("output_path") or ""),
+        str(data.get("match_source") or ""),
+    )
+
+
+def _resolve_session_position(items: list[dict], position: dict) -> int:
+    """يعيد صف الجلسة بدليل حاسم، ولا يختار شقيقًا عند الغموض."""
+    try:
+        fallback = int((position or {}).get("row", 0) or 0)
+    except (TypeError, ValueError):
+        fallback = 0
+    if not items:
+        return -1
+    key = str((position or {}).get("source_key", "") or "")
+    if key:
+        matches = [i for i, item in enumerate(items)
+                   if _session_item_identity(item) == key]
+        if len(matches) == 1:
+            return matches[0]
+    else:
+        # الجلسات القديمة تحفظ الاسم فقط؛ نستعمله عندما يكون فريدًا فقط.
+        name = str((position or {}).get("source_name", "") or "")
+        if name:
+            matches = [
+                i for i, item in enumerate(items)
+                if item.get("source_name") == name
+                or item.get("source_path") == name
+            ]
+            if len(matches) == 1:
+                return matches[0]
+    return max(0, min(fallback, len(items) - 1))
+
+
 def cv_to_qpixmap(img) -> QPixmap:
     import numpy as np
     import cv2
@@ -958,10 +998,18 @@ def install_v2(main_window, data_root: Path) -> None:
         _row = int(snap.get("current_row", 0) or 0)
         _items = snap.get("items", []) or []
         _src_name = ""
+        _src_key = ""
         if 0 <= _row < len(_items):
             _d = _items[_row] or {}
             _src_name = _d.get("source_name") or _d.get("source_path") or ""
-        store.state.position = {"source_name": _src_name, "row": _row, "col": 0}
+            _src_key = _session_item_identity(_d)
+        # لا يكفي source_name أو row: الفرز، والباركود المتكرر، وفتح
+        # جلسة قديمة قد تنقل كلاهما إلى صورة شقيقة. نحفظ المفتاح الكامل
+        # ونبقي الاسم/الصف كتوافق احتياطي للجلسات السابقة فقط.
+        store.state.position = {
+            "source_key": _src_key, "source_name": _src_name,
+            "row": _row, "col": 0,
+        }
         for d in snap.get("items", []):
             source_name = str(d.get("source_name") or "")
             source_path = str(d.get("source_path") or "")
@@ -1117,18 +1165,7 @@ def install_v2(main_window, data_root: Path) -> None:
                             _g(img, "foreground_quality_metrics", {}) or {}),
                     })
                 _pos = getattr(state, "position", {}) or {}
-                try:
-                    _row = int(_pos.get("row", 0) or 0)
-                except (TypeError, ValueError):
-                    _row = 0
-                # إن تغير ترتيب الصور، نعتمد الاسم لا الرقم
-                _pname = str(_pos.get("source_name", "") or "")
-                if _pname:
-                    for _i, _d in enumerate(items_data):
-                        if _d.get("source_name") == _pname or \
-                                _d.get("source_path") == _pname:
-                            _row = _i
-                            break
+                _row = _resolve_session_position(items_data, _pos)
                 state = {
                     "items": items_data,
                     "workspace": state.output_folder,
@@ -1166,7 +1203,10 @@ def install_v2(main_window, data_root: Path) -> None:
             row = int(state.get("current_row", -1))
             restore_pos = None
             if 0 <= row < len(items):
-                restore_pos = (items[row].source_name, row, 0)
+                # `_populate_results` يستعيد من UserRole الذي يحمل مفتاح
+                # المصدر لا الاسم؛ تمرير الاسم يجبره على fallback row وقد
+                # يعرض صورة الباركود الشقيقة بعد الفرز.
+                restore_pos = (_na._manual_source_key(items[row]), row, 0)
             main_window._populate_results(restore_position=restore_pos)
             main_window._show_results_page()
             # guaranteed row restore: legacy _populate_results may re-select
@@ -1175,18 +1215,11 @@ def install_v2(main_window, data_root: Path) -> None:
             if restore_pos is not None:
                 from PySide6.QtCore import QTimer
 
-                def _reselect(row=restore_pos[1]):
+                def _reselect(position=restore_pos):
                     try:
-                        table = getattr(main_window, "results_table", None)
-                        if table is not None and 0 <= row < table.rowCount():
-                            from PySide6.QtCore import QItemSelectionModel
-                            idx = table.model().index(row, 0)
-                            table.selectionModel().setCurrentIndex(
-                                idx,
-                                QItemSelectionModel.ClearAndSelect
-                                | QItemSelectionModel.Rows,
-                            )
-                            table.scrollToItem(table.item(row, 0))
+                        restore_selected = getattr(main_window, "_restore_results_position", None)
+                        if callable(restore_selected):
+                            restore_selected(position)
                     except Exception:
                         pass
 
