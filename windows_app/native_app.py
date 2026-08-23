@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.12"
+APP_VERSION = "3.4.13"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2470,14 +2470,15 @@ class MainWindow(QMainWindow):
         # عمل أي شيء». النافذة الكاملة تبقى للخيارات المتقدمة، والاثنتان
         # تقرأان وتكتبان ملف naming_settings.json نفسه فلا تتعارضان.
         self.join_units_check = QCheckBox(
-            "دمج كل وحدات الصنف في الاسم (حبه_شدة_كرتون)")
+            "وحدة Excel مفردة فقط في الاسم النهائي (الدمج معطّل)")
         self.join_units_check.setObjectName("joinUnitsCheck")
+        self.join_units_check.setChecked(False)
+        self.join_units_check.setEnabled(False)
         self.join_units_check.setToolTip(
-            "مُلغى: الاسم يأخذ وحدة واحدة فقط — 10011205_حبه\n"
-            "مُفعّل: تُدمج كل وحدات الصنف من الإكسل بترتيبها —\n"
-            "10011205_حبه_شدة_كرتون\n\n"
-            "وفي الحالتين: صورة الواجهة (★) بلا رقم، ثم -1 ثم -2.\n"
-            "يُحفظ اختيارك ويُستعاد في المرة القادمة.")
+            "الاسم النهائي يستخدم وحدة Excel واحدة فقط: 10011205_حبه\n"
+            "عند اختيار الباركود تُؤخذ الوحدة من سجل الباركود المطابق.\n"
+            "لا تُدمج حبه_شدة_كرتون ولا تُنشأ نسخ إضافية للوحدات.\n"
+            "صورة الواجهة (★) بلا رقم، ثم -1 ثم -2.")
         self.join_units_check.toggled.connect(self._on_join_units_toggled)
         catalog_layout.addWidget(self.join_units_check)
         # خيار المرجع في الواجهة الرئيسية، بعد Excel وسياسة الوحدة مباشرة
@@ -5815,12 +5816,22 @@ class MainWindow(QMainWindow):
                 policy = str(data.get("unit_policy", "") or "")
         except Exception as exc:
             print(f"[naming] load join state failed: {exc}", file=sys.stderr)
-        join_on = (policy == "join_all_units")
+        # الدمج لم يعد مسموحًا في الاسم النهائي؛ نرحّل أي اختيار قديم
+        # إلى وحدة Excel مفردة فورًا كي لا يظهر خيار الواجهة مخالفًا للإنتاج.
+        if policy in {"join_all_units", "replicate_all_units"}:
+            try:
+                p = self._naming_settings_path()
+                data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+                data["unit_policy"] = "default_unit"
+                data["unit_policy_explicit"] = True
+                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.v2_naming_policy = data
+            except Exception as exc:
+                print(f"[naming] migrate single unit failed: {exc}", file=sys.stderr)
         if hasattr(self, "join_units_check"):
-            # blockSignals حتى لا يُستدعى المعالج فيكتب الملف عند مجرد
-            # الاستعادة — الاستعادة قراءة لا اختيار جديد.
             self.join_units_check.blockSignals(True)
-            self.join_units_check.setChecked(join_on)
+            self.join_units_check.setChecked(False)
+            self.join_units_check.setEnabled(False)
             self.join_units_check.blockSignals(False)
         self._load_reference_mode_state()
         self._update_naming_preview()
@@ -5853,7 +5864,7 @@ class MainWindow(QMainWindow):
             p = self._naming_settings_path()
             data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
             data["reference_mode"] = mode
-            data.setdefault("unit_policy", "default_unit")
+            data["unit_policy"] = "default_unit"
             data.setdefault("unit_policy_explicit", True)
             data.setdefault("default_unit", "حبه")
             data.setdefault("scheme", "dash")
@@ -5884,8 +5895,9 @@ class MainWindow(QMainWindow):
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     data = {}
-            data["unit_policy"] = ("join_all_units" if checked
-                                   else "default_unit")
+            # الدمج والنسخ المتعددان معطّلان: هذه الدالة تبقى فقط
+            # للتوافق مع واجهات قديمة قد تستدعيها برمجيًا.
+            data["unit_policy"] = "default_unit"
             # علم الاختيار الصريح: يمنع أي ترقية تلقائية مستقبلية من
             # نقض اختيار المالك (كما فعلت ترقية 2.9.6 القسرية).
             data["unit_policy_explicit"] = True
@@ -5914,8 +5926,7 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "naming_preview_label"):
             return
-        join_on = (hasattr(self, "join_units_check")
-                   and self.join_units_check.isChecked())
+        join_on = False
         mode = (str(self.reference_mode_combo.currentData() or "item_code")
                 if hasattr(self, "reference_mode_combo") else "item_code")
         item = "10011205"
@@ -5951,10 +5962,9 @@ class MainWindow(QMainWindow):
             data = dict(getattr(self, "v2_naming_policy", {}) or {})
             settings = NamingSettings.from_dict(data)
             settings.reference_mode = mode
-            # الخانة الرئيسية هي المرجع المباشر للمستخدم؛ نجعلها تغلب
-            # سياسة دمج قديمة محمّلة إلى أن يحفظ المستخدم تغييرًا جديدًا.
-            if join_on:
-                settings.unit_policy = "join_all_units"
+            # الاسم النهائي بوحدة Excel مفردة دائمًا؛ لا تعيد المعاينة
+            # تفعيل سياسة دمج قديمة مخزنة من إصدار سابق.
+            settings.unit_policy = "default_unit"
             barcode = ""
             decision_status = ""
             primary_unit = units[0] if units else "حبه"

@@ -21,8 +21,8 @@ def make_index() -> CatalogIndex:
     index = CatalogIndex()
     # أول صف ليس وحدة العبوة المفردة عمدًا؛ الحبة يجب أن تفوز في المسارين.
     index.rows = [
-        {"code": "10000001", "name": "صنف اختبار", "unit": "كرتون", "size": "12", "barcode": "6280000000000"},
-        {"code": "10000001", "name": "صنف اختبار", "unit": "حبه", "size": "1", "barcode": "6280000000000"},
+        {"code": "10000001", "name": "صنف اختبار", "unit": "كرتون", "size": "12", "barcode": "6287021750464"},
+        {"code": "10000001", "name": "صنف اختبار", "unit": "حبه", "size": "1", "barcode": "6281044993549"},
     ]
     index._build_maps()
     return index
@@ -46,7 +46,7 @@ def run() -> None:
             output = root / "new-output"
             output.mkdir()
             names = integration.build_output_stems(output, "10000001", unit="حبه")
-            assert names == ["6280000000000_حبه"], names
+            assert names == ["6281044993549_حبه"], names
 
             # نفس الاختيار وملف الإعداد نفسه -> مجلد منجز سابق.
             legacy = root / "legacy"
@@ -54,7 +54,19 @@ def run() -> None:
             (legacy / "10000001_حبه.webp").write_bytes(b"image")
             groups, bad = scan_legacy_folder(legacy, index=index)
             plan = plan_legacy_renames(groups, index=index, unparsed=bad)
-            assert not bad and plan.rows[0].new_stem == "6280000000000_حبه", plan.rows
+            assert not bad and plan.rows[0].new_stem == "6281044993549_حبه", plan.rows
+
+            # باركود ظاهر في اسم منجز يثبت وحدة غير أساسية؛ يجب أن تتقدّم
+            # وحدة السجل المطابق (كرتون) ولا تعود الخطة إلى حبه.
+            observed_legacy = root / "legacy-observed-barcode"
+            observed_legacy.mkdir()
+            (observed_legacy / "6287021750464_كرتون.webp").write_bytes(b"image")
+            observed_groups, observed_bad = scan_legacy_folder(observed_legacy, index=index)
+            observed_plan = plan_legacy_renames(observed_groups, index=index,
+                                                unparsed=observed_bad)
+            assert not observed_bad, observed_bad
+            assert observed_plan.rows[0].new_stem == "6287021750464_كرتون", observed_plan.rows
+            assert "حبه_كرتون" not in observed_plan.rows[0].new_stem
 
             # الرجوع إلى رقم الصنف من نفس القائمة ينعكس على المسارين فورًا.
             window.reference_mode_combo.setCurrentIndex(0)
@@ -63,6 +75,9 @@ def run() -> None:
             assert names == ["10000001_حبه"], names
             plan = plan_legacy_renames(groups, index=index, unparsed=bad)
             assert plan.rows[0].new_stem == "10000001_حبه", plan.rows
+            observed_plan = plan_legacy_renames(observed_groups, index=index,
+                                                unparsed=observed_bad)
+            assert observed_plan.rows[0].new_stem == "10000001_حبه", observed_plan.rows
             window.close()
         print("OK: one UI reference option drives new and legacy image naming")
     finally:

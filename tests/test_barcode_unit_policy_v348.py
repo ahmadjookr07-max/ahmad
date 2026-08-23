@@ -32,11 +32,11 @@ def run() -> None:
                                  settings, chosen_unit="حبه",
                                  barcode="6280000000000") == ["6280000000000_حبه-1"]
 
-    # السياسات المتقدمة تبقى عاملة عند تغيير المرجع إلى الباركود.
+    # سياسات دمج/نسخ قديمة لا تتجاوز قاعدة الاسم النهائي المفرد.
     settings.unit_policy = UNIT_POLICY_JOIN_ALL
-    assert names(settings) == ["6280000000000_كرتون_حبه"]
+    assert names(settings) == ["6280000000000_حبه"]
     settings.unit_policy = UNIT_POLICY_REPLICATE
-    assert names(settings) == ["6280000000000_كرتون", "6280000000000_حبه"]
+    assert names(settings) == ["6280000000000_حبه"]
 
     # رقم الصنف لم يتغير: نفس وحدة Excel والتسلسل المعتادان.
     settings = NamingSettings(reference_mode=REFERENCE_ITEM_CODE,

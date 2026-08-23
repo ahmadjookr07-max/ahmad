@@ -191,8 +191,9 @@ def _policy_active() -> tuple[bool, bool, str]:
         if s is None or not getattr(s, "enabled", False):
             # التسمية المخصّصة معطّلة: لا نفرض قاعدة لم تُطلب.
             return False, False, "حبه"
-        join = getattr(s, "unit_policy", "") == UNIT_POLICY_JOIN_ALL
-        return True, join, getattr(s, "default_unit", "حبه")
+        # لا يمر إعداد دمج قديم إلى الإنتاج: كل صورة تأخذ وحدة Excel
+        # مفردة، ووحدة الباركود المطابق تتقدم عند توفرها.
+        return True, False, getattr(s, "default_unit", "حبه")
     except Exception:
         return False, False, "حبه"
 
@@ -316,21 +317,12 @@ def _set_output_path(items: Any, idx: int, item: Any, new_path: str) -> bool:
 
 
 def _policy_label(settings, join: bool) -> str:
-    """وصف عربي للسياسة المطبّقة — للسجل وتشخيص المالك."""
-    try:
-        from engine_v2.naming_v2 import (UNIT_POLICY_DEFAULT,
-                                         UNIT_POLICY_JOIN_ALL,
-                                         UNIT_POLICY_PER_IMAGE,
-                                         UNIT_POLICY_REPLICATE)
-        pol = getattr(settings, "unit_policy", None)
-        return {UNIT_POLICY_DEFAULT: "الوحدة الافتراضية",
-                UNIT_POLICY_JOIN_ALL: "دمج كل الوحدات",
-                UNIT_POLICY_PER_IMAGE: "وحدة الإكسل الواحدة",
-                UNIT_POLICY_REPLICATE: "نسخة لكل وحدة"}.get(
-                    pol, "دمج كل الوحدات" if join
-                    else "وحدة الإكسل الواحدة")
-    except Exception:
-        return "دمج كل الوحدات" if join else "وحدة الإكسل الواحدة"
+    """وصف السلوك الفعلي في السجل.
+
+    تبقى أسماء السياسات القديمة مقبولة عند قراءة الإعدادات فقط، لكنها لا
+    تغيّر الإنتاج: كل مسار يكتب وحدة Excel واحدة ولا ينشئ نسخ وحدات.
+    """
+    return "وحدة Excel المفردة"
 
 
 def _replicate_on_disk(src: Path, stems: list[str]) -> list[str]:

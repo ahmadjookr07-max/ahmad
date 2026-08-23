@@ -57,6 +57,8 @@ class FakeItem:
     item_code: str
     output_path: str
     product_name: str = ""
+    barcode: str = ""
+    unit: str = ""
     warnings: list = field(default_factory=list)
 
 
@@ -80,8 +82,10 @@ def main() -> int:
     import tempfile
 
     from engine_v2 import integration_v2 as integ
-    from engine_v2.naming_v2 import (NamingSettings, UNIT_POLICY_JOIN_ALL,
-                                     UNIT_POLICY_PER_IMAGE, SCHEME_DASH,
+    from engine_v2.naming_v2 import (NamingSettings, UNIT_POLICY_DEFAULT,
+                                     UNIT_POLICY_JOIN_ALL, UNIT_POLICY_PER_IMAGE,
+                                     REFERENCE_BARCODE, REFERENCE_ITEM_CODE,
+                                     SCHEME_DASH,
                                      save_settings)
     from engine_v2.catalog_index_v2 import CatalogIndex
     from batch_naming_patch import apply_join_all_units
@@ -128,10 +132,7 @@ def main() -> int:
     # نُسجّل الفهرس بنفس الطريقة التي يستخدمها التطبيق.
     integ.set_catalog_index(_index_from(fake_index))
 
-    # 2.9.10 — دمج الوحدات صار **خيارًا** في الواجهة مُلغى
-    # افتراضيًا (أمر المالك)؛ فلم تبق الافتراضية join_all.
-    # وهذا الملف يختبر طبقة الدمج نفسها، فنُفعّلها صراحةً
-    # بملف إعدادات محفوظ كما يفعل المالك حين يُأشّر الخانة.
+    # سياسة دمج محفوظة من إصدار قديم تُرحّل إلى وحدة Excel مفردة.
     _pol_root = tmp / "naming_cfg_join"
     _pol_root.mkdir(parents=True, exist_ok=True)
     save_settings(str(_pol_root),
@@ -141,21 +142,21 @@ def main() -> int:
     integ.set_naming_data_root(str(_pol_root))
     _sanity = integ._current_naming_settings()
     check(_sanity is not None
-          and _sanity.unit_policy == UNIT_POLICY_JOIN_ALL,
-          "سياسة الدمج مُفعّلة صراحةً (خيار المالك)",
+          and _sanity.unit_policy == UNIT_POLICY_DEFAULT,
+          "سياسة وحدة Excel المفردة تُطبّق على إعداد دمج قديم",
           getattr(_sanity, "unit_policy", "لا شيء"))
     _u = integ._units_from_catalog("10000014")
     check(_u == ["حبه", "باكت"],
           "الفهرس يُرجع الوحدات الصحيحة", str(_u))
 
-    print("\n[1] صنف متعدد الوحدات يُعاد تسميته بكل الوحدات")
+    print("\n[1] صنف متعدد الوحدات يُحفظ بوحدة Excel واحدة")
     p = out / "10000014_حبه.png"
     _make_png(p)
     res = FakeBatch(items=[FakeItem("10000014", str(p))], workspace=str(tmp))
     apply_join_all_units(res)
-    want = out / "10000014_حبه_باكت.png"
-    check(want.is_file(), "الملف الجديد موجود", want.name)
-    check(not p.is_file(), "الاسم القديم أُزيل")
+    want = out / "10000014_حبه.png"
+    check(want.is_file(), "الاسم بوحدة مفردة موجود", want.name)
+    check("باكت" not in want.stem, "لا وحدة مدمجة في الاسم")
     check(res.items[0].output_path == str(want),
           "output_path حُدِّث في النتيجة",
           Path(res.items[0].output_path).name)
@@ -176,17 +177,17 @@ def main() -> int:
                            FakeItem("10000051", str(b))],
                     workspace=str(tmp))
     apply_join_all_units(res)
-    main_name = out / "10000051_حبه_كرتون_كرتون1.png"
+    main_name = out / "10000051_حبه.png"
     # 2.9.12 — الثانية تأخذ `-1` بأمر المالك الصريح:
     # «الأولى بدون رقم والثانية 1 والثالثة 2».
-    second = out / "10000051_حبه_كرتون_كرتون1-1.png"
+    second = out / "10000051_حبه-1.png"
     check(main_name.is_file(), "الرئيسية بلا رقم", main_name.name)
     check(second.is_file(), "الثانية بـ-1", second.name)
-    check(not (out / "10000051_حبه_كرتون_كرتون1-2.png").is_file(),
+    check(not (out / "10000051_حبه-2.png").is_file(),
           "لا تقفز إلى -2 فتترك ثغرة")
 
     print("\n[4] عدم طمس ملف موجود")
-    keep = out / "10000014_حبه_باكت.png"   # موجود من [1]
+    keep = out / "10000014_حبه.png"   # موجود من [1]
     keep_bytes = keep.read_bytes()
     p2 = out / "10000014_حبه~9.png"
     _make_png(p2)
@@ -194,7 +195,7 @@ def main() -> int:
     apply_join_all_units(res)
     check(keep.is_file() and keep.read_bytes() == keep_bytes,
           "الملف الأصلي لم يُطمَس")
-    check((out / "10000014_حبه_باكت-1.png").is_file(),
+    check((out / "10000014_حبه-1.png").is_file(),
           "الجديد أخذ التسلسل الحر", "…-1.png")
 
     print("\n[5] تحديث state.json")
@@ -208,7 +209,7 @@ def main() -> int:
     apply_join_all_units(res)
     raw = st.read_text(encoding="utf-8")
     check(p3.name not in raw, "الاسم القديم زال من state.json")
-    check("10000051_حبه_كرتون_كرتون1" in raw,
+    check("10000051_حبه" in raw,
           "الاسم الجديد كُتب في state.json")
 
     print("\n[6] الدمج مُلغى ⇒ وحدة الإكسل الواحدة لا `حبه` العمياء")
@@ -257,6 +258,48 @@ def main() -> int:
         _p5 = Path(str(res5.items[0].output_path))
         check("باكت" not in _p5.stem and _p5.stem.startswith("10000014_حبه"),
               "لا دمج وحدات حين يلغي المالك الخيار", _p5.name)
+
+        print("[6ب] الباركود المقروء يحدد وحدة السجل المطابق")
+        barcode_index = CatalogIndex()
+        barcode_index.rows = [
+            {"code": "10000077", "name": "صنف متعدد الوحدات",
+             "unit": "حبه", "size": "1", "barcode": "6281044993549"},
+            {"code": "10000077", "name": "صنف متعدد الوحدات",
+             "unit": "كرتون", "size": "12", "barcode": "6287021750464"},
+        ]
+        barcode_index._build_maps()
+        integ.set_catalog_index(barcode_index)
+        save_settings(str(cfg_root), NamingSettings(
+            enabled=True, scheme=SCHEME_DASH,
+            unit_policy=UNIT_POLICY_PER_IMAGE,
+            reference_mode=REFERENCE_BARCODE, default_unit="حبه"))
+        barcode_source = out / "10000077_حبه~barcode.png"
+        _make_png(barcode_source)
+        barcode_result = FakeBatch(items=[FakeItem(
+            "10000077", str(barcode_source), barcode="6287021750464")],
+            workspace=str(tmp))
+        apply_join_all_units(barcode_result)
+        barcode_target = out / "6287021750464_كرتون.png"
+        check(barcode_target.is_file(),
+              "البـاركود المثبت يختار كرتون لا وحدة العبوة الأساسية",
+              barcode_target.name)
+        check(len(list(out.glob("6287021750464_*.png"))) == 1,
+              "لا نسخة إضافية ولا وحدة مدمجة لمسار الباركود")
+
+        save_settings(str(cfg_root), NamingSettings(
+            enabled=True, scheme=SCHEME_DASH,
+            unit_policy=UNIT_POLICY_PER_IMAGE,
+            reference_mode=REFERENCE_ITEM_CODE, default_unit="حبه"))
+        code_source = out / "10000077_حبه~code.png"
+        _make_png(code_source)
+        code_result = FakeBatch(items=[FakeItem(
+            "10000077", str(code_source), barcode="6287021750464")],
+            workspace=str(tmp))
+        apply_join_all_units(code_result)
+        code_target = out / "10000077_حبه.png"
+        check(code_target.is_file(),
+              "رقم الصنف يبقي وحدة Excel الأساسية المفردة",
+              code_target.name)
     except Exception as exc:  # noqa: BLE001
         check(False, "اختبار السياسة البديلة", str(exc)[:80])
     finally:
@@ -268,7 +311,7 @@ def main() -> int:
     # ملف غير موجود على القرص + عنصر بلا item_code + عنصر بلا مسار.
     bad = FakeBatch(items=[
         FakeItem("10000014", str(out / "غير_موجود.png")),
-        FakeItem("", str(out / "10000014_حبه_باكت.png")),
+        FakeItem("", str(out / "10000014_حبه.png")),
         FakeItem("10000014", ""),
     ], workspace=str(tmp))
     try:
@@ -307,10 +350,9 @@ def main() -> int:
                             workspace=str(tmp))
             apply_join_all_units(res)
             newp = Path(res.items[0].output_path)
-            ok = newp.is_file() and all(u.replace(" ", "") in newp.stem
-                                        for u in units)
-            check(ok, f"الصنف الحقيقي {code} حمل كل وحداته",
-                  f"{newp.stem}  (الوحدات: {'،'.join(units)})")
+            ok = newp.is_file() and newp.stem == f"{code}_{units[0].replace(' ', '')}"
+            check(ok, f"الصنف الحقيقي {code} حمل وحدة Excel المفردة",
+                  f"{newp.stem}  (الوحدة: {units[0]})")
         except Exception as exc:  # noqa: BLE001
             check(False, "قراءة كتالوج المالك", str(exc)[:80])
     else:
@@ -337,8 +379,7 @@ def main() -> int:
 
     fz = tmp / "frozen"
     code_fz = "20000001"
-    # الفقرة [6] بدّلت السياسة إلى per_image — نعيد join_all_units
-    # وإلا ارتدت الطبقة مباشرة ومرّ الفحص بلا اختبار شيء.
+    # حتى إعداد دمج قديم يجب أن يعود بوحدة Excel مفردة.
     save_settings(str(tmp), NamingSettings(
         enabled=True, scheme=SCHEME_DASH,
         unit_policy=UNIT_POLICY_JOIN_ALL, default_unit="حبه"))
@@ -349,12 +390,13 @@ def main() -> int:
                          workspace=str(fz))
     apply_join_all_units(res_fz)
     new_fz = Path(res_fz.items[0].output_path)
-    check(new_fz.stem == f"{code_fz}_حبه_باكت",
+    check(new_fz.stem == f"{code_fz}_حبه",
           "النتيجة المُجمَّدة تُحدَّث (dataclasses.replace)",
           new_fz.stem)
     check(new_fz.is_file(),
           "الملف موجود على القرص بالاسم الجديد", new_fz.name)
-    check(not p_fz.exists(), "الاسم القديم لم يبق مزدوجًا", p_fz.name)
+    check(len(list(fz.glob("*.png"))) == 1,
+          "لا توجد نسخة إضافية أو اسم مدمج", p_fz.name)
     # أهم فحص: القرص والنتيجة متسقان — لا صورة مفقودة.
     check(Path(res_fz.items[0].output_path).is_file(),
           "اتساق القرص مع النتيجة (لا صور مفقودة)")

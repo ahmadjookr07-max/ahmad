@@ -26,6 +26,9 @@ def run() -> None:
         assert "وحدة Excel" in combo.itemText(0)
         assert "باركود خطي مثبت" in combo.itemText(1)
         assert "مجلد منجز" in window.reference_mode_hint.text()
+        assert not window.join_units_check.isEnabled()
+        assert not window.join_units_check.isChecked()
+        assert "وحدة Excel مفردة فقط" in window.join_units_check.text()
         assert window.barcode_review_help.objectName() == "barcodeReviewHelp"
         assert "barcode_review_multiple_candidates.csv" in window.barcode_review_help.text()
         assert "لا يُختار باركود عشوائي" in window.barcode_review_help.text()

@@ -813,6 +813,11 @@ class NamingSettings:
         s.unit_policy = d.get("unit_policy", s.unit_policy)
         if s.unit_policy not in VALID_POLICIES:
             s.unit_policy = UNIT_POLICY_DEFAULT
+        # قاعدة التسمية النهائية الحالية: صورة واحدة = وحدة Excel واحدة.
+        # لا ندمج «حبه_كرتون» ولا ننشئ نسخًا لكل وحدة داخل الاسم أو
+        # المخرجات؛ المرجع وحده يتبدل بين رقم الصنف والباركود.
+        if s.unit_policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE):
+            s.unit_policy = UNIT_POLICY_DEFAULT
         # 2.9.10: أُلغيت ترقية 2.9.6 القسرية (per_image ⇒ join_all_units).
         # كانت تفرض الدمج على كل ملف إعدادات لا يحمل علم الاختيار الصريح،
         # فلو ألغى المالك الخيار من الواجهة ثم فُقد العلم لأي سبب عاد
@@ -906,6 +911,10 @@ def plan_stems_for_policy(item: str, units: list[str] | tuple[str, ...],
     if not clean:
         clean = [settings.default_unit or UNIT_SUFFIX_DEFAULT]
     policy = settings.unit_policy
+    # حاجز إنتاج: حتى لو وصل كائن إعداد قديم أو مُنشأ يدويًا بسياسة
+    # دمج/نسخ، يبقى الاسم النهائي بوحدة Excel مفردة فقط.
+    if policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE):
+        policy = UNIT_POLICY_DEFAULT
     if policy == UNIT_POLICY_JOIN_ALL:
         if barcode_mode:
             return [settings.render(item, seq, join_units(clean), total=total,

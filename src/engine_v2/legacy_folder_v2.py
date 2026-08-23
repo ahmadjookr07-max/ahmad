@@ -376,6 +376,33 @@ def _units_for_group(item: str, index, unit_in_name: str,
     return dedupe_units(units)
 
 
+def _observed_retail_barcode_for_group(group: LegacyGroup, index) -> str:
+    """يعيد باركودًا خطيًا واحدًا ظاهرًا في أسماء المجموعة إن وُجد.
+
+    أسماء المجلد المنجز قد تكون كتبت أصلًا بمرجع باركود Excel، مثل
+    ``6287021750464_كرتون-1``. لا يجوز فقد هذا الدليل ثم اختيار باركود
+    آخر للصنف اعتمادًا على وحدته الأساسية. نقبل فقط تطابقًا حرفيًا مع
+    باركود تجزئة مفهرس، ونمتنع عن تمرير قيمة عند تعدد الباركودات الظاهرة.
+    """
+    if index is None:
+        return ""
+    try:
+        rows = index.retail_barcode_rows_for_code(str(group.item))
+    except Exception:
+        return ""
+    seen: list[str] = []
+    for image in group.images:
+        stem = str(image.stem or "")
+        for row in rows:
+            barcode = str(row.get("barcode", "") or "")
+            if (barcode and (stem == barcode
+                             or stem.startswith(f"{barcode}_")
+                             or stem.startswith(f"{barcode}-"))
+                    and barcode not in seen):
+                seen.append(barcode)
+    return seen[0] if len(seen) == 1 else ""
+
+
 def _target_stems_policy(item: str, units: list[str], count: int,
                          settings, fallback_unit: str = "", barcode: str = ""
                          ) -> list[list[str]]:
@@ -456,10 +483,18 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
     settings = _naming_settings()
     active = bool(settings is not None and getattr(settings, "enabled", True))
     policy = str(getattr(settings, "unit_policy", "")) if active else ""
-    join_all = policy == UNIT_POLICY_JOIN_ALL
-    # السياسات التي تحتاج كل وحدات الإكسل بترتيبه الحرفي.
-    needs_units = policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE,
-                             UNIT_POLICY_DEFAULT)
+    # لا دمج ولا نسخ وحدات في الاسم النهائي، حتى لو وصل كائن إعداد
+    # قديم قبل ترحيله. وحدة Excel الأساسية أو وحدة الباركود المطابقة
+    # هي الوحيدة التي تُكتب لكل صورة.
+    if policy in (UNIT_POLICY_JOIN_ALL, UNIT_POLICY_REPLICATE):
+        policy = UNIT_POLICY_DEFAULT
+        try:
+            settings.unit_policy = UNIT_POLICY_DEFAULT
+        except Exception:
+            pass
+    join_all = False
+    # نحتاج الوحدات فقط لاستخراج الوحدة المفردة الصحيحة من Excel.
+    needs_units = policy == UNIT_POLICY_DEFAULT
     barcode_mode = str(getattr(settings, "reference_mode", "item_code")) == "barcode"
 
     for item in sorted(groups):
@@ -490,10 +525,17 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
             if barcode_mode:
                 try:
                     resolver = getattr(index, "resolve_retail_barcode", None)
-                    decision = (resolver(item, unit=unit) if callable(resolver)
-                                else {})
+                    observed_barcode = _observed_retail_barcode_for_group(grp, index)
+                    decision = (resolver(item, unit=unit,
+                                         observed=observed_barcode)
+                                if callable(resolver) else {})
                     barcode = str(decision.get("barcode", "") or "")
                     barcode_status = str(decision.get("status", "") or "")
+                    # عند ثبوت باركود Excel، وحدة السجل المطابق هي
+                    # المرجع النهائي؛ لا نعيد استخدام أول وحدة للصنف.
+                    resolved_unit = str(decision.get("unit", "") or "")
+                    if barcode and resolved_unit:
+                        unit = resolved_unit
                 except Exception:
                     barcode, barcode_status = "", "missing"
 

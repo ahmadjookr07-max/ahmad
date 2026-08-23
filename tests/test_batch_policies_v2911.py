@@ -148,7 +148,7 @@ def test_default_unit_fallback() -> None:
 
 
 def test_join_all() -> None:
-    print("\n[2] السياسة: دمج كل الوحدات")
+    print("\n[2] إعداد دمج قديم ⇒ وحدة Excel مفردة")
     tmp = Path(tempfile.mkdtemp())
     try:
         _install({"10008272": ["باكت", "حبه", "كرتون"]},
@@ -156,9 +156,8 @@ def test_join_all() -> None:
         res = _build(tmp, {"10008272": "10008272_حبه.webp"})
         bnp.apply_join_all_units(res)
         got = sorted(_names(tmp))
-        check(len(got) == 1 and got[0].startswith("10008272_")
-              and "باكت" in got[0] and "كرتون" in got[0],
-              f"كل الوحدات في اسم واحد: {got}")
+        check(got == ["10008272_باكت.webp"],
+              f"لا وحدات مدمجة في الاسم: {got}")
         check(Path(res.items[0].output_path).is_file(),
               "output_path يشير لملف موجود")
     finally:
@@ -183,7 +182,7 @@ def test_per_image() -> None:
 
 
 def test_replicate() -> None:
-    print("\n[4] السياسة: نسخة لكل وحدة")
+    print("\n[4] إعداد نسخ قديم ⇒ ملف واحد بوحدة Excel")
     tmp = Path(tempfile.mkdtemp())
     try:
         units = ["حبه", "كرتون", "باكت"]
@@ -192,12 +191,10 @@ def test_replicate() -> None:
         res = _build(tmp, {"10010033": "10010033_حبه_قديم.webp"})
         bnp.apply_join_all_units(res)
         got = _names(tmp)
-        check(len(got) == len(units),
-              f"عدد الملفات = عدد الوحدات ({len(units)}): {sorted(got)}")
-        for u in units:
-            check(any(u in n for n in got), f"توجد نسخة للوحدة: {u}")
-        blobs = {(tmp / n).read_bytes() for n in got}
-        check(len(blobs) == 1, "كل النسخ بنفس محتوى الأصل")
+        check(got == {"10010033_حبه.webp"},
+              f"ملف واحد بوحدة مفردة: {sorted(got)}")
+        check("كرتون" not in next(iter(got)) and "باكت" not in next(iter(got)),
+              "لا وحدات إضافية أو مدمجة")
         check(len(res.items) == 1,
               "النسخ لم تُقحم في items (لا يتضاعف عدّاد المعالجة)")
         check(Path(res.items[0].output_path).is_file(),
@@ -207,7 +204,7 @@ def test_replicate() -> None:
 
 
 def test_replicate_completes_missing() -> None:
-    print("\n[5] استيفاء نسخ ناقصة لاسم مطابق سلفًا")
+    print("\n[5] إعداد نسخ قديم لا يستوفي نسخًا إضافية")
     tmp = Path(tempfile.mkdtemp())
     try:
         units = ["حبه", "كرتون"]
@@ -218,7 +215,7 @@ def test_replicate_completes_missing() -> None:
         res = _build(tmp, {"10000099": f"{first}.webp"})
         bnp.apply_join_all_units(res)
         got = _names(tmp)
-        check(len(got) == 2, f"استُوفيت النسخة الناقصة: {sorted(got)}")
+        check(len(got) == 1, f"لم تُنشأ نسخة إضافية: {sorted(got)}")
         check(f"{first}.webp" in got, "الملف الأصلي لم يُعد تسميته عبثًا")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

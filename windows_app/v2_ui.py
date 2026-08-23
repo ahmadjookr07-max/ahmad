@@ -1206,20 +1206,24 @@ class UnitNamingDialog(QDialog):
 
         intro = QLabel(
             "تُقرأ الوحدة حرفيًا من ملف الإكسل (حبه/حبة/شدة/شده/كرتون/باكت...) دون أي تعديل.\n"
-            "اختر سياسة موحدة تُطبق على جميع الأصناف، مع إمكانية تعديل أي مسمى لاحقًا."
+            "الاسم النهائي يعتمد وحدة Excel مفردة فقط؛ عند اختيار الباركود تُؤخذ الوحدة من سجل الباركود المطابق."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
         pol_box = QGroupBox("سياسة الوحدات للأصناف متعددة الوحدات")
         pol_lay = QVBoxLayout(pol_box)
-        self.rb_per_image = QRadioButton("اسألني لكل صورة (اختيار الوحدة يدويًا عند الربط)")
-        self.rb_join_all = QRadioButton(
-            "جمع كل وحدات الصنف من الإكسل في اسم واحد: رقم الصنف_حبة_شدة_كرتون —"
-            " الرئيسية بلا رقم والإضافية -1 / -2 / -3 (حسب الإكسل بالضبط)")
-        self.rb_replicate = QRadioButton("توليد نسخة لكل وحدة تلقائيًا من نفس الصورة (حبه + شدة + كرتون...)")
-        self.rb_default = QRadioButton("اعتماد وحدة افتراضية واحدة:")
-        self.rb_free = QRadioButton("وضع حر — بلا وحدات ولا إكسل (اسم الملف كما أكتبه بنفسي)")
+        self.rb_per_image = QRadioButton(
+            "وحدة Excel مفردة: الوحدة المطابقة للباركود أو الوحدة الأساسية لرقم الصنف")
+        self.rb_per_image.setChecked(True)
+        self.rb_join_all = QRadioButton("دمج كل الوحدات في اسم واحد (معطّل)")
+        self.rb_join_all.setEnabled(False)
+        self.rb_replicate = QRadioButton("توليد نسخة لكل وحدة (معطّل)")
+        self.rb_replicate.setEnabled(False)
+        self.rb_default = QRadioButton("اعتماد وحدة افتراضية واحدة (معطّل):")
+        self.rb_default.setEnabled(False)
+        self.rb_free = QRadioButton("وضع حر بلا وحدة Excel (معطّل)")
+        self.rb_free.setEnabled(False)
         default_row = QHBoxLayout()
         self.default_unit_combo = QComboBox()
         self.default_unit_combo.setMinimumWidth(180)
@@ -1357,12 +1361,9 @@ class UnitNamingDialog(QDialog):
         self._reference_mode = str(data.get("reference_mode", "item_code") or "item_code")
         if self._reference_mode not in {"item_code", "barcode"}:
             self._reference_mode = "item_code"
-        pol = data.get("unit_policy", "per_image")
-        {"per_image": self.rb_per_image,
-         "join_all_units": self.rb_join_all,
-         "replicate_all_units": self.rb_replicate,
-         "default_unit": self.rb_default,
-         "free": self.rb_free}.get(pol, self.rb_per_image).setChecked(True)
+        # قاعدة الإصدار الحالي: لا دمج ولا نسخ وحدات؛ اسم واحد بوحدة
+        # Excel المفردة المطابقة فقط، لذلك تُرحّل السياسات القديمة هنا.
+        self.rb_per_image.setChecked(True)
         if data.get("default_unit"):
             i = self.default_unit_combo.findText(data["default_unit"])
             if i >= 0:
@@ -1421,11 +1422,8 @@ class UnitNamingDialog(QDialog):
             self._update_preview()
 
     def current_policy(self) -> dict:
-        pol = ("join_all_units" if self.rb_join_all.isChecked()
-               else "replicate_all_units" if self.rb_replicate.isChecked()
-               else "default_unit" if self.rb_default.isChecked()
-               else "free" if self.rb_free.isChecked()
-               else "per_image")
+        # لا تسمح الواجهة بحفظ سياسة تُنتج وحدات مدمجة أو نسخًا متعددة.
+        pol = "per_image"
         scheme = self._current_scheme()
         default_tpl = ("{item}_{seq}_{unit}" if scheme == "classic"
                        else "{item}_{unit}-{seq}")

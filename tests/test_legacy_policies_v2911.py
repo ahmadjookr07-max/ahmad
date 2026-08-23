@@ -70,14 +70,14 @@ def _plan_with_policy(folder: Path, policy: str):
 
 
 def test_join_all_units():
-    """الدمج: كل وحدات الإكسل بترتيبها، والثانية `-1` (2.9.12)."""
+    """إعداد دمج قديم يُرحّل إلى وحدة Excel مفردة."""
     tmp = Path(tempfile.mkdtemp())
     try:
         folder = _make_folder(tmp)
         plan, _ = _plan_with_policy(folder, UNIT_POLICY_JOIN_ALL)
         stems = [r.new_stem for r in plan.rows]
-        assert stems[0] == f"{ITEM}_حبه_شدة_كرتون", stems
-        assert stems[1] == f"{ITEM}_حبه_شدة_كرتون-1", stems
+        assert stems[0] == f"{ITEM}_حبه", stems
+        assert stems[1] == f"{ITEM}_حبه-1", stems
         assert all(not r.copies for r in plan.rows)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -97,24 +97,23 @@ def test_default_unit_reads_excel():
 
 
 def test_replicate_plans_one_name_per_unit():
-    """نسخة لكل وحدة: ثلاثة أسماء لكل صورة، والباقي نُسخ لا نقل."""
+    """إعداد النسخ القديم يُنتج اسمًا واحدًا بوحدة Excel المفردة."""
     tmp = Path(tempfile.mkdtemp())
     try:
         folder = _make_folder(tmp)
         plan, _ = _plan_with_policy(folder, UNIT_POLICY_REPLICATE)
         first = plan.rows[0]
         assert first.new_stem == f"{ITEM}_حبه", first.new_stem
-        assert first.copies == [f"{ITEM}_شدة", f"{ITEM}_كرتون"], first.copies
+        assert first.copies == [], first.copies
         second = plan.rows[1]
         assert second.new_stem == f"{ITEM}_حبه-1", second.new_stem
-        assert second.copies == [f"{ITEM}_شدة-1", f"{ITEM}_كرتون-1"], \
-            second.copies
+        assert second.copies == [], second.copies
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_replicate_applies_copies_on_disk():
-    """التنفيذ الفعلي: ست صور بعد النسخ ولا ملف مفقود."""
+    """إعداد النسخ القديم لا ينشئ صورًا إضافية أو وحدات مدمجة."""
     tmp = Path(tempfile.mkdtemp())
     try:
         folder = _make_folder(tmp)
@@ -122,14 +121,10 @@ def test_replicate_applies_copies_on_disk():
         res = LF.apply_legacy_plan(plan)
         assert not res["errors"], res["errors"]
         names = sorted(p.name for p in folder.glob("*.webp"))
-        expected = sorted([
-            f"{ITEM}_حبه.webp", f"{ITEM}_شدة.webp", f"{ITEM}_كرتون.webp",
-            f"{ITEM}_حبه-1.webp", f"{ITEM}_شدة-1.webp", f"{ITEM}_كرتون-1.webp",
-        ])
+        expected = sorted([f"{ITEM}_حبه.webp", f"{ITEM}_حبه-1.webp"])
         assert names == expected, names
-        # لا فقدان بيانات: كل نسخة تحمل محتوى أصلها
-        assert (folder / f"{ITEM}_شدة.webp").read_bytes() == b"a"
-        assert (folder / f"{ITEM}_كرتون-1.webp").read_bytes() == b"b"
+        assert (folder / f"{ITEM}_حبه.webp").read_bytes() == b"a"
+        assert (folder / f"{ITEM}_حبه-1.webp").read_bytes() == b"b"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
