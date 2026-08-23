@@ -3,8 +3,8 @@
 # مولَّد آليًا من ملف VERSION — لا تعدّله يدويًا.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(3, 4, 6, 0),
-    prodvers=(3, 4, 6, 0),
+    filevers=(3, 4, 7, 0),
+    prodvers=(3, 4, 7, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -20,13 +20,13 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Ahmed Al-Faifi'),
             StringStruct('FileDescription', 'Ahmed Al-Faifi Market Image Studio'),
-            StringStruct('FileVersion', '3.4.6'),
+            StringStruct('FileVersion', '3.4.7'),
             StringStruct('InternalName', 'AhmedAlFaifiMarketImageStudio'),
             StringStruct('LegalCopyright',
                          'Copyright (c) 2026 Ahmed Al-Faifi. All rights reserved.'),
             StringStruct('OriginalFilename', 'AhmedAlFaifiMarketImageStudio.exe'),
             StringStruct('ProductName', 'Ahmed Al-Faifi Market Image Studio'),
-            StringStruct('ProductVersion', '3.4.6')
+            StringStruct('ProductVersion', '3.4.7')
           ]
         )
       ]

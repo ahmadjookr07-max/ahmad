@@ -210,6 +210,40 @@ def parse_legacy_stem(stem: str) -> tuple[str, str, int, str] | None:
     return None
 
 
+def _parse_catalog_barcode_stem(stem: str, index) -> tuple[str, str, int, str] | None:
+    """يفك اسمًا ناتجًا من وضع «باركود Excel» إلى رقم الصنف.
+
+    لا تفترض أن الباركود رقمي فقط؛ بعض ملفات Excel التجارية تحتوي
+    مراجع مثل ``006-090`` أو ``3P-DT-10``. نعطي المطابقة الكاملة
+    أولوية، ثم نفصل لاحقة التسلسل النهائية ``-1`` فقط إذا كان المرجع
+    قبلها باركودًا موجودًا حرفيًا في Excel. هكذا لا نخلط ``-10``
+    الموجود داخل الباركود مع رقم صورة.
+    """
+    if index is None:
+        return None
+    raw = str(stem or "").strip()
+    if not raw:
+        return None
+
+    def lookup(value: str):
+        try:
+            return index.lookup_barcode(value)
+        except Exception:
+            return None
+
+    record = lookup(raw)
+    if record and record.get("code"):
+        return (str(record["code"]), "", 0, "catalog_barcode")
+
+    ref, dash, suffix = raw.rpartition("-")
+    if dash and ref and suffix.isdigit():
+        record = lookup(ref)
+        if record and record.get("code"):
+            return (str(record["code"]), "", max(1, int(suffix)),
+                    "catalog_barcode_dash")
+    return None
+
+
 def scan_legacy_folder(folder: str | Path,
                        suffixes: tuple[str, ...] = IMAGE_SUFFIXES,
                        index=None
@@ -243,7 +277,12 @@ def scan_legacy_folder(folder: str | Path,
         stem = path.stem
         if stem in seen_stems:
             continue
-        parsed = parse_legacy_stem(stem)
+        # مصدر Excel مقدّم على تحليل الاسم القديم: ``006-090-1``
+        # قد يطابق شكليًا «رقم_وحدة-تسلسل» لكنه في الحقيقة باركود
+        # ``006-090`` وصورته الثانية. لا تخمين ولا OCR هنا.
+        parsed = _parse_catalog_barcode_stem(stem, index)
+        if parsed is None:
+            parsed = parse_legacy_stem(stem)
         if parsed is None:
             unparsed.append(path)
             continue
