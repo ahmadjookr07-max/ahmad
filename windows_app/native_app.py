@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.13"
+APP_VERSION = "3.4.14"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -732,6 +732,98 @@ class EditorDirectSaveResult:
 
     def __init__(self, output_path: str) -> None:
         self.output_path = str(output_path)
+
+
+def _manual_source_key(item: object) -> str:
+    """مفتاح ثابت لمصدر الصورة عند دمج نتيجة ربط جزئية بالجلسة."""
+    name = str(getattr(item, "source_name", "") or "").strip()
+    if name:
+        return name.replace("\\", "/").casefold()
+    path = str(getattr(item, "source_path", "") or "").strip()
+    return Path(path).name.casefold() if path else ""
+
+
+def merge_manual_link_result(current_result, update_result, source_names=()):
+    """يحدّث صور الربط فقط، ولا يستبدل بقية صفوف جلسة المعالجة.
+
+    ``apply_manual_link`` يعيد غالبًا نتيجةً جزئية للصورة أو الصور التي
+    عُدّلت. استبدال ``current_result`` بها يمحو بقية الصفوف من الجدول رغم
+    بقاء ملفاتها سليمة في مجلد النتائج. هنا نحافظ على ترتيب كامل الجلسة
+    ونستبدل فقط الصفوف التي تحمل مصادر النتيجة الجديدة.
+    """
+    if current_result is None:
+        return update_result
+    updates = list(getattr(update_result, "items", []) or [])
+    if not updates:
+        return current_result
+
+    by_source: dict[str, object] = {}
+    for item in updates:
+        key = _manual_source_key(item)
+        if key:
+            by_source[key] = item
+    if not by_source:
+        # لا توجد هوية مصدر موثوقة؛ لا نعرض نتيجة جزئية على أنها الجلسة.
+        return current_result
+
+    existing = list(getattr(current_result, "items", []) or [])
+    merged: list[object] = []
+    seen_keys: set[str] = set()
+    for item in existing:
+        key = _manual_source_key(item)
+        replacement = by_source.get(key)
+        if replacement is not None:
+            merged.append(replacement)
+            seen_keys.add(key)
+        else:
+            merged.append(item)
+    # قد تكون الصورة المربوطة لم تكن ضمن النتيجة السابقة (حالة نادرة:
+    # استعادة جلسة قديمة أو إضافة مصدر يدوي)؛ نضيفها بدل إسقاطها.
+    for item in updates:
+        key = _manual_source_key(item)
+        if key and key not in seen_keys and key not in {
+            _manual_source_key(old) for old in existing
+        }:
+            merged.append(item)
+            seen_keys.add(key)
+
+    metadata = {}
+    for attr in ("delivery_zip", "report_json", "report_csv", "database_path"):
+        value = getattr(update_result, attr, None)
+        if value:
+            metadata[attr] = value
+
+    # نتائج المحرك في بعض الإصدارات frozen dataclasses، وفي أخرى كائنات
+    # عادية. ندعم الحالتين بلا كسر الواجهة ولا تغيير مرجع الجلسة جزئيًا.
+    if _dc.is_dataclass(current_result):
+        try:
+            return _dc.replace(current_result, items=merged, **metadata)
+        except Exception:
+            try:
+                return _dc.replace(current_result, items=merged)
+            except Exception:
+                pass
+    try:
+        setattr(current_result, "items", merged)
+        for attr, value in metadata.items():
+            try:
+                setattr(current_result, attr, value)
+            except Exception:
+                pass
+        return current_result
+    except Exception:
+        pass
+    if _dc.is_dataclass(update_result):
+        try:
+            return _dc.replace(update_result, items=merged)
+        except Exception:
+            pass
+    try:
+        setattr(update_result, "items", merged)
+        return update_result
+    except Exception:
+        # الحماية الأخيرة: إبقاء الجلسة الكاملة خير من عرض نتيجة جزئية.
+        return current_result
 
 
 class IndividualEditWorker(QThread):
@@ -8846,7 +8938,10 @@ class MainWindow(QMainWindow):
         resolved_code = resolved_codes[0] if len(resolved_codes) == 1 else ""
         if linked_items:
             self._manual_reference_source_name = linked_items[0].source_name
-        self.current_result = result
+        # لا تستبدل الجلسة الكاملة بنتيجة الربط الجزئية؛ هذا هو سبب
+        # اختفاء صور من الجدول رغم بقائها في المجلد النهائي.
+        self.current_result = merge_manual_link_result(
+            self.current_result, result, source_names)
         self.manual_item_edit.clear()
         # تصفير الميل اليدوي بعد تطبيقه — كي لا ينتقل سهوًا للصورة التالية
         spin = getattr(self, "manual_tilt_spin", None)
