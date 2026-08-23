@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.20"
+APP_VERSION = "3.4.21"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -533,11 +533,9 @@ class BatchWorker(QThread):
                 maximum_barcode_tier=3,
                 progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
             )
-            # كل صورة مرتبطة تلقائيًا أو يدويًا تمر بالمراحل نفسها التي
-            # أثبتها الفيديو. لا نعالج صور المراجعة غير المرتبطة هنا.
-            if self.remove_background:
-                auto_finish_linked_outputs(result, self.workspace)
-            self._quality_post_pass(result)
+            # المعالج V2 ينتج الآن العزل والتنقيح والظل والتأطير 800×700
+            # في الحفظ الأول نفسه. إعادة فتح الناتج لعزل/تحسين/طمس جديد
+            # كانت تعيد العمل نفسه وتؤخر كل صورة مرتبطة بلا مكسب بصري.
             self.completed.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -716,13 +714,9 @@ class ManualLinkWorker(QThread):
                         final_image_options=self.image_options,
                     )
             self._apply_rotation_to_outputs(result)
-            # مطابق لخطوة «توسيط واعتماد الإطار» في فيديو المالك: بعد
-            # الربط نعيد العزل والتأطير من المصدر فوق نفس ملف النتيجة.
-            # لا يُشغّل عند إلغاء العزل صراحةً.
-            self.auto_finished_count = (
-                auto_finish_linked_outputs(result, self.workspace)
-                if self.remove_background else 0
-            )
+            # V2 ينفذ «توسيط واعتماد الإطار 800×700» داخل الحفظ الأول؛
+            # لا نعيد العزل من المصدر ولا نفتح WebP ثانيةً بعد الربط.
+            self.auto_finished_count = 0
             self.completed.emit(result)
         except Exception:
             self.failed.emit(self._augment_failure(traceback.format_exc()))
@@ -9250,7 +9244,7 @@ class MainWindow(QMainWindow):
             message = f"تم تعديل/ربط {count} صور وتحديث أرقام الأصناف النهائية."
         auto_finished = int(getattr(self.manual_worker, "auto_finished_count", 0) or 0)
         auto_note = (
-            f" نُفّذت معالجة النتيجة المطابقة للمحرر ({auto_finished} صورة: عزل وتأطير 800×700)."
+            f" اكتملت المعالجة النهائية داخل الحفظ الأول ({auto_finished} صورة)."
             if auto_finished else ""
         )
         self.status_label.setText(

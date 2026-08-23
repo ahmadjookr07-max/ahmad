@@ -44,9 +44,9 @@ class ProcessOptionsV2:
     width: int = 800
     height: int = 700
     margin: int = 40
-    # عند ضبطها تستخدم نفس قاعدة المحرر: 6% من كل بُعد، بدل هامش
-    # بكسلي موحّد لا يطابق لوحة 800×700 أفقيًا وعموديًا.
-    frame_margin_ratio: float | None = None
+    # افتراضي المحرر: 6% من كل بُعد، بدل هامش بكسلي موحّد لا يطابق
+    # لوحة 800×700 أفقيًا وعموديًا. يجعل أول حفظ هو النتيجة النهائية.
+    frame_margin_ratio: float | None = 0.06
     enhance: bool = True
     webp_lossless: bool = True
     # حقائق التغذية
@@ -58,8 +58,10 @@ class ProcessOptionsV2:
     # تعديلات يدوية
     manual_rotation_degrees: float = 0.0
     manual_crop_corners: list | None = None      # 8 قيم منظور
-    # ظل
-    shadow_preset: str = ""                      # اسم preset من shadow_v2
+    # تنقيح الحواف اختياري للحالات الصعبة فقط. الربط العادي يلتزم بقناع
+    # المحرر الخام؛ فهذا هو المسار الذي أثبت دقته على صور المالك.
+    finish_product: bool = False
+    shadow_preset: str = ""                        # اسم preset من shadow_v2
     # محرك الجودة الواعي بالنص + طمس التواريخ
     quality: int | None = None                    # 50–100؛ None = السلوك القديم
     output_format: str = ""                      # webp | png | jpeg؛ "" = دون تغيير
@@ -359,6 +361,17 @@ class ProcessorV2:
                 _pre = self._prescale_to_target(img, alpha, opts)
                 if _pre is not None:
                     img, alpha, _pre_scaled = _pre
+
+            # تنقيح اختياري على الصورة المصغرة حول المنتج. لا يُفعل في
+            # الربط العادي لأن المحرر المرجعي يعتمد قناع العزل الخام نفسه.
+            if getattr(opts, "finish_product", True):
+                try:
+                    from .product_finish_v2 import finish_product
+                    img, finished_alpha, finish_report = finish_product(img, alpha)
+                    alpha = finished_alpha.astype(np.float32) / 255.0
+                    res.warnings.extend(getattr(finish_report, "notes", []) or [])
+                except Exception as exc:
+                    res.warnings.append(f"تعذر تنقيح الحواف: {exc}")
 
             # تركيب على أبيض + تحسين
             with _span("compose_on_white"):

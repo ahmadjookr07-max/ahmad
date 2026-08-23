@@ -581,16 +581,46 @@ def activate(model_dir: str = "") -> bool:
                 try:
                     src = str(source_path)
                     opts = _coerce_options(IMAGE_OVERRIDES.get(src), src)
+                    requested = Path(str(output_path))
+                    item = str(kwargs.get("item_number", "") or "").strip()
+                    unit = str(kwargs.get("unit", UNIT_SUFFIX_DEFAULT) or
+                               UNIT_SUFFIX_DEFAULT).strip()
+                    # وحدة الصف في Excel هي المرجع عند وجودها؛ فالمعالج
+                    # الموروث يمرر أحيانًا «حبة» الافتراضية بدل «حبه» الفعلية.
+                    catalog_units = _units_from_catalog(item, excel_order=False) if item else []
+                    if catalog_units:
+                        unit = str(catalog_units[0]).strip() or unit
+                    # صيغة الأسماء التاريخية للجلسات هي «حبه»، أما المحرك
+                    # الموروث فيمرر أحيانًا «حبة»؛ نوحدها كي لا يظهر ملفان
+                    # لنفس الصورة بسبب اختلاف حرف واحد.
+                    if unit == "حبة":
+                        unit = "حبه"
+                    # المعالج الموروث يستقبل **مجلدًا** ثم يسمي الملف في
+                    # داخله. تمرير المجلد إلى ProcessorV2 كأنه ملف يجعل
+                    # الكتابة تفشل بصمت فيرجع إلى العزل القديم البطيء.
+                    # نبني الملف النهائي هنا بالسياسة الموحدة نفسها.
+                    if requested.suffix:
+                        target = requested
+                    elif item:
+                        requested.mkdir(parents=True, exist_ok=True)
+                        target = requested / f"{build_output_stem(requested, item, unit)}.webp"
+                    else:
+                        # لا نخمن اسمًا إذا غاب رقم الصنف؛ اترك المسار
+                        # الموروث يتعامل مع الحالة حتى لا تُنسب صورة خطأ.
+                        return orig(self, source_path, output_path,
+                                    *args, **kwargs)
                     proc = get_processor(model_dir)
-                    res = proc.process(src, str(output_path), opts)
+                    res = proc.process(src, str(target), opts)
                     if res.ok:
                         try:
                             return orig(self, source_path, output_path,
                                         *args, **kwargs) \
                                 if os.environ.get("V2_CHAIN_OLD") else \
-                                _mk_result(orig, self, res)
+                                _mk_result(orig, self, res, source_path,
+                                           target, kwargs, opts)
                         except Exception:
-                            return _mk_result(orig, self, res)
+                            return _mk_result(orig, self, res, source_path,
+                                              target, kwargs, opts)
                     # فشل V2 → الأصلي
                     return orig(self, source_path, output_path,
                                 *args, **kwargs)
@@ -599,20 +629,63 @@ def activate(model_dir: str = "") -> bool:
                                 *args, **kwargs)
             return _v2_process
 
-        def _mk_result(orig, self_obj, res):
-            # حاول استنتاج صنف النتيجة من أول تشغيل قديم أو من annotations
-            result_cls = getattr(orig, "__annotations__", {}).get("return")
-            if isinstance(result_cls, str) or result_cls is None:
-                # ابحث في الوحدة عن *Result dataclass
-                import sys
-                mod2 = sys.modules.get(type(self_obj).__module__)
-                for attr in dir(mod2):
-                    if attr.endswith("Result"):
-                        result_cls = getattr(mod2, attr)
-                        break
-            wrapped = _wrap_result(result_cls, True, res.output_path, "",
-                                   {})
-            return wrapped if wrapped is not None else res
+        def _mk_result(orig, self_obj, res, source_path, target, original_kwargs, opts):
+            """يحوّل نتيجة V2 إلى ``FinalImageResult`` كاملة.
+
+            لا يكفي ``output_path`` وحده: خط الدفعة يقرأ حقول طريقة العزل
+            والمقاس والنسب قبل إنشاء صفه. رجوع كائن V2 الخام جعله ينهار
+            ثم يعيد تشغيل المعالج القديم. نبني النتيجة الموروثة بلا أي
+            معالجة بكسلات إضافية.
+            """
+            from types import SimpleNamespace
+            import hashlib
+            import cv2
+
+            def _sha256(path):
+                digest = hashlib.sha256()
+                try:
+                    with open(path, "rb") as handle:
+                        for block in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(block)
+                    return digest.hexdigest()
+                except Exception:
+                    return ""
+
+            src_path, out_path = Path(str(source_path)), Path(str(target))
+            source = cv2.imread(str(src_path), cv2.IMREAD_COLOR)
+            output = cv2.imread(str(out_path), cv2.IMREAD_COLOR)
+            sh, sw = source.shape[:2] if source is not None else (0, 0)
+            oh, ow = output.shape[:2] if output is not None else (0, 0)
+            item = str(original_kwargs.get("item_number", "") or "")
+            unit = str(original_kwargs.get("unit", UNIT_SUFFIX_DEFAULT) or
+                       UNIT_SUFFIX_DEFAULT)
+            product = str(original_kwargs.get("product_name", "") or "")
+            values = {
+                "source_path": str(src_path),
+                "output_path": str(out_path),
+                "item_number": item,
+                "unit": unit,
+                "product_name": product,
+                "source_sha256": _sha256(src_path),
+                "output_sha256": _sha256(out_path),
+                "source_width": int(sw), "source_height": int(sh),
+                "output_width": int(ow), "output_height": int(oh),
+                "foreground_method": "editor_v2",
+                "foreground_ratio": float(getattr(res, "confidence", 0.0) or 0.0),
+                "crop_bbox": (0, 0, int(ow), int(oh)),
+                "background_removed": True,
+                "display_enhanced": bool(getattr(opts, "enhance", True)),
+                "presentation_rotation_degrees": 0.0,
+                "warnings": list(getattr(res, "warnings", []) or []),
+                "foreground_quality_score": float(getattr(res, "confidence", 0.0) or 0.0),
+                "foreground_quality_status": "editor_v2",
+                "foreground_quality_metrics": {},
+            }
+            try:
+                from smart_catalog_vision.final_images import FinalImageResult
+                return FinalImageResult(**values)
+            except Exception:
+                return SimpleNamespace(**values)
 
         cls.process = make_v2_process(original)
         cls._v2_patched = True

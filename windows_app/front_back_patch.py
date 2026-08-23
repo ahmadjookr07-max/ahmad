@@ -75,11 +75,6 @@ def _apply_auto_links(result: object, links: list[tuple[str, str]],
             enhance_product=enhance_product,
             final_image_options=image_options,
         )
-        if remove_background:
-            # يعيد زر «توسيط 800×700» من المصدر لكل وجه تم ربطه بثقة؛
-            # لا يغير الاسم أو قائمة النتائج، ويترك أي ملف مفقود كما هو.
-            from native_app import auto_finish_linked_outputs
-            auto_finish_linked_outputs(result, workspace)
     return result
 
 

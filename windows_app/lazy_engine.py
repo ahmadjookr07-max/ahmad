@@ -86,6 +86,14 @@ def load_engine() -> Any:
 
         _apply_perspective_patch(_pipeline)
         _apply_lossless_quality_patch(_final)
+        # الباركود الخطي وحده هو دليل الربط: لا OCR أو مطابقة اسم ملف
+        # للصور التي لا باركود فيها، فتظهر فورًا للمراجعة/ربط الوجه والخلف.
+        try:
+            from linear_barcode_fast_path import install_linear_barcode_fast_path
+            install_linear_barcode_fast_path(_pipeline)
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[barcode-fast] تعذر تركيب المسار السريع: {exc}",
+                  file=sys.stderr)
         # 2.9.12 — ترقيعات السلامة: تمنع اختفاء الصور عند
         # الربط وفشل الحفظ بعد الطمس. تُطبّق هنا لأن
         # ``smart_catalog_vision`` مُسلَّم مُصرَّفًا فلا يُعدّل من الداخل،
@@ -97,12 +105,8 @@ def load_engine() -> Any:
         except Exception as exc:                      # noqa: BLE001
             print(f"[integrity] تعذر تطبيق ترقيعات السلامة: {exc}",
                   file=sys.stderr)
-        # تقريب آمن بعد العزل: المنتج يبقى في المنتصف ولا تُقص حوافه.
-        try:
-            from framing_zoom_patch import install_final_framing_patch
-            install_final_framing_patch(_final)
-        except Exception as exc:                      # noqa: BLE001
-            print(f"[framing] تعذر تطبيق تقريب المنتج: {exc}", file=sys.stderr)
+        # لا تُركّب رقعة تقريب 106% القديمة: V2 يطبق قناع محرر الصور
+        # وتأطير 800×700 في الحفظ الوحيد، وأي تأطير ثانٍ يبطئ ويشوّه النتيجة.
         _real_final_images = _final
         _real_pipeline = _pipeline
         return _real_pipeline

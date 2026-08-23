@@ -203,31 +203,24 @@ def _patch_processor() -> bool:
         orig_process = pv2.ProcessorV2.process
 
         def patched_process(self, source_path, output_path, opts=None):
-            # نُشغّل الخط الأصلي أولًا
-            res = orig_process(self, source_path, output_path, opts)
-            # ثم نُطبّق التشطيب على الناتج إن نجح
+            """يمرر الظل إلى المعالجة الأولى بدل تعديل WebP بعد حفظه.
+
+            المسار القديم كان يقرأ الناتج 800×700 من القرص، يستخرج قناعًا
+            تقريبيًا من الأبيض، يقصه، ثم يحفظه بجودة 90. ذلك كسر أبعاد
+            المحرر وأضاف كتابة ثانية لكل صورة. الآن يصل الظل إلى المعالج
+            قبل التأطير، فتخرج لوحة 800×700 النهائية بكتابة واحدة.
+            """
             try:
-                if res is not None and _AUTO_SHADOW_AFTER_ISOLATION:
-                    out = Path(output_path)
-                    if out.is_file():
-                        import cv2
-                        import numpy as np
-                        img = cv2.imread(str(out), cv2.IMREAD_COLOR)
-                        if img is not None:
-                            # نستخرج القناع من الخلفية البيضاء ونضيف ظل تلامس خفيف.
-                            from engine_v2.shape_aware_v2 import mask_from_white
-                            mask = mask_from_white(img)
-                            alpha = mask.astype(np.float32) * 255.0
-                            img2, _ = apply_finish_to_image(
-                                img, alpha,
-                                auto_shadow=True,
-                                straighten=False,  # التقويم يحدث قبل العزل
-                            )
-                            cv2.imwrite(str(out), img2,
-                                        [cv2.IMWRITE_WEBP_QUALITY, 90])
+                from dataclasses import replace
+                from engine_v2.processor_v2 import ProcessOptionsV2
+                active_opts = opts if opts is not None else ProcessOptionsV2()
+                if _AUTO_SHADOW_AFTER_ISOLATION and not getattr(
+                        active_opts, "shadow_preset", ""):
+                    active_opts = replace(active_opts, shadow_preset="ظل أرضي ناعم")
+                return orig_process(self, source_path, output_path, active_opts)
             except Exception:
-                pass
-            return res
+                # لا تمنع المعالجة الأساسية إن غابت طبقة الظل الاختيارية.
+                return orig_process(self, source_path, output_path, opts)
 
         patched_process._pipeline_patched = True
         pv2.ProcessorV2.process = patched_process
