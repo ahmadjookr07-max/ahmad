@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.9"
+APP_VERSION = "3.4.10"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -6065,7 +6065,8 @@ class MainWindow(QMainWindow):
         try:
             from engine_v2.legacy_folder_v2 import (apply_legacy_plan,
                                                     plan_legacy_renames,
-                                                    scan_legacy_folder)
+                                                    scan_legacy_folder,
+                                                    write_legacy_barcode_review)
         except Exception as exc:
             QMessageBox.warning(self, APP_NAME,
                                 f"تعذّر تحميل محرك المجلدات المنجزة.\n{exc}")
@@ -6093,6 +6094,13 @@ class MainWindow(QMainWindow):
         applied = {"renames": {}, "errors": [], "items_done": 0}
         if plan.changed_rows:
             applied = apply_legacy_plan(plan)
+        review_path = None
+        review_error = ""
+        try:
+            review_path = write_legacy_barcode_review(plan, index, folder)
+        except Exception as exc:
+            # لا يفشل فتح الصور لو تعذر فقط إنشاء ملف CSV الخارجي.
+            review_error = str(exc)
 
         self._legacy_folder = folder
         self._clear_deleted_result_tombstones()
@@ -6123,6 +6131,10 @@ class MainWindow(QMainWindow):
         if ambiguous:
             parts.append(
                 f"{len(ambiguous)} صنفًا له عدة باركودات ممكنة — أُبقي اسم رقم الصنف دون تخمين")
+        if review_path:
+            parts.append(f"حُفظ تقرير المراجعة الخارجي: {Path(review_path).name}")
+        elif review_error:
+            parts.append("تعذر حفظ تقرير مراجعة الباركود")
         parts.append("اضغط ★ على أي صورة لتجعلها صورة الواجهة")
         self.status_label.setText(" — ".join(parts))
 
@@ -6152,6 +6164,12 @@ class MainWindow(QMainWindow):
                 lines.append(
                     f"باركودات متعددة تحتاج إثباتًا من الصورة: {len(ambiguous)} — "
                     "لم أضع باركودًا عشوائيًا، وبقيت الأسماء برقم الصنف.")
+                if review_path:
+                    lines.append(
+                        "حُفظ ملف المراجعة الخارجي بجانب الصور:\n"
+                        f"{Path(review_path).name}")
+                elif review_error:
+                    lines.append(f"تنبيه: تعذر حفظ ملف مراجعة الباركود: {review_error}")
             if unparsed:
                 lines.append(f"ملفات تُجاوزت (لا تبدأ برقم صنف): {len(unparsed)}.")
             if applied["errors"]:

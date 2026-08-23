@@ -10,7 +10,8 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "windows_app")]
 from engine_v2.catalog_index_v2 import CatalogIndex
 from engine_v2 import integration_v2 as integ
 from engine_v2.naming_v2 import NamingSettings, REFERENCE_BARCODE, save_settings
-from engine_v2.legacy_folder_v2 import plan_legacy_renames, scan_legacy_folder
+from engine_v2.legacy_folder_v2 import (plan_legacy_renames, scan_legacy_folder,
+                                        write_legacy_barcode_review)
 
 
 def build_index() -> CatalogIndex:
@@ -64,6 +65,12 @@ def run() -> None:
             assert rows["10002234"].new_stem == "10002234_حبه"
             assert "10002234" in plan.barcode_ambiguous
             assert "عدة باركودات" in rows["10002234"].note
+            review = write_legacy_barcode_review(plan, index, folder)
+            assert review is not None and review.name == "barcode_review_multiple_candidates.csv"
+            review_text = review.read_text(encoding="utf-8-sig")
+            assert "10002234" in review_text
+            assert "6287039470071" in review_text and "6287039470095" in review_text
+            assert "10002234_حبه.webp" in review_text
 
             # مخرج قديم خاطئ باسم مرجع نصي يُعاد إلى رقم الصنف ثم يُصحح.
             old_wrong = root / "legacy-old-wrong"

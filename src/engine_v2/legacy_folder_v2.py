@@ -26,7 +26,10 @@
 """
 from __future__ import annotations
 
+import csv
+import os
 import re
+import tempfile
 from pathlib import Path
 
 __all__ = [
@@ -39,6 +42,7 @@ __all__ = [
     "scan_legacy_folder",
     "plan_legacy_renames",
     "apply_legacy_plan",
+    "write_legacy_barcode_review",
 ]
 
 IMAGE_SUFFIXES = (".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
@@ -549,6 +553,71 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
             row.copies = list(stems_i[1:])
             plan.rows.append(row)
     return plan
+
+
+def write_legacy_barcode_review(plan: LegacyPlan, index, folder: str | Path) -> Path | None:
+    """يكتب ملف مراجعة مستقل للباركودات غير الحتمية في المجلد المنجز.
+
+    الصور لا تتغير بسبب هذا التقرير: لا يوضع باركود إلا عند قرار حتمي.
+    يُكتب CSV بترميز Excel العربي ``utf-8-sig`` وباستبدال ذري كي لا
+    يبقى ملف مراجعة نصف مكتوب إن أُغلق التطبيق أو انقطعت العملية.
+    """
+    folder = Path(folder)
+    target = folder / "barcode_review_multiple_candidates.csv"
+    item_codes = sorted(set(getattr(plan, "barcode_ambiguous", []) or []))
+    if not item_codes:
+        # التقرير مولّد من التطبيق؛ إزالة النسخة القديمة تمنع مراجعة
+        # قائمة لم تعد مطابقة للوضع الحالي للمجلد.
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+    groups = getattr(plan, "groups", {}) or {}
+    rows: list[dict[str, str]] = []
+    for item in item_codes:
+        group = groups.get(item)
+        unit = str(getattr(group, "unit_in_names", "") or "")
+        try:
+            resolver = getattr(index, "resolve_retail_barcode", None)
+            decision = (resolver(item, unit=unit) if callable(resolver) else {})
+        except Exception:
+            decision = {}
+        candidates: list[str] = []
+        for candidate in list(decision.get("candidates", []) or []):
+            barcode = str(candidate.get("barcode", "") or "")
+            if barcode and barcode not in candidates:
+                candidates.append(barcode)
+        image_names = [image.name for image in getattr(group, "images", [])]
+        rows.append({
+            "رقم الصنف": str(item),
+            "الوحدة": unit,
+            "عدد الصور": str(len(image_names)),
+            "أسماء الصور": " | ".join(image_names),
+            "الباركودات المرشحة من Excel": " | ".join(candidates),
+            "الحالة": "عدة باركودات خطية صحيحة — لم تُسم الصور عشوائيًا",
+            "الإجراء المطلوب": "اقرأ الباركود من الصورة أو حدده يدويًا ثم أعد الفتح",
+        })
+
+    folder.mkdir(parents=True, exist_ok=True)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="",
+                                         dir=folder, prefix=".barcode_review_",
+                                         suffix=".tmp", delete=False) as handle:
+            temp_name = handle.name
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        os.replace(temp_name, target)
+        return target
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _materialize_copies(rows: list[RenamePlanRow],
