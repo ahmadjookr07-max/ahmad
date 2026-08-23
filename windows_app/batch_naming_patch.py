@@ -403,14 +403,27 @@ def apply_join_all_units(result: Any) -> Any:
                 continue
             units = _units_for(str(item_code), join)
             observed_barcode = str(getattr(it, "barcode", "") or "")
+            image_unit = str(getattr(it, "unit", "") or "")
+            # إن لم يحمل عنصر المحرك وحدة صريحة، تستخدم وحدة Excel
+            # الأساسية فقط كقيد عند غياب باركود مقروء.
+            scoped_unit = image_unit or (units[0] if units else "")
             try:
-                from engine_v2.integration_v2 import _barcode_from_catalog
-                barcode = _barcode_from_catalog(str(item_code), observed_barcode)
+                from engine_v2.integration_v2 import barcode_decision_from_catalog
+                decision = barcode_decision_from_catalog(
+                    str(item_code), preferred=observed_barcode,
+                    unit=scoped_unit)
+                barcode = str(decision.get("barcode", "") or "")
+                resolved_unit = str(decision.get("unit", "") or "")
             except Exception:
-                barcode = ""
+                barcode, resolved_unit, decision = "", "", {}
             if barcode_mode and not barcode:
-                _log(f"تُرك {src.name}: لا باركود لهذا الصنف في Excel ({item_code})")
+                status = str(decision.get("status", "غير معروف") or "غير معروف")
+                _log(f"تُرك {src.name}: باركود غير مثبت للصنف {item_code} ({status})")
                 continue
+            # الباركود المقروء المطابق قد يعود لوحدة غير الوحدة الافتراضية؛
+            # في سياسة الوحدة الواحدة يجب أن يكتب اسم تلك الوحدة نفسها.
+            if barcode_mode and resolved_unit and not join:
+                units = [resolved_unit]
             if not units and not barcode_mode:
                 # لا كتالوج للصنف: لا مرجع نصحّح إليه.
                 continue

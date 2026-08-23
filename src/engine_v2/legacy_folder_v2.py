@@ -152,6 +152,8 @@ class LegacyPlan:
         self.groups: dict[str, LegacyGroup] = {}
         self.missing_in_excel: list[str] = []
         self.unit_conflicts: list[tuple[str, str, str]] = []
+        # أصناف لها عدة باركودات خطية صالحة للوحدة نفسها؛ لا تُخمن.
+        self.barcode_ambiguous: list[str] = []
         self.unparsed: list[Path] = []
 
     @property
@@ -463,13 +465,8 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
         units: list[str] = []
         note = ""
         barcode = ""
+        barcode_status = ""
         if index is not None:
-            try:
-                rows_for_code = list(index.rows_for_code(item) or [])
-                barcode = next((str(r.get("barcode", "") or "").strip()
-                                for r in rows_for_code if str(r.get("barcode", "") or "").strip()), "")
-            except Exception:
-                barcode = ""
             try:
                 excel_unit = str(index.primary_unit_for_code(item) or "")
             except Exception:
@@ -486,6 +483,15 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
             else:
                 plan.missing_in_excel.append(item)
                 note = "غير موجود في الإكسل — أُبقيت وحدة اسم الملف"
+            if barcode_mode:
+                try:
+                    resolver = getattr(index, "resolve_retail_barcode", None)
+                    decision = (resolver(item, unit=unit) if callable(resolver)
+                                else {})
+                    barcode = str(decision.get("barcode", "") or "")
+                    barcode_status = str(decision.get("status", "") or "")
+                except Exception:
+                    barcode, barcode_status = "", "missing"
 
         if needs_units:
             units = _units_for_group(item, index, unit_in_name)
@@ -499,9 +505,20 @@ def plan_legacy_renames(groups: dict[str, LegacyGroup], index=None,
                             f"{'، '.join(units)}")
 
         if barcode_mode and not barcode:
-            plan.missing_in_excel.append(item)
-            note = "لا باركود لهذا الصنف في Excel — لم يُعد تسمية الملف"
-            names = [[im.stem] for im in grp.images]
+            if barcode_status == "ambiguous":
+                plan.barcode_ambiguous.append(item)
+                note = ("عدة باركودات خطية صحيحة لنفس الصنف والوحدة — "
+                        "أُبقي الاسم كما هو حتى تُثبت قراءة الصورة الباركود")
+            elif barcode_status == "observed_not_in_excel":
+                note = "باركود الصورة لا يطابق سجل Excel — لم يُعد تسمية الملف"
+            else:
+                plan.missing_in_excel.append(item)
+                note = "لا باركود خطي مثبت لهذا الصنف في Excel — لم يُعد تسمية الملف"
+            # إن كان المجلد فُتح من إصدار سابق كتب باركودًا غير مثبت،
+            # نعيده إلى رقم الصنف + الوحدة بدل إبقائه كأنه موثوق.
+            names = [[s] for s in _target_stems(item, unit, grp.count,
+                                                units=units,
+                                                join_all=join_all)]
         elif active:
             # مسار السياسات الأربع — نفس دالة الدفعة الجديدة.
             names = _target_stems_policy(item, units, grp.count, settings,

@@ -24,11 +24,11 @@ def run() -> None:
         assert combo.itemData(0) == "item_code"
         assert combo.itemData(1) == "barcode"
         assert "وحدة Excel" in combo.itemText(0)
-        assert "وحدة Excel" in combo.itemText(1)
+        assert "باركود خطي مثبت" in combo.itemText(1)
         assert "مجلد منجز" in window.reference_mode_hint.text()
         combo.setCurrentIndex(1)
         app.processEvents()
-        assert "باركود_Excel_مفقود" in window.naming_preview_label.text()
+        assert "باركود_Excel_غير_مثبت" in window.naming_preview_label.text()
         path = window._naming_settings_path()
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["reference_mode"] == "barcode"

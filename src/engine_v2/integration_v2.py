@@ -257,29 +257,30 @@ def set_catalog_index(index) -> None:
     _CATALOG_REF["index"] = index
 
 
-def _barcode_from_catalog(item: str, preferred: str = "") -> str:
-    """باركود الصنف من Excel فقط، مع تفضيل الباركود المطابق للسجل.
-
-    لا يعتمد هذا على OCR أو اسم ملف؛ ``preferred`` يستخدم فقط لاختيار
-    صف Excel مطابق حين تكون للصنف وحدات متعددة ذات باركودات مختلفة.
-    """
+def barcode_decision_from_catalog(item: str, preferred: str = "",
+                                  unit: str = "") -> dict:
+    """قرار باركود/وحدة مثبت من Excel لاستخدام كل مسارات التسمية."""
+    empty = {"barcode": "", "unit": str(unit or ""),
+             "status": "missing", "candidates": []}
     idx = _CATALOG_REF.get("index")
     if idx is None:
-        return ""
+        return empty
     try:
-        rows = list(idx.rows_for_code(str(item)) or [])
+        resolver = getattr(idx, "resolve_retail_barcode", None)
+        if callable(resolver):
+            decision = resolver(str(item), unit=str(unit or ""),
+                                observed=str(preferred or ""))
+            return dict(decision or empty)
     except Exception:
-        return ""
-    preferred = str(preferred or "").strip()
-    for row in rows:
-        barcode = str(row.get("barcode", "") or "").strip()
-        if barcode and barcode == preferred:
-            return barcode
-    for row in rows:
-        barcode = str(row.get("barcode", "") or "").strip()
-        if barcode:
-            return barcode
-    return ""
+        pass
+    return empty
+
+
+def _barcode_from_catalog(item: str, preferred: str = "",
+                          unit: str = "") -> str:
+    """التوافق مع المستدعين القدامى: يعيد الباركود المثبت فقط."""
+    return str(barcode_decision_from_catalog(
+        item, preferred=preferred, unit=unit).get("barcode", "") or "")
 
 
 def _units_from_catalog(item: str, excel_order: bool = False) -> list[str]:
@@ -508,7 +509,7 @@ def build_output_stems(out_dir: str | Path, item: str,
              or ([unit] if unit else []))
     preferred_units = _units_from_catalog(item, excel_order=False)
     chosen_unit = (preferred_units[0] if preferred_units else unit)
-    barcode = _barcode_from_catalog(item)
+    barcode = _barcode_from_catalog(item, unit=chosen_unit)
     # في نمط الباركود، عدّ التسلسل على بادئة الباركود لا رقم الصنف.
     identity = barcode if getattr(settings, "reference_mode", "item_code") == "barcode" else item
     seq = _next_free_sequence(stems, identity)

@@ -33,6 +33,26 @@ def _clean_code(v) -> str:
     return s
 
 
+def _unit_key(value: object) -> str:
+    """مفتاح مقارنة داخلي للوحدة؛ الإخراج يحتفظ بنص Excel الحرفي."""
+    return normalize_text(str(value or "")).replace(" ", "")
+
+
+def is_valid_linear_retail_barcode(value: object) -> bool:
+    """يتحقق من GTIN/EAN/UPC الخطي، ويرفض النصوص وQR ضمنيًا.
+
+    لا يكفي أن تكون خلية Excel غير فارغة: قيم مثل ``3P-DT-10`` و
+    ``006-090`` مراجع داخلية وليست باركودات بيع رقمية.
+    """
+    barcode = _clean_code(value).translate(_AR_DIGITS).replace(" ", "")
+    if not barcode.isdigit() or len(barcode) not in {8, 12, 13, 14}:
+        return False
+    total = 0
+    for position, digit in enumerate(reversed(barcode[:-1])):
+        total += int(digit) * (3 if position % 2 == 0 else 1)
+    return (10 - total % 10) % 10 == int(barcode[-1])
+
+
 # ------------------------------------------------------- column detection
 _HINTS = {
     "code": ["i_code", "code", "item no", "item number", "item_no", "itemno",
@@ -299,6 +319,58 @@ class CatalogIndex:
         if idx is not None:
             return self.rows[idx]
         return None
+
+    def retail_barcode_rows_for_code(self, code: str,
+                                     unit: str = "") -> list[dict]:
+        """صفوف الباركود الخطي الصحيح للصنف، مقيدة بالوحدة إن حُددت."""
+        rows: list[dict] = []
+        wanted_unit = _unit_key(unit)
+        for row in self.rows_for_code(code):
+            barcode = _clean_code(row.get("barcode", "")).translate(_AR_DIGITS).replace(" ", "")
+            if not is_valid_linear_retail_barcode(barcode):
+                continue
+            if wanted_unit and _unit_key(row.get("unit", "")) != wanted_unit:
+                continue
+            copied = dict(row)
+            copied["barcode"] = barcode
+            rows.append(copied)
+        return rows
+
+    def resolve_retail_barcode(self, code: str, *, unit: str = "",
+                               observed: str = "") -> dict:
+        """قرار باركود قابل للتدقيق لصنف Excel.
+
+        يعيد باركودًا فقط إذا كان المقروء من الصورة مطابقًا حرفيًا لسجل
+        Excel، أو إذا بقي مرشح رقمي واحد بعد تقييد الوحدة. لا يختار أول
+        صف عند تعدد المرشحات؛ ``status`` يوضح سبب التوقف للمراجعة.
+        """
+        observed = _clean_code(observed).translate(_AR_DIGITS).replace(" ", "")
+        all_rows = self.retail_barcode_rows_for_code(code)
+        scoped_rows = self.retail_barcode_rows_for_code(code, unit=unit)
+        if observed:
+            matches = [row for row in all_rows if row["barcode"] == observed]
+            if len(matches) == 1:
+                return {"barcode": observed, "unit": str(matches[0].get("unit", "")),
+                        "status": "observed_excel_match", "candidates": matches}
+            return {"barcode": "", "unit": unit, "status": "observed_not_in_excel",
+                    "candidates": scoped_rows or all_rows}
+        # قد يحمل اسم قديم «حبه» بينما صف الباركود الوحيد في Excel
+        # يقول «علبة/ربطة». إن لم يوجد مرشح للوحدة لكن للصنف كله GTIN
+        # واحد فقط، فهو قرار حتمي ويُعاد معه نص وحدة Excel الحقيقي.
+        candidates = (scoped_rows or all_rows) if unit else all_rows
+        unique: list[dict] = []
+        seen: set[str] = set()
+        for row in candidates:
+            if row["barcode"] not in seen:
+                seen.add(row["barcode"])
+                unique.append(row)
+        if len(unique) == 1:
+            return {"barcode": unique[0]["barcode"],
+                    "unit": str(unique[0].get("unit", "")),
+                    "status": "excel_single_candidate", "candidates": unique}
+        return {"barcode": "", "unit": unit,
+                "status": "ambiguous" if unique else "missing",
+                "candidates": unique}
 
     def lookup_code(self, code: str) -> dict | None:
         idx = self.by_code.get(_clean_code(code))

@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.8"
+APP_VERSION = "3.4.9"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2488,12 +2488,13 @@ class MainWindow(QMainWindow):
         self.reference_mode_combo = QComboBox()
         self.reference_mode_combo.setObjectName("referenceModeCombo")
         self.reference_mode_combo.addItem("رقم الصنف + وحدة Excel", "item_code")
-        self.reference_mode_combo.addItem("باركود Excel + وحدة Excel", "barcode")
+        self.reference_mode_combo.addItem("باركود خطي مثبت من Excel + الوحدة", "barcode")
         self.reference_mode_combo.setToolTip(
             "رقم الصنف: 10011205_حبه ثم 10011205_حبه-1\n"
             "باركود Excel: 6287021750464_حبه ثم 6287021750464_حبه-1\n\n"
-            "الوحدة تُقرأ من Excel في الحالتين. يسري الاختيار فورًا على\n"
-            "الصور الجديدة وعلى «فتح مجلد منجز» للصور السابقة.")
+            "لا يقبل إلا باركودًا خطيًا رقميًا يطابق سجل Excel. عند تعدد\n"
+            "باركودات الصنف للوحدة نفسها، يبقى الاسم للمراجعة ولا يُخمن.\n"
+            "يسري الاختيار على الصور الجديدة و«فتح مجلد منجز».")
         self.reference_mode_combo.currentIndexChanged.connect(self._on_reference_mode_changed)
         reference_row.addWidget(reference_label)
         reference_row.addWidget(self.reference_mode_combo, 1)
@@ -5942,17 +5943,23 @@ class MainWindow(QMainWindow):
             if join_on:
                 settings.unit_policy = "join_all_units"
             barcode = ""
+            decision_status = ""
             primary_unit = units[0] if units else "حبه"
             if idx is not None:
                 try:
-                    record = idx.lookup_code(item)
-                    barcode = str((record or {}).get("barcode", "") or "")
                     primary_unit = str(idx.primary_unit_for_code(item) or primary_unit)
+                    resolver = getattr(idx, "resolve_retail_barcode", None)
+                    decision = (resolver(item, unit=primary_unit)
+                                if callable(resolver) else {})
+                    barcode = str(decision.get("barcode", "") or "")
+                    decision_status = str(decision.get("status", "") or "")
                 except Exception:
                     barcode = ""
             if mode == "barcode" and not barcode:
-                base, second, third = "باركود_Excel_مفقود", "—", "—"
-                head = "معلّق — الصنف لا يملك باركودًا في Excel"
+                base, second, third = "باركود_Excel_غير_مثبت", "—", "—"
+                head = ("مراجعة مطلوبة — للصنف عدة باركودات خطية ممكنة"
+                        if decision_status == "ambiguous" else
+                        "معلّق — لا يوجد باركود خطي مثبت للصنف في Excel")
             else:
                 def preview_for(sequence: int) -> str:
                     stems = plan_stems_for_policy(
@@ -5961,7 +5968,8 @@ class MainWindow(QMainWindow):
                     return " / ".join(stems) if stems else "—"
                 base, second, third = (preview_for(1), preview_for(2),
                                        preview_for(3))
-                reference = "باركود Excel + الوحدة" if mode == "barcode" else "رقم الصنف + الوحدة"
+                reference = ("باركود خطي مثبت من Excel + الوحدة"
+                             if mode == "barcode" else "رقم الصنف + الوحدة")
                 if settings.unit_policy == "join_all_units":
                     head = f"مُفعّل — {reference} مع دمج {len(units)} وحدات من Excel"
                 elif settings.unit_policy == "replicate_all_units":
@@ -6111,6 +6119,10 @@ class MainWindow(QMainWindow):
         if migration.get("migrated"):
             parts.append(
                 f"رُحّلت تسمية {migration['renamed']} ملف للترقيم الجديد")
+        ambiguous = list(getattr(plan, "barcode_ambiguous", []) or [])
+        if ambiguous:
+            parts.append(
+                f"{len(ambiguous)} صنفًا له عدة باركودات ممكنة — أُبقي اسم رقم الصنف دون تخمين")
         parts.append("اضغط ★ على أي صورة لتجعلها صورة الواجهة")
         self.status_label.setText(" — ".join(parts))
 
@@ -6135,6 +6147,11 @@ class MainWindow(QMainWindow):
             if plan.missing_in_excel:
                 lines.append(f"أصناف غير موجودة في الإكسل: "
                              f"{len(plan.missing_in_excel)} (أُبقيت أسماءها).")
+            ambiguous = list(getattr(plan, "barcode_ambiguous", []) or [])
+            if ambiguous:
+                lines.append(
+                    f"باركودات متعددة تحتاج إثباتًا من الصورة: {len(ambiguous)} — "
+                    "لم أضع باركودًا عشوائيًا، وبقيت الأسماء برقم الصنف.")
             if unparsed:
                 lines.append(f"ملفات تُجاوزت (لا تبدأ برقم صنف): {len(unparsed)}.")
             if applied["errors"]:
@@ -6176,7 +6193,10 @@ class MainWindow(QMainWindow):
                 try:
                     rec = index.lookup_code(row.item) or {}
                     name = str(rec.get("name") or "")
-                    barcode = str(rec.get("barcode") or "")
+                    resolver = getattr(index, "resolve_retail_barcode", None)
+                    decision = (resolver(row.item, unit=row.unit)
+                                if callable(resolver) else {})
+                    barcode = str(decision.get("barcode", "") or "")
                 except Exception:
                     pass
             unit_txt = f" — الوحدة: {row.unit}" if row.unit else ""
