@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.10"
+APP_VERSION = "3.4.11"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2504,6 +2504,19 @@ class MainWindow(QMainWindow):
         self.reference_mode_hint.setObjectName("referenceModeHint")
         self.reference_mode_hint.setWordWrap(True)
         catalog_layout.addWidget(self.reference_mode_hint)
+        self.barcode_review_help = QLabel(
+            "طريقة الباركود: إذا قرأت الصورة باركودًا خطيًا وطابق Excel، "
+            "يُحفظ فورًا باسم باركود_الوحدة. أما إذا كان رقم الصنف يملك "
+            "أكثر من باركود صحيح ولم تُحسم الصورة، تبقى باسم رقم_الصنف_الوحدة "
+            "ويُحفظ بجانب الصور ملف barcode_review_multiple_candidates.csv للمراجعة. "
+            "لا يُختار باركود عشوائي ولا يُستخدم QR.")
+        self.barcode_review_help.setObjectName("barcodeReviewHelp")
+        self.barcode_review_help.setWordWrap(True)
+        self.barcode_review_help.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.barcode_review_help.setStyleSheet(
+            "QLabel#barcodeReviewHelp { background:#eff6ff; color:#1e3a5f; "
+            "border:1px solid #bfdbfe; border-radius:6px; padding:8px; }")
+        catalog_layout.addWidget(self.barcode_review_help)
         # معاينة حيّة للاسم الناتج: المالك يرى أثر الخيار بعينه
         # قبل تشغيل المعالجة بدل أن يكتشفه في 991 ملفًا بعد فوات الأوان.
         self.naming_preview_label = QLabel("")
