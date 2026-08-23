@@ -44,6 +44,9 @@ class ProcessOptionsV2:
     width: int = 800
     height: int = 700
     margin: int = 40
+    # عند ضبطها تستخدم نفس قاعدة المحرر: 6% من كل بُعد، بدل هامش
+    # بكسلي موحّد لا يطابق لوحة 800×700 أفقيًا وعموديًا.
+    frame_margin_ratio: float | None = None
     enhance: bool = True
     webp_lossless: bool = True
     # حقائق التغذية
@@ -213,8 +216,15 @@ class ProcessorV2:
             x0, y0, x1, y1 = bbox
             crop = img_white[y0:y1 + 1, x0:x1 + 1]
         ch, cw = crop.shape[:2]
-        avail_w = opts.width - 2 * opts.margin
-        avail_h = opts.height - 2 * opts.margin
+        ratio = getattr(opts, "frame_margin_ratio", None)
+        if ratio is None:
+            margin_x = margin_y = int(opts.margin)
+        else:
+            ratio = float(np.clip(ratio, 0.0, 0.45))
+            margin_x = int(round(opts.width * ratio))
+            margin_y = int(round(opts.height * ratio))
+        avail_w = max(1, opts.width - 2 * margin_x)
+        avail_h = max(1, opts.height - 2 * margin_y)
         sc = min(avail_w / cw, avail_h / ch)
         nw, nh = max(1, int(cw * sc)), max(1, int(ch * sc))
         if sc < 1 and getattr(opts, "text_aware", True):

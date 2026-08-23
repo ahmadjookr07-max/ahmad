@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.19"
+APP_VERSION = "3.4.20"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -533,6 +533,10 @@ class BatchWorker(QThread):
                 maximum_barcode_tier=3,
                 progress=lambda done, total, name: self.progress_changed.emit(done, total, name),
             )
+            # كل صورة مرتبطة تلقائيًا أو يدويًا تمر بالمراحل نفسها التي
+            # أثبتها الفيديو. لا نعالج صور المراجعة غير المرتبطة هنا.
+            if self.remove_background:
+                auto_finish_linked_outputs(result, self.workspace)
             self._quality_post_pass(result)
             self.completed.emit(result)
         except Exception:
@@ -712,9 +716,9 @@ class ManualLinkWorker(QThread):
                         final_image_options=self.image_options,
                     )
             self._apply_rotation_to_outputs(result)
-            # مطابق للخطوة الأخيرة في محرر الفيديو: بعد أن ينفذ الربط
-            # العزل/التحسين/الظل في الخلفية، نقرّب المنتج 106% ونوسّطه
-            # فوق نفس الملف تلقائيًا. لا يُشغّل عند إلغاء العزل صراحةً.
+            # مطابق لخطوة «توسيط واعتماد الإطار» في فيديو المالك: بعد
+            # الربط نعيد العزل والتأطير من المصدر فوق نفس ملف النتيجة.
+            # لا يُشغّل عند إلغاء العزل صراحةً.
             self.auto_finished_count = (
                 auto_finish_linked_outputs(result, self.workspace)
                 if self.remove_background else 0
@@ -762,35 +766,82 @@ def _manual_source_key(item: object) -> str:
 
 
 def auto_finish_linked_outputs(result: object, workspace: Path | None = None) -> int:
-    """يطبّق آخر خطوة من فيديو المالك بعد ربط الصورة مباشرة.
+    """يعيد تنفيذ «توسيط واعتماد الإطار» تلقائيًا بعد الربط.
 
-    العزل والخلفية البيضاء والتحسين والظل تمر أصلًا عبر خط الربط الرسمي
-    في الخلفية. هذه الدالة تضيف الجزء الذي كان يُنفذ يدويًا في المحرر:
-    تقريب آمن 106% وتمركز المنتج فوق **نفس** ملف النتيجة، بلا إعادة تسمية
-    أو نسخ إضافية. يُستدعى فقط عند تفعيل العزل، لأن الصور التي يختار
-    المستخدم إبقاء خلفيتها لا ينبغي أن تُؤطر كمنتج معزول.
+    الفيديو أثبت أن النتيجة اليدوية لا تنتج من تقريب 106% فوق صورة منجزة؛
+    بل من عزل المصدر ثم قص المنتج حسب قناعه وتأطيره على لوحة 800×700.
+    لذلك نعيد تنفيذ هذا الخط من **المصدر الفريد للصورة نفسها** ونستبدل
+    ملف النتيجة كتابةً ذرية. لا نعيد تسمية الملف ولا نُنشئ صفًا أو نسخة
+    إضافية، وأي فشل يبقي ملف النتيجة السابق كما هو.
     """
+    if workspace is None:
+        return 0
     try:
-        from framing_zoom_patch import DEFAULT_AUTO_FRAME, save_framed_image
+        from engine_v2.integration_v2 import get_processor
+        from engine_v2.processor_v2 import ProcessOptionsV2
+        from engine_v2.source_vault_v2 import SourceVault
     except Exception:
         return 0
+
+    workspace = Path(workspace)
+    vault = SourceVault.load(workspace)
+    processor = get_processor()
+    # إعادة المعالجة تبدأ من المصدر لا من صورة معالَجة؛ لذلك يطبّق هذا
+    # المسار ظلًا أرضيًا ناعمًا مرة واحدة، ثم يؤطّره، ولا يستدعي رقعة
+    # التشطيب على ناتج سابق كي لا يتكرر الظل أو التقريب.
     completed = 0
-    seen: set[str] = set()
+    seen_outputs: set[str] = set()
     for item in getattr(result, "items", []) or ():
-        raw = str(getattr(item, "output_path", "") or "").strip()
-        if not raw:
+        status = str(getattr(item, "status", "") or "").strip().casefold()
+        if status and status not in {"matched", "manual"}:
             continue
-        path = Path(raw)
-        if not path.is_file() and workspace is not None and not path.is_absolute():
-            path = Path(workspace) / path
-        if not path.is_file():
+        raw_output = str(getattr(item, "output_path", "") or "").strip()
+        if not raw_output:
             continue
-        key = str(path.resolve()).casefold()
-        if key in seen:
+        output = Path(raw_output)
+        if not output.is_file() and not output.is_absolute():
+            output = workspace / output
+        if not output.is_file():
             continue
-        seen.add(key)
-        if save_framed_image(path, DEFAULT_AUTO_FRAME):
-            completed += 1
+        output_key = str(output.resolve()).casefold()
+        if output_key in seen_outputs:
+            continue
+        seen_outputs.add(output_key)
+
+        source_name = str(getattr(item, "source_name", "") or "").strip()
+        recorded_source = str(getattr(item, "source_path", "") or "").strip()
+        source_text = vault.resolve(source_name, recorded_source, extra_dirs=(workspace,))
+        source = Path(source_text) if source_text else Path(recorded_source)
+        if not source.is_file():
+            # لا نخمن صورة شقيقة عند تكرار الاسم/الباركود؛ يبقى المخرج
+            # السابق المعتمد ظاهرًا بدل استبداله بصورة خاطئة.
+            continue
+
+        temp = output.with_name(f".{output.stem}.auto-frame.tmp{output.suffix}")
+        try:
+            temp.unlink(missing_ok=True)
+            options = ProcessOptionsV2(
+                width=800,
+                height=700,
+                margin=40,
+                frame_margin_ratio=0.06,
+                enhance=True,
+                text_aware=True,
+                blur_dates=True,
+                shadow_preset="ظل أرضي ناعم",
+                webp_lossless=True,
+            )
+            processed = processor.process(source, temp, options)
+            if bool(getattr(processed, "ok", False)) and temp.is_file():
+                temp.replace(output)
+                completed += 1
+            else:
+                temp.unlink(missing_ok=True)
+        except Exception:
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
     return completed
 
 
@@ -9199,7 +9250,7 @@ class MainWindow(QMainWindow):
             message = f"تم تعديل/ربط {count} صور وتحديث أرقام الأصناف النهائية."
         auto_finished = int(getattr(self.manual_worker, "auto_finished_count", 0) or 0)
         auto_note = (
-            f" نُفّذت معالجة النتيجة تلقائيًا ({auto_finished} صورة: عزل وتحسين وتمركز)."
+            f" نُفّذت معالجة النتيجة المطابقة للمحرر ({auto_finished} صورة: عزل وتأطير 800×700)."
             if auto_finished else ""
         )
         self.status_label.setText(
