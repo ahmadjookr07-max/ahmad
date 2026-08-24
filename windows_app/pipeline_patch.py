@@ -87,50 +87,183 @@ def apply_finish_to_image(
     return img_bgr, alpha
 
 
-def apply_shadow_to_finished(img_bgr):
-    """يُضيف ظلًا لصورة منجزة ذات خلفية بيضاء (م-19).
+def _significant_components(mask, *, min_share: float = 0.12) -> list[tuple[int, int, int, int, int, int]]:
+    """يعيد المكوّنات الحقيقية فقط، فلا تختلط شوائب الحافة بالمنتج."""
+    import cv2
+    import numpy as np
+    n, _, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return []
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    largest = int(areas.max()) if areas.size else 0
+    minimum = max(90, int(largest * min_share))
+    result = []
+    for index in range(1, n):
+        x, y, w, h, area = (int(v) for v in stats[index])
+        if area >= minimum:
+            result.append((index, x, y, w, h, area))
+    return sorted(result, key=lambda item: item[-1], reverse=True)
 
-    يستخرج القناع من الأبيض ثم يُطبّق الظل التلقائي.
+
+def _has_ground_shadow(img_bgr, mask) -> bool:
+    """يكشف ظلًا أرضيًا موجودًا لتفادي إضافة ظل ثانٍ لنفس المنتج."""
+    import cv2
+    import numpy as np
+    # قناع قوي يستبعد ظلًا رماديًا خفيفًا كي نحسب قاعدة المنتج الحقيقية.
+    dev = (255 - img_bgr.astype(np.int16)).max(axis=2)
+    strong = dev > 52
+    ys, xs = np.where(strong)
+    if xs.size == 0:
+        return False
+    h, w = mask.shape[:2]
+    x0, x1 = int(xs.min()), int(xs.max())
+    y1 = int(ys.max())
+    # نبحث أسفل قاعدة المنتج فقط وبداخل عرضها الموسع؛ الكتابة أو الصور
+    # المنفصلة في أماكن أخرى لا تُحسب ظلًا.
+    top = min(h, y1 + 1)
+    bottom = min(h, y1 + max(8, int((y1 - int(ys.min()) + 1) * 0.10)))
+    left, right = max(0, x0 - 8), min(w, x1 + 9)
+    if bottom <= top or right <= left:
+        return False
+    region_dev = dev[top:bottom, left:right]
+    region_strong = strong[top:bottom, left:right]
+    # الظل: انحراف خفيف عن الأبيض، تحت قاعدة قوية، وليس جزء تغليف داكنًا.
+    shadow = (~region_strong) & (region_dev >= 8) & (region_dev <= 52)
+    return int(shadow.sum()) >= max(16, int((x1 - x0 + 1) * 0.07))
+
+
+def apply_shadow_to_finished(img_bgr):
+    """يضيف ظلًا مرة واحدة فقط لصورة جاهزة بلا تغيير دقة المنتج.
+
+    كان المسار القديم يحوّل القناع إلى 0/1 ثم يرسله إلى معايرة تتوقع
+    Alpha من 0..255؛ فظهر القناع فارغًا وتُخطى كل الصور بلا أخطاء.
     """
     try:
-        import numpy as np
         import cv2
+        import numpy as np
         _, mask_from_white = _import_shape()
         mask = mask_from_white(img_bgr)
-        alpha = mask.astype(np.float32) / 255.0
-
-        _, auto_shadow_opts = _import_finish()
-        shadow_opts = auto_shadow_opts(alpha)
-        if shadow_opts is None:
+        if not mask.any() or _has_ground_shadow(img_bgr, mask):
             return img_bgr
-
+        _, auto_shadow_opts = _import_finish()
+        alpha_u8 = (mask > 0).astype(np.uint8) * 255
+        shadow_opts = auto_shadow_opts(alpha_u8, subtle=True)
+        if shadow_opts is None or getattr(shadow_opts, "kind", "none") == "none":
+            return img_bgr
         from engine_v2.shadow_v2 import apply_shadow_on_white
         rgba = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2BGRA)
-        rgba[:, :, 3] = (alpha * 255).astype(np.uint8)
-        result = apply_shadow_on_white(rgba, shadow_opts)
-        return result
+        rgba[:, :, 3] = alpha_u8
+        return apply_shadow_on_white(rgba, shadow_opts)
     except Exception:
         return img_bgr
+
+
+def _safe_complete_finished(img_bgr):
+    """يرمم النواقص المثبتة هندسيًا بلا اختراع كتابة أو أجزاء تغليف.
+
+    لا يستخدم ``complete_product`` واسع المدى على الصورة المنجزة، لأنه
+    مصمم لقناع العزل الخام وقد يحذف مكونات مقصودة مثل بطاقة حقائق غذائية.
+    """
+    import cv2
+    import numpy as np
+    _, mask_from_white = _import_shape()
+    mask = mask_from_white(img_bgr)
+    h, w = mask.shape[:2]
+    base = int(mask.sum())
+    report = {"bridge": 0, "holes": 0, "specks": 0, "reason": ""}
+    if base < max(100, int(h * w * 0.004)) or base > int(h * w * 0.72):
+        report["reason"] = "غير مناسب لإكمال تلقائي"
+        return img_bgr, report
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    components = _significant_components(mask)
+    # الصور ذات ثلاث كتل حقيقية أو أكثر غالبًا صورة حقائق/عناصر متعددة؛
+    # لا ندمجها تلقائيًا. كتلتان فقط قد تكونان كيسًا منقسمًا.
+    if len(components) > 2:
+        report["reason"] = "عناصر متعددة"
+        return img_bgr, report
+
+    refined = mask.copy()
+    bridge = np.zeros_like(mask)
+    if len(components) == 2:
+        _, ax, ay, aw, ah, aa = components[0]
+        _, bx, by, bw, bh, ba = components[1]
+        row_overlap = max(0, min(ay + ah, by + bh) - max(ay, by)) / float(max(1, min(ah, bh)))
+        col_overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx)) / float(max(1, min(aw, bw)))
+        gap_x = max(0, max(ax, bx) - min(ax + aw, bx + bw))
+        gap_y = max(0, max(ay, by) - min(ay + ah, by + bh))
+        side_by_side = row_overlap >= 0.78 and gap_x <= max(3, int(min(aw, bw) * 0.06))
+        stacked = col_overlap >= 0.78 and gap_y <= max(3, int(min(ah, bh) * 0.06))
+        # تشابه حجم الكتلتين يمنع دمج بطاقة صغيرة أو ملصق منفصل مع المنتج.
+        size_ratio = min(aa, ba) / float(max(1, max(aa, ba)))
+        if size_ratio >= 0.18 and (side_by_side or stacked):
+            if side_by_side:
+                kernel = np.ones((3, max(3, gap_x + 1)), np.uint8)
+            else:
+                kernel = np.ones((max(3, gap_y + 1), 3), np.uint8)
+            merged = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, kernel)
+            added = ((merged > 0) & (refined == 0)).astype(np.uint8)
+            if int(added.sum()) <= int(base * 0.025):
+                refined, bridge = merged, added
+                report["bridge"] = int(added.sum())
+        if not report["bridge"]:
+            report["reason"] = "فصل غير آمن للدمج"
+            return img_bgr, report
+
+    # فراغات داخلية كبيرة نسبيًا وقليلة العدد فقط؛ فتحات النص الصغيرة
+    # وأي مساحة واسعة من تصميم الغلاف تبقى كما هي.
+    flood = refined.copy()
+    cv2.floodFill(flood, np.zeros((h + 2, w + 2), np.uint8), (0, 0), 1)
+    holes = (flood == 0).astype(np.uint8)
+    hn, hlab, hstats, _ = cv2.connectedComponentsWithStats(holes, 8)
+    fill = bridge.copy()
+    min_hole = max(160, int(base * 0.0030))
+    # نسمح بفجوة قد تبلغ 4% من المنتج إذا كان محيطها متجانسًا؛
+    # شرط التباين أدناه يمنع اعتبار حروف الملصق أو الرسوم فجوةً.
+    max_hole = max(min_hole, int(base * 0.040))
+    for index in range(1, hn):
+        x, y, bw, bh, area = (int(v) for v in hstats[index])
+        aspect = max(bw, bh) / float(max(1, min(bw, bh)))
+        if min_hole <= area <= max_hole and aspect <= 4.5:
+            ring = cv2.dilate((hlab == index).astype(np.uint8), np.ones((5, 5), np.uint8))
+            ring = (ring > 0) & (hlab != index) & (refined > 0)
+            # استبعد بقايا ضغط WebP القريبة من الأبيض؛ هي هالة حول الفجوة
+            # وليست خامة المنتج التي نحتاجها للحكم على الإكمال.
+            strong_ring = (255 - img_bgr.astype(np.int16)).max(axis=2) > 40
+            ring &= strong_ring
+            # لون محيط متقلب جدًا يعني كتابة/رسمة؛ لا نرممها تلقائيًا.
+            ring_pixels = img_bgr[ring]
+            # نقيس التباين عبر البكسلات داخل كل قناة، لا الانحراف بين B/G/R
+            # للون تغليف سليم واحد؛ اللون البرتقالي مثلًا مختلف القنوات لكنه متجانس مكانيًا.
+            spatial_std = float(np.mean(np.std(ring_pixels.astype(np.float32), axis=0))) if ring_pixels.size else 999.0
+            if int(ring.sum()) >= 30 and spatial_std < 32.0:
+                fill[hlab == index] = 1
+                report["holes"] += area
+
+    # شوائب منفصلة دقيقة فقط؛ لا نقص حواف متصل بالمنتج.
+    for index in range(1, n):
+        area = int(stats[index, cv2.CC_STAT_AREA])
+        if area < max(12, int(h * w * 0.00003)):
+            refined[labels == index] = 0
+            report["specks"] += area
+
+    if not fill.any() and not report["specks"]:
+        report["reason"] = report["reason"] or "لا عيب آمن"
+        return img_bgr, report
+    # يحتفظ القناع النهائي ببكسلات الإكمال؛ من دون هذا السطر كانت
+    # الخلفية البيضاء تكتب فوق بكسلات INPAINT في نهاية الدالة.
+    refined = np.maximum(refined, fill)
+    out = img_bgr.copy()
+    if fill.any():
+        # INPAINT يكمّل خامة المحيط بدل ملئها بلون أو بياض مصطنع.
+        out = cv2.inpaint(out, cv2.dilate(fill, np.ones((3, 3), np.uint8)), 3, cv2.INPAINT_TELEA)
+    out[refined == 0] = (255, 255, 255)
+    return out, report
 
 
 def apply_completion_to_finished(img_bgr):
-    """يُكمل المنتجات الناقصة في صورة منجزة (م-21 م-22).
-
-    يستخرج القناع من الأبيض ثم يُطبّق الإكمال الذكي.
-    """
-    try:
-        import numpy as np
-        complete_product, mask_from_white = _import_shape()
-        mask = mask_from_white(img_bgr)
-        result_mask, _ = complete_product(img_bgr, mask)
-        # يُعيد الصورة بالقناع المُكمَّل على خلفية بيضاء
-        alpha = (result_mask > 0).astype(np.float32)
-        white = np.full_like(img_bgr, 255)
-        out = (img_bgr.astype(np.float32) * alpha[:, :, None]
-               + white.astype(np.float32) * (1 - alpha[:, :, None]))
-        return np.clip(out, 0, 255).astype(np.uint8)
-    except Exception:
-        return img_bgr
+    """واجهة توافق تعيد الصورة فقط؛ التقرير التفصيلي تستعمله الدفعة."""
+    return _safe_complete_finished(img_bgr)[0]
 
 
 def batch_process_finished(
@@ -140,50 +273,49 @@ def batch_process_finished(
     complete: bool = False,
     progress_cb=None,
 ) -> dict:
-    """يُعالج دفعيًا كل صور WebP في مجلد المنجزات (م-22).
+    """يفحص ويعالج صورًا منجزة مع حفظ الاسم والدقة دون نسخ مكررة.
 
-    - `add_shadow`: يُضيف ظلًا لمن ليس لديه ظل
-    - `complete`: يُكمل المنتجات الناقصة
-    - `progress_cb(done, total)`: استدعاء اختياري للتقدم
-
-    يعيد `{"processed": n, "skipped": m, "errors": [...]}`.
+    ``unchanged`` يعني أنها فُحصت ولم تحتاج إصلاحًا آمنًا، وليس تخطيًا.
     """
     import cv2
+    import numpy as np
     folder = Path(folder)
     files = sorted(folder.glob("*.webp")) + sorted(folder.glob("*.png"))
-    result = {"processed": 0, "skipped": 0, "errors": []}
+    result = {"examined": 0, "processed": 0, "unchanged": 0,
+              "skipped": 0, "errors": [], "operations": {"shadow": 0,
+              "bridge": 0, "holes": 0, "specks": 0}}
     total = len(files)
-
-    for i, f in enumerate(files):
+    for i, path in enumerate(files):
         if progress_cb is not None:
             try:
                 progress_cb(i, total)
             except Exception:
                 pass
         try:
-            img = cv2.imread(str(f), cv2.IMREAD_COLOR)
-            if img is None:
+            original = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if original is None:
                 result["skipped"] += 1
                 continue
-            changed = False
-            if add_shadow:
-                out = apply_shadow_to_finished(img)
-                if out is not img:
-                    img = out
-                    changed = True
+            result["examined"] += 1
+            image = original
             if complete:
-                out = apply_completion_to_finished(img)
-                if out is not img:
-                    img = out
-                    changed = True
-            if changed:
-                cv2.imwrite(str(f), img, [cv2.IMWRITE_WEBP_QUALITY, 90])
-                result["processed"] += 1
-            else:
-                result["skipped"] += 1
+                image, detail = _safe_complete_finished(image)
+                for key in ("bridge", "holes", "specks"):
+                    result["operations"][key] += int(detail.get(key, 0) or 0)
+            if add_shadow:
+                shadowed = apply_shadow_to_finished(image)
+                if not np.array_equal(shadowed, image):
+                    image = shadowed
+                    result["operations"]["shadow"] += 1
+            if np.array_equal(image, original):
+                result["unchanged"] += 1
+                continue
+            # إعادة الكتابة فوق الملف نفسه؛ الجودة 100 تمنع تليين المنتج.
+            if not cv2.imwrite(str(path), image, [cv2.IMWRITE_WEBP_QUALITY, 100]):
+                raise OSError("فشل حفظ WebP")
+            result["processed"] += 1
         except Exception as exc:
-            result["errors"].append(f"{f.name}: {exc}")
-
+            result["errors"].append(f"{path.name}: {exc}")
     if progress_cb is not None:
         try:
             progress_cb(total, total)
@@ -500,8 +632,11 @@ def _install_finished_tool(window: Any) -> None:
                 f"الصور: {len(list(Path(folder).glob('*.webp')))} WebP"))
             shadow_cb = QCheckBox("إضافة ظل تلقائي للصور بلا ظل")
             shadow_cb.setChecked(True)
-            complete_cb = QCheckBox("إكمال المنتجات الناقصة (حواف وفراغات)")
-            complete_cb.setChecked(False)
+            complete_cb = QCheckBox("معالجة ذكية للنواقص والحواف الآمنة")
+            complete_cb.setToolTip(
+                "يرمم الفجوات المثبتة هندسيًا وينظف الشوائب المنفصلة فقط؛ "
+                "لا يدمج صور حقائق غذائية ولا يخمّن كتابة أو جزءًا غير مؤكد.")
+            complete_cb.setChecked(True)
             layout.addWidget(shadow_cb)
             layout.addWidget(complete_cb)
             btns = QDialogButtonBox(
@@ -532,8 +667,10 @@ def _install_finished_tool(window: Any) -> None:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(
                 window, "اكتملت المعالجة",
-                f"مُعالَجة: {res['processed']}\n"
-                f"مُتخطّاة: {res['skipped']}\n"
+                f"فُحِصت: {res.get('examined', 0)}\n"
+                f"حُسّنت: {res['processed']}\n"
+                f"لا تحتاج تغييرًا آمنًا: {res.get('unchanged', 0)}\n"
+                f"تعذر قراءتها: {res['skipped']}\n"
                 f"أخطاء: {len(res['errors'])}"
                 + (f"\n\n{chr(10).join(res['errors'][:5])}"
                    if res["errors"] else ""),

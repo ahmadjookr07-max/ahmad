@@ -81,8 +81,10 @@ def test_batch_with_images():
         res = batch_process_finished(
             d, add_shadow=True, complete=False,
             progress_cb=lambda d, t: progress.append((d, t)))
-        check(res["processed"] + res["skipped"] == 3,
-              f"معالجة 3 صور (معالجة={res['processed']} تخطٍّ={res['skipped']})")
+        check(res.get("examined") == 3,
+              f"فُحصت الصور الثلاث ({res.get('examined')})")
+        check(res["processed"] + res.get("unchanged", 0) + res["skipped"] == 3,
+              f"حساب الدفعة صحيح (تحسين={res['processed']} دون تغيير={res.get('unchanged', 0)} تعذر={res['skipped']})")
         check(not res["errors"], f"لا أخطاء: {res['errors']}")
         check(len(progress) >= 3, "استدعاء التقدم")
 
