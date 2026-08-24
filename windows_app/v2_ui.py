@@ -974,6 +974,10 @@ def install_v2(main_window, data_root: Path) -> None:
     def v2_save_session(name: str = "") -> str:
         from engine_v2.session_v2 import SessionState, image_identity_key
         store = main_window.v2_session_store
+        # الجلسات المحفوظة بإصدارات قديمة قد تحمل name: وpath: للسجل نفسه.
+        # نرحّلها قبل أي تحديث؛ لا نحذف name: بالاسم وحده لأنه قد يخص صورة
+        # شقيقة مختلفة المصدر، بل تبتّ الهوية الكاملة داخل SessionStore.
+        store.canonicalize_images()
         snap = _capture_state()
         if store.state is None or not getattr(store.state, "session_id", ""):
             import uuid, time as _t
@@ -1020,14 +1024,6 @@ def install_v2(main_window, data_root: Path) -> None:
             )
             if not key:
                 continue
-            # ترحيل مفتاح الجلسة القديم (اسم مجرد) عندما تتوافر هوية
-            # المسار. ذلك يمنع صفًا قديمًا من استبدال صورة شقيقة تحمل
-            # الباركود نفسه عند الحفظ التالي.
-            legacy_key = source_name or source_path
-            if legacy_key and legacy_key != key:
-                old = store.state.images.get(legacy_key)
-                if isinstance(old, dict) and not old.get("source_path"):
-                    store.state.images.pop(legacy_key, None)
             store.upsert_image(
                 key,
                 source_path=d.get("source_path", ""),
@@ -1061,11 +1057,19 @@ def install_v2(main_window, data_root: Path) -> None:
                     d.get("foreground_quality_metrics") or {}),
                 raw=d,
             )
+        # ضمان إضافي بعد كل upsert: الحفظ الثاني للجلسة نفسها لا يملك
+        # مسارًا يضيف صفًا أو نسخة جديدة، وتبقى الصور الشقيقة مستقلة.
+        store.canonicalize_images()
         store.save(force=True)
         return store.state.session_id
 
     def v2_restore_session(state) -> None:
         try:
+            # قد يستدعي مكوّن آخر الاستعادة مباشرةً دون المرور عبر load().
+            # نطبّع هنا كذلك كي لا تعرض الواجهة alias قديم كسطر إضافي.
+            if hasattr(state, "images"):
+                from engine_v2.session_v2 import canonicalize_session_state
+                canonicalize_session_state(state)
             setup = {}
             if hasattr(state, "setup"):
                 setup = state.setup or {}

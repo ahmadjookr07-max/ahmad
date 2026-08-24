@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "windows_app"))
 
 from windows_app.session_fidelity_patch import (  # noqa: E402
     DONE_STATUSES, FULL_FIELDS, install_session_fidelity, pick_display_path)
+from engine_v2.session_v2 import image_identity_key  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -130,7 +131,9 @@ def test_full_fields():
         check(rep["save_wrapped"] and rep["restore_wrapped"],
               "الرقعة رُكّبت على الحفظ والاستعادة")
         w.v2_save_session()
-        saved = w.v2_session_store.state.images["IMG_1.jpg"]
+        key = image_identity_key(it.source_path, it.source_name,
+                                 it.output_path, it.match_source)
+        saved = w.v2_session_store.state.images[key]
         missing = [f for f in FULL_FIELDS if f not in saved]
         check(not missing, f"كل الحقول الثمانية عشر حُفظت (ناقص: {missing})")
         check(saved["output_path"] == str(out),

@@ -33,16 +33,22 @@ w1.v2_session_store = __import__("engine_v2.session_v2", fromlist=["SessionStore
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-fixture = str(tmp / "fixture.png")
-_fx = np.full((300, 300, 3), 235, np.uint8)
-cv2.rectangle(_fx, (70, 60), (230, 250), (70, 130, 205), -1)
-cv2.imwrite(fixture, _fx)
-assert os.path.isfile(fixture), "تعذر توليد صورة الاختبار"
+fixtures = []
+for i in range(1, 6):
+    fixture = str(tmp / f"fixture-{i}.png")
+    _fx = np.full((300, 300, 3), 235, np.uint8)
+    cv2.rectangle(_fx, (70, 60), (230, 250), (70, 130, 205), -1)
+    cv2.putText(_fx, str(i), (130, 160), cv2.FONT_HERSHEY_SIMPLEX,
+                1.2, (20, 20, 20), 3)
+    cv2.imwrite(fixture, _fx)
+    assert os.path.isfile(fixture), "تعذر توليد صورة الاختبار"
+    fixtures.append(fixture)
 items = [
     native_app.BatchItemResult(
-        source_path=fixture, source_name=f"PHOTO-{i:03d}.jpg", status="review",
+        source_path=fixtures[i - 1], source_name=f"PHOTO-{i:03d}.jpg", status="review",
         item_code=f"{10000+i}", product_name=f"صنف تجريبي {i}",
-        barcode=f"628100000{i:04d}", explanation="اختبار", review_path=fixture)
+        barcode=f"628100000{i:04d}", explanation="اختبار",
+        review_path=fixtures[i - 1])
     for i in range(1, 6)
 ]
 w1.current_result = native_app.BatchRunResult(

@@ -87,6 +87,9 @@ def install_session_fidelity(main_window: Any) -> dict:
                 result = getattr(main_window, "current_result", None)
                 if store is not None and result is not None:
                     from engine_v2.session_v2 import image_identity_key
+                    canonicalize = getattr(store, "canonicalize_images", None)
+                    if callable(canonicalize):
+                        canonicalize()
                     for it in getattr(result, "items", []) or []:
                         source_name = str(getattr(it, "source_name", "") or "")
                         source_path = str(getattr(it, "source_path", "") or "")
@@ -109,6 +112,11 @@ def install_session_fidelity(main_window: Any) -> dict:
                         fields["item_name"] = getattr(it, "product_name", "")
                         fields["error"] = getattr(it, "explanation", "")
                         store.upsert_image(key, **fields)
+                    # هذا الغلاف يكتب الحقول الكاملة بعد الحفظ الأساسي؛
+                    # نطبع مرة أخرى حتى لا يعيد alias قديم ظهر من إضافة
+                    # خارجية، مع إبقاء الصور ذات المصدرين المستقلين كما هي.
+                    if callable(canonicalize):
+                        canonicalize()
                     store.save(force=True)
             except Exception:
                 pass
@@ -122,6 +130,13 @@ def install_session_fidelity(main_window: Any) -> dict:
     restore_fn = getattr(main_window, "v2_restore_session", None)
     if callable(restore_fn):
         def patched_restore(state: Any) -> Any:
+            # دعم الاستعادة المباشرة من حالة قديمة، لا عبر SessionStore.load
+            # فقط؛ من دون ذلك قد تعرض الواجهة صف الاسم القديم بجانب path:.
+            try:
+                from engine_v2.session_v2 import canonicalize_session_state
+                canonicalize_session_state(state)
+            except Exception:
+                pass
             out = restore_fn(state)
             try:
                 result = getattr(main_window, "current_result", None)
