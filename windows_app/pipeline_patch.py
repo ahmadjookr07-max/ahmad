@@ -10,9 +10,13 @@
 """
 from __future__ import annotations
 
+import csv
+import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +28,15 @@ for p in (str(ROOT / "src"), str(ROOT / "src" / "engine_v2"),
 
 __all__ = ["install_pipeline_patch", "apply_finish_to_image",
            "apply_shadow_to_finished", "apply_completion_to_finished",
-           "FinishedEnhancementOptions", "apply_finished_enhancements",
-           "batch_process_finished"]
+           "FinishedEnhancementOptions", "SmartFinishedOptions",
+           "apply_finished_enhancements", "apply_smart_finished_enhancements",
+           "batch_process_finished", "batch_process_finished_to_new_folder"]
 
 # خيار دفعات مشترك، ويكون الظل الخفيف مفعّلًا ابتداءً كما طلب المالك.
 _AUTO_SHADOW_AFTER_ISOLATION = True
+# مخزن لمحرك كشف النص العميق؛ إنشاؤه لكل صورة يبدد الوقت والذاكرة.
+_DEEP_TEXT_DETECTOR = None
+_DEEP_TEXT_DETECTOR_FAILED = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +61,40 @@ class FinishedEnhancementOptions:
     @classmethod
     def safe_all(cls) -> "FinishedEnhancementOptions":
         return cls()
+
+
+@dataclass(frozen=True)
+class SmartFinishedOptions:
+    """سياسة معالجة مستقلة لصور المتجر المنجزة.
+
+    لا تعتمد على Excel أو barcode أو الجلسة. الوضع ``protect`` لا يغير إلا
+    المناطق المؤكدة، بينما ``radical`` يطبّق تشطيبًا أقوى خارج النص والشعار
+    ثم يثبت البكسلات المحمية ويعيد للوضع الآمن عند فشل التحقق.
+    """
+    mode: str = "protect"  # protect | radical
+    preserve_text: bool = True
+    clean_background: bool = True
+    add_shadow: bool = True
+    repair_edges: bool = True
+    repair_gaps: bool = True
+    restore_texture: bool = True
+    enhance_appearance: bool = True
+    audit_text: bool = True
+
+    def is_radical(self) -> bool:
+        return self.mode == "radical"
+
+    def finished_options(self) -> FinishedEnhancementOptions:
+        return FinishedEnhancementOptions(
+            add_shadow=self.add_shadow,
+            repair_edges=self.repair_edges,
+            repair_gaps=self.repair_gaps,
+            restore_texture=self.restore_texture,
+            preserve_text_and_barcodes=self.preserve_text,
+            understand_image_type=True,
+            # الوضع الدقيق أبقى؛ الجذري يستخدم طبقة أقوى لاحقًا مع حماية نص.
+            enhance_product_appearance=(self.enhance_appearance and not self.is_radical()),
+        )
 
 
 def _import_finish():
@@ -453,6 +495,329 @@ def apply_finished_enhancements(
     return image, report
 
 
+def _deep_text_detector():
+    """يحمل كاشف PP-OCR v5 المجاني مرة واحدة عند توفر ملفاته محليًا."""
+    global _DEEP_TEXT_DETECTOR, _DEEP_TEXT_DETECTOR_FAILED
+    if _DEEP_TEXT_DETECTOR is not None:
+        return _DEEP_TEXT_DETECTOR
+    if _DEEP_TEXT_DETECTOR_FAILED:
+        return None
+    model_dir = ROOT / "src" / "engine_v2" / "models"
+    det = model_dir / "ppocr-v5-det.onnx"
+    rec = model_dir / "ppocr-arabic-rec.onnx"
+    dictionary = model_dir / "ppocr-arabic-dict.txt"
+    if not (det.is_file() and rec.is_file() and dictionary.is_file()):
+        _DEEP_TEXT_DETECTOR_FAILED = True
+        return None
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+        _DEEP_TEXT_DETECTOR = RapidOCR(
+            det_model_path=str(det), rec_model_path=str(rec),
+            rec_keys_path=str(dictionary), use_angle_cls=False)
+        return _DEEP_TEXT_DETECTOR
+    except Exception:
+        _DEEP_TEXT_DETECTOR_FAILED = True
+        return None
+
+
+def _deep_text_protection_mask(image_bgr, foreground_mask):
+    """يكشف أسطر النص بنموذج PP-OCR v5 مجاني ويعيد مناطقها دون تعديلها."""
+    import cv2
+    import numpy as np
+    detector = _deep_text_detector()
+    mask = np.zeros(foreground_mask.shape, dtype=np.uint8)
+    if detector is None:
+        return mask.astype(bool), 0
+    try:
+        boxes, _ = detector(image_bgr, use_rec=False, use_cls=False, box_thresh=0.12)
+        h, w = foreground_mask.shape[:2]
+        count = 0
+        for box in boxes or []:
+            points = np.asarray(box, dtype=np.int32).reshape(-1, 2)
+            if points.size < 6:
+                continue
+            # وسع المضلع قليلًا حتى لا تلمس تحسينات الحافة حروف الملصق.
+            x, y, bw, bh = cv2.boundingRect(points)
+            pad = max(3, int(max(bw, bh) * 0.12))
+            cv2.rectangle(mask, (max(0, x - pad), max(0, y - pad)),
+                          (min(w - 1, x + bw + pad), min(h - 1, y + bh + pad)), 1, -1)
+            count += 1
+        return (mask > 0) & (foreground_mask > 0), count
+    except Exception:
+        return mask.astype(bool), 0
+
+
+def _ocr_text_protection_mask(image_bgr, foreground_mask):
+    """يقرأ كلمات العبوة محليًا ويعيد مناطقها فقط، لا نصًا مولدًا أو مصححًا.
+
+    OCR إشارة إضافية فوق كشف الحواف: إذا لم تكن حزمة Tesseract متاحة في
+    جهاز ما يعود المحرك بأمان إلى حارس الحواف، ولا يفشل تشغيل الدفعة.
+    """
+    import cv2
+    import numpy as np
+    mask = np.zeros(foreground_mask.shape, dtype=np.uint8)
+    tokens = 0
+    try:
+        import pytesseract
+        from pytesseract import Output
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        data = pytesseract.image_to_data(
+            rgb, lang="ara+eng", config="--psm 11", output_type=Output.DICT)
+        h, w = foreground_mask.shape[:2]
+        for index, raw in enumerate(data.get("text", ())):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            try:
+                confidence = float(data["conf"][index])
+                x = int(data["left"][index])
+                y = int(data["top"][index])
+                bw = int(data["width"][index])
+                bh = int(data["height"][index])
+            except (KeyError, ValueError, IndexError):
+                continue
+            if confidence < 12 or bw < 2 or bh < 2:
+                continue
+            pad = max(3, int(max(bw, bh) * 0.18))
+            cv2.rectangle(mask, (max(0, x - pad), max(0, y - pad)),
+                          (min(w - 1, x + bw + pad), min(h - 1, y + bh + pad)), 1, -1)
+            tokens += 1
+    except Exception:
+        return mask.astype(bool), 0
+    return (mask > 0) & (foreground_mask > 0), tokens
+
+
+def _smart_image_profile(image_bgr, *, audit_text: bool = False) -> dict[str, Any]:
+    """يفهم بنية الصورة محليًا قبل اختيار خطة التحسين.
+
+    ليس مصنف أصناف أو مولدًا للنص؛ بل يحدد الحالة التي تسمح أو تمنع عملية
+    بصرية بعينها. بذلك تبقى لوحة معلومات التغذية ومشهد العناصر المنفصلة
+    خارج مسار التجميـل العام.
+    """
+    import numpy as np
+    _, mask_from_white = _import_shape()
+    mask = mask_from_white(image_bgr)
+    h, w = mask.shape[:2]
+    components = _significant_components(mask)
+    area_ratio = float(mask.mean())
+    bbox_fill_ratio = 0.0
+    if mask.any():
+        ys, xs = np.where(mask > 0)
+        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+        bbox_fill_ratio = float(mask[y0:y1 + 1, x0:x1 + 1].mean())
+    gray = __import__("cv2").cvtColor(image_bgr, __import__("cv2").COLOR_BGR2GRAY)
+    edge = (__import__("cv2").Canny(gray, 60, 150) > 0).astype(np.uint8)
+    local = __import__("cv2").boxFilter(edge.astype(np.float32), -1, (17, 17), normalize=True)
+    text_mask = (local > 0.13) & (mask > 0)
+    text_mask = __import__("cv2").dilate(text_mask.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    text_mask &= mask > 0
+    deep_text_mask, deep_boxes = _deep_text_protection_mask(image_bgr, mask) if audit_text else (np.zeros_like(text_mask, bool), 0)
+    ocr_text_mask, ocr_tokens = _ocr_text_protection_mask(image_bgr, mask) if audit_text else (np.zeros_like(text_mask, bool), 0)
+    text_mask |= deep_text_mask | ocr_text_mask
+    protected_share = float(text_mask.sum()) / float(max(1, mask.sum()))
+    information_panel = bool(bbox_fill_ratio >= 0.84 and protected_share >= 0.23)
+    if area_ratio < 0.004:
+        scenario = "small_or_ambiguous_foreground"
+    elif information_panel:
+        scenario = "information_or_dense_text_panel"
+    elif len(components) >= 3:
+        scenario = "multiple_separate_components"
+    elif len(components) == 2:
+        scenario = "split_or_double_component"
+    elif protected_share >= 0.25:
+        scenario = "text_heavy_packaging"
+    elif area_ratio < 0.07:
+        scenario = "small_centered_product"
+    elif area_ratio > 0.50:
+        scenario = "large_or_cropped_product"
+    else:
+        scenario = "standard_single_product"
+    return {
+        "scenario": scenario,
+        "mask": mask,
+        "text_mask": text_mask,
+        "foreground_ratio": round(area_ratio, 5),
+        "bbox_fill_ratio": round(bbox_fill_ratio, 5),
+        "protected_share": round(protected_share, 5),
+        "components": len(components),
+        "information_panel": information_panel,
+        "ocr_tokens": ocr_tokens,
+        "deep_text_boxes": deep_boxes,
+    }
+
+
+def _radical_safe_appearance(image_bgr, profile: dict[str, Any], *, preserve_text: bool):
+    """يعطي تحسنًا أوضح خارج النص، من دون إعادة رسم محتوى العبوة.
+
+    تغيير L في Lab فقط يحسن الإضاءة والتباين من دون تبديل لون الشعار أو
+    الغلاف. لا ينفذ على لوحات المعلومات أو المكونات المنفصلة.
+    """
+    import cv2
+    import numpy as np
+    scenario = str(profile.get("scenario", ""))
+    if scenario in {"information_or_dense_text_panel", "multiple_separate_components",
+                    "split_or_double_component", "small_or_ambiguous_foreground"}:
+        return image_bgr, 0, "مستثنى حسب سيناريو الصورة"
+    mask = profile["mask"] > 0
+    protected = profile["text_mask"] if preserve_text else np.zeros_like(mask, bool)
+    editable = mask & ~protected
+    if int(editable.sum()) < 100:
+        return image_bgr, 0, "لا توجد منطقة آمنة كافية"
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    # أقوى من وضع الحماية لكن بلا حدة أو saturation تخترع خامة/نصًا.
+    detail = cv2.createCLAHE(clipLimit=1.75, tileGridSize=(8, 8)).apply(l_ch)
+    improved_l = cv2.addWeighted(l_ch, 0.62, detail, 0.38, 0)
+    improved = cv2.cvtColor(cv2.merge([improved_l, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+    out = image_bgr.copy()
+    out[editable] = improved[editable]
+    return out, int(np.any(out != image_bgr, axis=2).sum()), "تحسين مظهر مقيد"
+
+
+def _restore_protected_pixels(original, candidate, profile: dict[str, Any], *, preserve_text: bool):
+    """يثبت النص والشعار قبل اختبار القبول، لا يكتفي بتوقع OCR."""
+    import numpy as np
+    if not preserve_text:
+        return candidate, True, 0
+    protected = profile["text_mask"]
+    if profile.get("information_panel"):
+        protected = profile["mask"] > 0
+    if not protected.any():
+        return candidate, True, 0
+    out = candidate.copy()
+    changed = int(np.any(out[protected] != original[protected], axis=1).sum())
+    out[protected] = original[protected]
+    valid = bool(np.array_equal(out[protected], original[protected]))
+    return out, valid, changed
+
+
+def apply_smart_finished_enhancements(
+    img_bgr,
+    options: SmartFinishedOptions | None = None,
+):
+    """يحلل صورة ثم يطبق خطة حماية أو تحسين جذري ويتحقق من النص قبل القبول."""
+    import numpy as np
+    active = options or SmartFinishedOptions()
+    profile = _smart_image_profile(
+        img_bgr, audit_text=bool(active.is_radical() and active.preserve_text and active.audit_text))
+    # نوحّد الخلفية قبل توليد الظل حتى يبقى ظل التلامس الذي تضيفه المرحلة
+    # الآمنة لاحقًا؛ تنظيفها بعد الظل كان يمسحه بالكامل.
+    base_input = img_bgr.copy()
+    if active.clean_background:
+        base_input[profile["mask"] == 0] = (255, 255, 255)
+    safe, base_report = apply_finished_enhancements(base_input, active.finished_options())
+    detail: dict[str, Any] = {
+        "mode": "radical" if active.is_radical() else "protect",
+        "scenario": profile["scenario"],
+        "foreground_ratio": profile["foreground_ratio"],
+        "protected_share": profile["protected_share"],
+        "text_pixels": int(profile["text_mask"].sum()),
+        "ocr_tokens": int(profile.get("ocr_tokens", 0)),
+        "deep_text_boxes": int(profile.get("deep_text_boxes", 0)),
+        "radical_pixels": 0,
+        "radical_reason": "وضع الحماية الدقيقة",
+        "fallback_to_protect": False,
+        "protected_changed_before_restore": 0,
+    }
+    out = safe
+    if active.is_radical() and active.enhance_appearance:
+        out, pixels, reason = _radical_safe_appearance(
+            out, profile, preserve_text=active.preserve_text)
+        detail["radical_pixels"] = pixels
+        detail["radical_reason"] = reason
+    out, text_ok, changed_protected = _restore_protected_pixels(
+        img_bgr, out, profile, preserve_text=active.preserve_text)
+    detail["protected_changed_before_restore"] = changed_protected
+    if not text_ok:
+        # لا يصدر مسار جذري غير متحقق؛ يرجع إلى المعالجة المحافظة.
+        out, _, _ = _restore_protected_pixels(
+            img_bgr, safe, profile, preserve_text=True)
+        detail["fallback_to_protect"] = True
+        detail["radical_reason"] = "فشل تحقق النص — رجوع للحماية الدقيقة"
+    detail.update({f"safe_{key}": value for key, value in base_report.items()})
+    detail["changed_pixels"] = int(np.any(out != img_bgr, axis=2).sum())
+    return out, detail
+
+
+def _new_smart_output_folder(parent: str | Path) -> Path:
+    root = Path(parent)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    base = root / f"MarketImageStudio-Smart-{stamp}"
+    candidate = base
+    index = 2
+    while candidate.exists():
+        candidate = root / f"{base.name}-{index}"
+        index += 1
+    candidate.mkdir(parents=True, exist_ok=False)
+    return candidate
+
+
+def batch_process_finished_to_new_folder(
+    source_folder: str | Path,
+    output_parent: str | Path,
+    *,
+    options: SmartFinishedOptions | None = None,
+    progress_cb=None,
+) -> dict:
+    """ينتج نسخة معالجة كاملة في مجلد جديد ولا يكتب أبدًا فوق المدخل."""
+    import numpy as np
+    source = Path(source_folder)
+    files = sorted(source.glob("*.webp")) + sorted(source.glob("*.png"))
+    active = options or SmartFinishedOptions()
+    output = _new_smart_output_folder(output_parent)
+    records: list[dict[str, Any]] = []
+    result = {"source_folder": str(source), "output_folder": str(output),
+              "examined": 0, "written": 0, "unchanged": 0, "skipped": 0,
+              "errors": [], "scenarios": {}, "fallbacks": 0}
+    total = len(files)
+    for index, path in enumerate(files, 1):
+        if progress_cb is not None:
+            try:
+                progress_cb(index - 1, total)
+            except Exception:
+                pass
+        record: dict[str, Any] = {"name": path.name}
+        try:
+            original = _read_image_unicode(path)
+            if original is None:
+                result["skipped"] += 1
+                record["status"] = "unreadable"
+                records.append(record)
+                continue
+            result["examined"] += 1
+            enhanced, detail = apply_smart_finished_enhancements(original, active)
+            record.update(detail)
+            record["status"] = "changed" if not np.array_equal(original, enhanced) else "unchanged"
+            target = output / path.name
+            if not _write_image_unicode(target, enhanced):
+                raise OSError("فشل حفظ نسخة النتيجة")
+            result["written"] += 1
+            if record["status"] == "unchanged":
+                result["unchanged"] += 1
+            scenario = str(detail.get("scenario", "unknown"))
+            result["scenarios"][scenario] = int(result["scenarios"].get(scenario, 0)) + 1
+            result["fallbacks"] += int(bool(detail.get("fallback_to_protect")))
+            records.append(record)
+        except Exception as exc:
+            result["errors"].append(f"{path.name}: {exc}")
+            record.update({"status": "error", "error": str(exc)})
+            records.append(record)
+    report_json = output / "smart_processing_report.json"
+    report_csv = output / "smart_processing_report.csv"
+    report_json.write_text(json.dumps({**result, "records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    fieldnames = sorted({key for record in records for key in record}) or ["name", "status"]
+    with report_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
+    if progress_cb is not None:
+        try:
+            progress_cb(total, total)
+        except Exception:
+            pass
+    return result
+
+
 def batch_process_finished(
     folder: str | Path,
     *,
@@ -580,13 +945,14 @@ def install_pipeline_patch(window: Any) -> dict:
     except Exception as exc:
         report["product_framing_error"] = str(exc)
 
-    # ── أداة الصور المنجزة في الواجهة ──
+    # ── أداة الصور المنجزة الذكية: مدخل مستقل في رأس التطبيق ──
+    # لا توضع في صفحة النتائج أو الجلسة؛ فلا تتداخل مع الربط أو الحفظ.
     try:
-        _install_finished_tool(window)
-        report["batch_tool_installed"] = True
-        report["all_patches"].append("finished_tool")
+        _install_smart_finished_tool(window)
+        report["smart_finished_tool_installed"] = True
+        report["all_patches"].append("smart_finished_tool")
     except Exception as exc:
-        report["batch_tool_error"] = str(exc)
+        report["smart_finished_tool_error"] = str(exc)
 
     # ── رقع الحماية والجلسات والمحرر ──
     for mod_name, install_fn_name in (
@@ -794,6 +1160,153 @@ def _install_product_framing_controls(window: Any) -> None:
     window._product_offset_x = offset_x
     window._product_offset_y = offset_y
     window._save_product_framing = _save_current
+
+
+def _install_smart_finished_tool(window: Any) -> None:
+    """يضع معالجة الصور الجاهزة الذكية في رأس التطبيق، مستقلة عن الجلسات."""
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QImage, QPixmap, QDesktopServices
+    from PySide6.QtWidgets import (
+        QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
+        QLabel, QMessageBox, QProgressDialog,
+        QPushButton, QRadioButton, QVBoxLayout,
+    )
+
+    def _open() -> None:
+        source_folder = QFileDialog.getExistingDirectory(
+            window, "اختر مجلد الصور الجاهزة الأصلي")
+        if not source_folder:
+            return
+        output_parent = QFileDialog.getExistingDirectory(
+            window, "اختر مكان إنشاء مجلد نتائج جديد", str(Path(source_folder).parent))
+        if not output_parent:
+            return
+        count = len(list(Path(source_folder).glob("*.webp"))) + len(list(Path(source_folder).glob("*.png")))
+        dialog = QDialog(window)
+        dialog.setWindowTitle("معالجة صور جاهزة بالذكاء")
+        dialog.setMinimumWidth(480)
+        layout = QVBoxLayout(dialog)
+        source_label = QLabel(
+            f"المدخل: {Path(source_folder).name} ({count} صورة)\n"
+            f"النتيجة: سيُنشأ مجلد جديد داخل {Path(output_parent).name}")
+        source_label.setWordWrap(True)
+        layout.addWidget(source_label)
+        note = QLabel(
+            "هذه الأداة مستقلة عن Excel والباركود والجلسات. لا تكتب فوق المصدر، "
+            "وتحتفظ باسم ودقة كل صورة داخل مجلد نتيجة جديد مع تقرير تفصيلي. "
+            "النماذج المحلية مجانية ومضمّنة؛ لا حساب ولا اشتراك ولا اتصال وقت التشغيل.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        protect_radio = QRadioButton("حماية دقيقة — تنظيف متجر آمن مع تثبيت النص والشعار")
+        radical_radio = QRadioButton("تحسين جذري مع حفظ النصوص — مظهر أقوى خارج مناطق النص")
+        protect_radio.setChecked(True)
+        protect_radio.setObjectName("smartFinishedProtectMode")
+        radical_radio.setObjectName("smartFinishedRadicalMode")
+        layout.addWidget(protect_radio)
+        layout.addWidget(radical_radio)
+        preserve = QCheckBox("تثبيت النصوص والشعارات قبل التصدير — موصى به")
+        preserve.setChecked(True)
+        preserve.setObjectName("smartFinishedPreserveText")
+        preserve.setToolTip("يعيد بكسلات النص والشعار الأصلية بعد التحسين ويكتب نتيجة الحماية في التقرير.")
+        layout.addWidget(preserve)
+        preview_button = QPushButton("معاينة الصورة الأولى — دون حفظ")
+        preview_button.setObjectName("smartFinishedPreview")
+        layout.addWidget(preview_button)
+
+        def _options() -> SmartFinishedOptions:
+            return SmartFinishedOptions(
+                mode="radical" if radical_radio.isChecked() else "protect",
+                preserve_text=preserve.isChecked(),
+            )
+
+        def _preview() -> None:
+            candidate = next(iter(sorted(Path(source_folder).glob("*.webp")) +
+                                  sorted(Path(source_folder).glob("*.png"))), None)
+            original = _read_image_unicode(candidate) if candidate is not None else None
+            if original is None:
+                QMessageBox.warning(dialog, "المعاينة", "تعذر قراءة صورة للمعاينة.")
+                return
+            enhanced, detail = apply_smart_finished_enhancements(original, _options())
+            popup = QDialog(dialog)
+            popup.setWindowTitle("معاينة صور المتجر الذكية — لا حفظ")
+            popup_layout = QVBoxLayout(popup)
+            row = QHBoxLayout()
+            for title, image in (("الأصل", original), ("النتيجة", enhanced)):
+                rgb = __import__("cv2").cvtColor(image, __import__("cv2").COLOR_BGR2RGB)
+                height, width, channels = rgb.shape
+                pixmap = QPixmap.fromImage(QImage(rgb.data, width, height, channels * width,
+                                                   QImage.Format_RGB888).copy())
+                label = QLabel(title)
+                label.setAlignment(Qt.AlignCenter)
+                label.setPixmap(pixmap.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                row.addWidget(label)
+            popup_layout.addLayout(row)
+            report = QLabel(
+                f"السيناريو: {detail['scenario']} | وضع: {detail['mode']}\n"
+                f"منطقة نص محمية: {detail['text_pixels']} بكسل | "
+                f"مناطق كشف عميق: {detail['deep_text_boxes']} | "
+                f"تحسين جذري: {detail['radical_pixels']} بكسل | "
+                f"تغير قبل تثبيت النص: {detail['protected_changed_before_restore']} بكسل\n"
+                f"القرار: {detail['radical_reason']}")
+            report.setWordWrap(True)
+            popup_layout.addWidget(report)
+            close = QDialogButtonBox(QDialogButtonBox.Close)
+            close.rejected.connect(popup.reject)
+            popup_layout.addWidget(close)
+            popup.exec()
+
+        preview_button.clicked.connect(_preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        progress = QProgressDialog("جارٍ تحليل الصور وإنشاء النتائج…", "إلغاء", 0, 100, window)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def _progress(done: int, total: int) -> None:
+            if total:
+                progress.setValue(int(done * 100 / total))
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+
+        result = batch_process_finished_to_new_folder(
+            source_folder, output_parent, options=_options(), progress_cb=_progress)
+        progress.close()
+        message = QMessageBox(window)
+        message.setIcon(QMessageBox.Information)
+        message.setWindowTitle("اكتملت المعالجة الذكية")
+        message.setText(
+            f"فُحصت: {result['examined']}\n"
+            f"كُتبت في مجلد جديد: {result['written']}\n"
+            f"نسخ بلا تغيير بصري: {result['unchanged']}\n"
+            f"أخطاء: {len(result['errors'])}")
+        message.setInformativeText(f"مجلد النتائج:\n{result['output_folder']}")
+        open_button = message.addButton("فتح مجلد النتائج", QMessageBox.ActionRole)
+        message.addButton(QMessageBox.Close)
+        message.exec()
+        if message.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(result['output_folder']))
+
+    button = QPushButton("صور جاهزة بالذكاء")
+    button.setObjectName("smartFinishedToolButton")
+    button.setToolTip(
+        "تحليل وتحسين صور متجر جاهزة في مجلد نتائج مستقل: حماية دقيقة أو تحسين جذري مع حفظ النصوص. "
+        "نماذج OCR محلية مجانية مضمّنة، بلا اشتراك أو اتصال وقت التشغيل.")
+    button.clicked.connect(_open)
+    header = getattr(window, "header_frame", None)
+    header_layout = header.layout() if header is not None else None
+    if header_layout is not None:
+        # يوضع في رأس القائمة الرئيسية لا في صفحة النتائج أو قائمة الجلسات.
+        header_layout.insertWidget(min(1, header_layout.count()), button)
+    else:
+        # احتياط للواجهات الأقدم، مع بقاء الأداة مستقلة عن النتائج.
+        panel = getattr(window, "setup_panel", None)
+        if panel is not None and panel.layout() is not None:
+            panel.layout().insertWidget(0, button)
+    window._smart_finished_tool_btn = button
 
 
 def _install_finished_tool(window: Any) -> None:

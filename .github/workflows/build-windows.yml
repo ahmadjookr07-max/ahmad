@@ -23,13 +23,16 @@ jobs:
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Install dependencies
         run: |
-          pip install PySide6==6.8.1 opencv-python-headless numpy onnxruntime openpyxl pillow cryptography arabic-reshaper python-bidi pyinstaller zxing-cpp
+          pip install PySide6==6.8.1 opencv-python-headless numpy onnxruntime rapidocr-onnxruntime==1.4.4 openpyxl pillow cryptography arabic-reshaper python-bidi pyinstaller zxing-cpp
       - name: Download models
         run: |
           mkdir -p src/engine_v2/models
           mkdir -p resources/models
           curl -L -o src/engine_v2/models/isnet-general-use.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx
           curl -L -o resources/models/u2netp.onnx https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
+          curl -L -o src/engine_v2/models/ppocr-v5-det.onnx https://huggingface.co/monkt/paddleocr-onnx/resolve/main/detection/v5/det.onnx
+          curl -L -o src/engine_v2/models/ppocr-arabic-rec.onnx https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/arabic/rec.onnx
+          curl -L -o src/engine_v2/models/ppocr-arabic-dict.txt https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/arabic/dict.txt
       - name: Build standalone application
         run: |
           pyinstaller --noconfirm --onefile --windowed `
@@ -64,7 +67,9 @@ jobs:
             --hidden-import "nutrition_patch" `
             --hidden-import "awareness" `
             --hidden-import "zxingcpp" `
+            --hidden-import "rapidocr_onnxruntime" `
             --collect-all "engine_v2" `
+            --collect-all "rapidocr_onnxruntime" `
             --collect-all "awareness" `
             --collect-all "zxingcpp" `
             windows_app/native_app_v2.py
