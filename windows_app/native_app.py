@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.24"
+APP_VERSION = "3.4.25"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -8775,6 +8775,39 @@ class MainWindow(QMainWindow):
             f"🗑 حُذفت {deleted} صورة من النتائج وحُدّثت حزمة ZIP —"
             " الصور الأصلية لم تُمس")
 
+    def _ensure_delivery_zip_target(self) -> Path | None:
+        """يعيد هدف حزمة التسليم أو ينشئه للجلسات القديمة.
+
+        جلسات V2 السابقة حفظت صفوف الصور فقط، لا ``delivery_zip``؛ لذلك
+        كان زر حفظ ZIP يعلن أن الحزمة غير موجودة رغم أن كل الصور الجاهزة
+        أمام المستخدم. الهدف الافتراضي داخل مساحة العمل يعيد بناء الحزمة
+        من تلك الصور دون نسخها أو تغيير أسمائها.
+        """
+        result = self.current_result
+        workspace = self.current_workspace
+        if result is None or workspace is None:
+            return None
+        workspace = Path(workspace)
+        if not workspace.is_dir():
+            return None
+        raw = str(getattr(result, "delivery_zip", "") or "").strip()
+        target = Path(raw) if raw else (workspace / "delivery.zip")
+        if not target.is_absolute():
+            target = workspace / target
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        self._set_delivery_excel_report_path(result, str(getattr(result, "delivery_excel_report", "") or ""))
+        try:
+            setattr(result, "delivery_zip", str(target))
+        except Exception:
+            try:
+                object.__setattr__(result, "delivery_zip", str(target))
+            except Exception:
+                return None
+        return target
+
     def _on_delivery_excel_report_toggled(self, enabled: bool) -> None:
         """يحدّث الحزمة عند تبديل تقرير Excel، بلا لمس الصور الأصلية."""
         if self.current_result is not None:
@@ -8814,7 +8847,7 @@ class MainWindow(QMainWindow):
         فورًا وتنتظر (عند الإغلاق أو قبل التسليم).
         """
         result = self.current_result
-        if result is None or not getattr(result, "delivery_zip", None):
+        if result is None or self._ensure_delivery_zip_target() is None:
             return
         scheduler = self._delivery_zip_scheduler()
         if scheduler is None:
@@ -8874,7 +8907,7 @@ class MainWindow(QMainWindow):
         ``_write_delivery_zip`` تفحص ``is_file()`` مباشرة على القيمة.
         """
         result = self.current_result
-        if result is None or not getattr(result, "delivery_zip", None):
+        if result is None or self._ensure_delivery_zip_target() is None:
             return
         original: list[tuple[object, str]] = []
         try:
@@ -9473,6 +9506,16 @@ class MainWindow(QMainWindow):
     def _save_delivery_zip(self) -> None:
         if self.current_result is None:
             return
+        source = self._ensure_delivery_zip_target()
+        if source is None:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "تعذر تحديد مجلد نتائج صالح لإنشاء حزمة ZIP. افتح الجلسة من مجلدها الأصلي ثم حاول مجددًا.")
+            return
+        # جلسة قديمة قد تحمل النتائج والصور، لكن لا تحمل حزمة سابقة.
+        # نعيد بناء ZIP وExcel الآن قبل إظهار نافذة الحفظ بدل رفض الطلب.
+        if not source.is_file():
+            self._refresh_delivery_zip(immediate=True)
         # 2.9.12 — قد يكون تحديث مؤجّل معلّقًا (تأجيل الكتابة لمنع
         # البطء)؛ ننفّذه قبل النسخ حتى يأخذ المالك أحدث نسخة.
         scheduler = getattr(self, "_zip_scheduler", None)
@@ -9482,9 +9525,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:                    # noqa: BLE001
                 print(f"[delivery_zip] تعذر تفريغ الحزمة قبل الحفظ: {exc}",
                       file=sys.stderr)
-        source = Path(self.current_result.delivery_zip)
         if not source.is_file():
-            QMessageBox.warning(self, APP_NAME, "حزمة النتائج غير موجودة.")
+            QMessageBox.warning(
+                self, APP_NAME,
+                "تعذر إنشاء حزمة النتائج من الصور الجاهزة. تأكد أن مجلد النتائج قابل للكتابة وأن الصور ما زالت موجودة.")
             return
         default_name = f"SmartCatalogVision-Results-{datetime.now().strftime('%Y%m%d-%H%M')}.zip"
         filename, _ = QFileDialog.getSaveFileName(

@@ -1181,13 +1181,18 @@ def install_v2(main_window, data_root: Path) -> None:
             # التصوير فيظن المالك أن العزل ذهب.
             items = [dict_to_item(_na.BatchItemResult, d)
                      for d in items_data]
+            _workspace_text = str(state.get("workspace", "") or "")
+            # الجلسات القديمة لا تحفظ مسار الحزمة، رغم أنها تحتفظ بمسارات
+            # الصور الجاهزة. نعطيها هدفًا ثابتًا داخل مساحة العمل كي يستطيع
+            # زر ZIP إعادة بناء الحزمة والتقرير مباشرة بدل إعلانها مفقودة.
+            _delivery_zip = str(Path(_workspace_text) / "delivery.zip") if _workspace_text else ""
             result = _na.BatchRunResult(
-                workspace=state.get("workspace", ""),
+                workspace=_workspace_text,
                 database_path="",
                 catalog_summary={},
                 items=items,
                 elapsed_ms=0.0,
-                delivery_zip="",
+                delivery_zip=_delivery_zip,
                 report_json="",
                 report_csv="",
             )
