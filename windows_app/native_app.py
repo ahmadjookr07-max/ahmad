@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.23"
+APP_VERSION = "3.4.24"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -3971,15 +3971,24 @@ class MainWindow(QMainWindow):
         self.open_folder_button.clicked.connect(self._open_results_folder)
         delivery_hint = QLabel("راجِع الصور التي تحتاج قرارًا، ثم احفظ الحزمة النهائية")
         delivery_hint.setObjectName("deliveryHint")
+        self.delivery_excel_report_check = QCheckBox("إرفاق قائمة Excel للصور المرتبطة")
+        self.delivery_excel_report_check.setObjectName("deliveryExcelReport")
+        self.delivery_excel_report_check.setToolTip(
+            "يضيف داخل مجلد reports في حزمة ZIP ملف Excel للصور الجاهزة المرتبطة، "
+            "يتضمن رقم الصنف والباركود والوحدة واسم الصورة النهائي.")
+        self.delivery_excel_report_check.setChecked(True)
+        self.delivery_excel_report_check.toggled.connect(self._on_delivery_excel_report_toggled)
         self.save_zip_button = QPushButton("حفظ حزمة النتائج ZIP")
         self.save_zip_button.setObjectName("saveDeliveryButton")
         # 2.9: لا حد أدنى رقمي. الزر يحدد ارتفاعه من نصه وخطه الفعليين، فلا
         # يُقص نصه على شاشة كبيرة ولا يفرض ارتفاعًا زائدًا على شاشة صغيرة.
-        for delivery_btn in (self.save_zip_button, self.open_folder_button):
+        for delivery_btn in (self.save_zip_button, self.open_folder_button,
+                             self.delivery_excel_report_check):
             delivery_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.save_zip_button.clicked.connect(self._save_delivery_zip)
         actions.addWidget(self.open_folder_button)
         actions.addWidget(delivery_hint, 1)
+        actions.addWidget(self.delivery_excel_report_check)
         actions.addWidget(self.save_zip_button)
         layout.addWidget(result_actions)
 
@@ -8766,6 +8775,28 @@ class MainWindow(QMainWindow):
             f"🗑 حُذفت {deleted} صورة من النتائج وحُدّثت حزمة ZIP —"
             " الصور الأصلية لم تُمس")
 
+    def _on_delivery_excel_report_toggled(self, enabled: bool) -> None:
+        """يحدّث الحزمة عند تبديل تقرير Excel، بلا لمس الصور الأصلية."""
+        if self.current_result is not None:
+            self._refresh_delivery_zip()
+        state = "سيُرفق تقرير Excel للصور المرتبطة في حزمة ZIP" if enabled else \
+            "لن يُرفق تقرير Excel في حزمة ZIP التالية"
+        try:
+            self.status_label.setText(state)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _set_delivery_excel_report_path(result: object, path: str) -> None:
+        """يسجل مسار التقرير مع دعم كائنات النتائج المجمدة."""
+        try:
+            setattr(result, "delivery_excel_report", str(path or ""))
+        except Exception:
+            try:
+                object.__setattr__(result, "delivery_excel_report", str(path or ""))
+            except Exception:
+                pass
+
     def _refresh_delivery_zip(self, immediate: bool = False) -> None:
         """يجدّد حزمة التسليم ZIP بلا تجميد الواجهة.
 
@@ -8791,9 +8822,27 @@ class MainWindow(QMainWindow):
             return
 
         workspace = self.current_workspace
+        include_excel = bool(getattr(self, "delivery_excel_report_check", None)
+                             and self.delivery_excel_report_check.isChecked())
+        catalog_index = getattr(self, "v2_catalog_index", None)
 
         def _supplier():
-            return (self.current_result, workspace)
+            # التقرير يُنشأ هنا داخل خيط الحزمة، لا على خيط الواجهة؛ لذلك
+            # تبقى مراجعة الصور والربط سلسة حتى مع مئات الصفوف.
+            active_result = self.current_result
+            if active_result is None:
+                return None
+            if include_excel:
+                try:
+                    from delivery_excel_report import write_delivery_excel_report
+                    path = write_delivery_excel_report(active_result, workspace, catalog_index)
+                    self._set_delivery_excel_report_path(active_result, str(path or ""))
+                except Exception as exc:
+                    print(f"[delivery_excel] تعذر إنشاء التقرير: {exc}", file=sys.stderr)
+                    self._set_delivery_excel_report_path(active_result, "")
+            else:
+                self._set_delivery_excel_report_path(active_result, "")
+            return (active_result, workspace)
 
         scheduler.request(_supplier)
         if immediate:
@@ -8829,6 +8878,20 @@ class MainWindow(QMainWindow):
             return
         original: list[tuple[object, str]] = []
         try:
+            include_excel = bool(getattr(self, "delivery_excel_report_check", None)
+                                 and self.delivery_excel_report_check.isChecked())
+            if include_excel:
+                try:
+                    from delivery_excel_report import write_delivery_excel_report
+                    report = write_delivery_excel_report(
+                        result, self.current_workspace,
+                        getattr(self, "v2_catalog_index", None))
+                    self._set_delivery_excel_report_path(result, str(report or ""))
+                except Exception as exc:
+                    print(f"[delivery_excel] تعذر إنشاء التقرير الاحتياطي: {exc}", file=sys.stderr)
+                    self._set_delivery_excel_report_path(result, "")
+            else:
+                self._set_delivery_excel_report_path(result, "")
             for it in result.items:
                 raw = it.output_path or ""
                 if raw and not Path(raw).is_absolute():
@@ -9501,6 +9564,8 @@ class MainWindow(QMainWindow):
         self.open_link_panel_button.setEnabled(not busy and selected is not None)
         self.open_folder_button.setEnabled(not busy and self.current_workspace is not None)
         self.save_zip_button.setEnabled(not busy and self.current_result is not None)
+        if hasattr(self, "delivery_excel_report_check"):
+            self.delivery_excel_report_check.setEnabled(not busy and self.current_result is not None)
 
     def _selected_can_link(self) -> bool:
         return bool(self._selected_link_targets())
@@ -9553,6 +9618,8 @@ class MainWindow(QMainWindow):
         self.open_link_panel_button.setEnabled(not busy and selected is not None)
         self.open_folder_button.setEnabled(not busy and self.current_workspace is not None)
         self.save_zip_button.setEnabled(not busy and self.current_result is not None)
+        if hasattr(self, "delivery_excel_report_check"):
+            self.delivery_excel_report_check.setEnabled(not busy and self.current_result is not None)
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         interactive_close = bool(event.spontaneous())

@@ -89,11 +89,12 @@ def write_delivery_zip(result: Any, workspace: Path | None = None) -> bool:
                 # بلا ضغط: WebP/JPEG مضغوطة سلفًا فالضغط تكلفة بلا عائد.
                 archive.write(output, f"processed/{output.name}",
                               compress_type=zipfile.ZIP_STORED)
-            for attr in ("report_json", "report_csv"):
+            for attr in ("report_json", "report_csv", "delivery_excel_report"):
                 report = _resolve(getattr(result, attr, ""), workspace)
                 if report is None:
                     continue
-                # التقارير نصية وتنضغط جيدًا، فيُبقى الضغط لها وحدها.
+                # التقارير النصية وExcel تُضغط؛ الصور وحدها تبقى مخزنة
+                # بلا ضغط لأن WebP/JPEG مضغوطة سلفًا.
                 archive.write(report, f"reports/{report.name}",
                               compress_type=zipfile.ZIP_DEFLATED,
                               compresslevel=6)
