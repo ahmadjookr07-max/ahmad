@@ -1088,7 +1088,13 @@ class V2PhotoEditorDialog(QDialog):
         if not path:
             return
         import cv2
-        img = self._composited
+        # لا تحفظ معاينة الظل المصغّرة: عند الصور الكبيرة تُنشأ المعاينة
+        # بسرعة على مقاس محدود ثم تُكبّر للعرض فقط. الحفظ يجب أن يعيد
+        # تركيب المنتج والظل من البكسلات الأصلية حتى لا تلين الكتابات والحواف.
+        img = self.get_result_bgr()
+        if img is None:
+            QMessageBox.warning(self, "خطأ", "تعذر تجهيز الصورة النهائية للحفظ.")
+            return
         ext = Path(path).suffix.lower()
         if ext == ".webp":
             ok, buf = cv2.imencode(".webp", img,
@@ -1815,6 +1821,33 @@ class V2PhotoEditorDialog(QDialog):
         a = rgba[:, :, 3:4].astype(np.float32) / 255.0
         rgb = rgba[:, :, :3].astype(np.float32)
         return np.clip(rgb * a + 255.0 * (1 - a), 0, 255).astype(np.uint8)
+
+    def _render_final_bgr(self) -> np.ndarray | None:
+        """يركّب الصورة النهائية من المصدر الكامل، لا من معاينة الواجهة.
+
+        تقليل الحجم في :meth:`_recompose` مخصص للعرض السريع فقط على الصور
+        الكبيرة. استخدامه للحفظ كان يمرر المنتج عبر ``INTER_AREA`` ثم
+        ``INTER_LINEAR``، فيفقد أدق الطباعة والحواف رغم أن موضع الظل نفسه
+        صحيح. هنا تبقى هندسة الظل وخياراته كما هي، لكن تُحسب مرة واحدة على
+        طبقة المنتج كاملة الدقة وقت الحفظ فقط.
+        """
+        if self._original is None:
+            return None
+        rgba = self._compose_rgba()
+        if self._shadow_opts is not None and self._cutout_applied:
+            from engine_v2.shadow_v2 import apply_shadow
+            import cv2
+            pad = max(1, int(round(rgba.shape[1] * 0.06)))
+            padded = cv2.copyMakeBorder(
+                rgba, 0, pad, pad, pad, cv2.BORDER_CONSTANT,
+                value=(0, 0, 0, 0))
+            rgba = apply_shadow(padded, self._shadow_opts)
+        return self._flatten_white(rgba)
+
+    def get_result_bgr(self) -> np.ndarray | None:
+        """يعيد BGR النهائي بالحجم والدقة الفعليين للحفظ المباشر."""
+        final = self._render_final_bgr()
+        return None if final is None else final.copy()
 
     def _recompose(self, fit: bool = False) -> None:
         if self._original is None:

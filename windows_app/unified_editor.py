@@ -854,10 +854,8 @@ class UnifiedEditorWidget(V2PhotoEditorDialog):
         return False
 
     def get_result_bgr(self) -> "np.ndarray | None":
-        """الناتج النهائي BGR (خلفية بيضاء مسطحة) للحفظ المباشر."""
-        if self._composited is None and self._original is not None:
-            self._recompose()
-        return None if self._composited is None else self._composited.copy()
+        """الناتج النهائي للحفظ بدقة المصدر، لا معاينة الظل السريعة."""
+        return super().get_result_bgr()
 
     # تجاوز إغلاق الحوار الموروث — الودجت المدمج لا يُغلق بـ ESC
     def reject(self) -> None:  # noqa: D102

@@ -225,7 +225,7 @@ _lazy_engine.register_perspective_patch(_install_perspective_patch)
 
 
 APP_NAME = "Ahmed Al-Faifi Market Image Studio"
-APP_VERSION = "3.4.22"
+APP_VERSION = "3.4.23"
 COPYRIGHT = "حقوق النشر © 2026 احمد الفيفي"
 DATA_ROOT = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Documents" / "SmartCatalogVision"
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
@@ -2809,11 +2809,14 @@ class MainWindow(QMainWindow):
         self.enhancement_strength_slider.setRange(0, 100)
         self.enhancement_strength_slider.setSingleStep(5)
         self.enhancement_strength_slider.setPageStep(10)
-        self.enhancement_strength_slider.setValue(55)
-        self.enhancement_strength_slider.setToolTip("حرّك الشريط لاختيار مقدار التحسين؛ 55% قيمة متوازنة وآمنة")
+        # 3.4.23: صور الربط ممتازة لكن 55% أعطت قساوة طفيفة على بعض
+        # تفاصيل العبوات. 50% تخفيض محافظ بمقدار خطوة واحدة فقط؛ ويظل
+        # للمستخدم المجال الكامل حتى 100% عند الحاجة.
+        self.enhancement_strength_slider.setValue(50)
+        self.enhancement_strength_slider.setToolTip("حرّك الشريط لاختيار مقدار التحسين؛ 50% قيمة متوازنة وناعمة")
         self.enhancement_strength_slider.valueChanged.connect(self._update_enhancement_strength_label)
         self.enhancement_strength_slider.sliderReleased.connect(self._mark_enhancement_custom)
-        self.enhancement_strength_value = QLabel("55%")
+        self.enhancement_strength_value = QLabel("50%")
         self.enhancement_strength_value.setObjectName("strengthValue")
         self.enhancement_strength_value.setMinimumWidth(42)
         self.enhancement_strength_value.setAlignment(Qt.AlignCenter)
@@ -2978,7 +2981,7 @@ class MainWindow(QMainWindow):
     def _apply_enhancement_preset(self, _index: int) -> None:
         preset = self.enhancement_preset_combo.currentData()
         values = {
-            "balanced": (55, True, True, True, True, True),
+            "balanced": (50, True, True, True, True, True),
             "label_safe": (35, True, False, True, True, False),
             "vivid": (78, True, True, True, True, True),
         }.get(preset)
